@@ -17,6 +17,7 @@ from .gsfu import (
     gsfDataID,
     gsf_checksum,
     main,
+    resolve_record_type,
 )
 
 __all__ = [
@@ -38,4 +39,5 @@ __all__ = [
     "gsfDataID",
     "gsf_checksum",
     "main",
+    "resolve_record_type",
 ]

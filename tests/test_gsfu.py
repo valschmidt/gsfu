@@ -31,9 +31,14 @@ from GSFU.gsfu import (
     GSFUnrecognizedRecordIDError,
     NUM_REC_TYPES,
     RecordType,
+    _SENSOR_SPECIFIC_SUBRECORD_NAMES,
+    _decode_brb_intensity,
+    _decode_name_value_parameters,
+    _decode_swath_bathymetry_ping,
     gsf,
     gsf_checksum,
     main,
+    resolve_record_type,
 )
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "GSF"
@@ -182,6 +187,38 @@ class TestGsfChecksum:
         data = bytes([0xFF]) * ((1 << 32) // 0xFF + 1)
         expected = sum(data) % (1 << 32)
         assert gsf_checksum(data) == expected
+
+
+# ---------------------------------------------------------------------------
+# resolve_record_type()
+# ---------------------------------------------------------------------------
+
+class TestResolveRecordType:
+    def test_none_passes_through(self):
+        assert resolve_record_type(None) is None
+
+    def test_record_type_passes_through(self):
+        assert resolve_record_type(RecordType.GSF_RECORD_COMMENT) == RecordType.GSF_RECORD_COMMENT
+
+    def test_int_resolves_to_record_type(self):
+        assert resolve_record_type(int(RecordType.GSF_RECORD_COMMENT)) == RecordType.GSF_RECORD_COMMENT
+
+    def test_short_name_resolves_without_prefix(self):
+        assert resolve_record_type("COMMENT") == RecordType.GSF_RECORD_COMMENT
+
+    def test_short_name_is_case_insensitive(self):
+        assert resolve_record_type("comment") == RecordType.GSF_RECORD_COMMENT
+        assert resolve_record_type("Comment") == RecordType.GSF_RECORD_COMMENT
+
+    def test_full_name_still_accepted(self):
+        assert resolve_record_type("GSF_RECORD_COMMENT") == RecordType.GSF_RECORD_COMMENT
+
+    def test_unknown_name_raises_with_valid_names_listed(self):
+        with pytest.raises(ValueError) as excinfo:
+            resolve_record_type("BOGUS")
+        assert "Unknown record type: BOGUS" in str(excinfo.value)
+        for rt in RecordType:
+            assert rt.name in str(excinfo.value)
 
 
 # ---------------------------------------------------------------------------
@@ -350,6 +387,504 @@ class TestIndexFileSynthetic:
 
 
 # ---------------------------------------------------------------------------
+# print_records() -- ASCII debug dump
+# ---------------------------------------------------------------------------
+
+class TestPrintRecordsSynthetic:
+    def test_prints_every_record_by_default(self, tmp_path, capsys):
+        records = [_header_record(), _comment_record(b"aaaaaaaaaa"), _comment_record(b"bbbbbbbbbbbb")]
+        path = tmp_path / "synthetic.gsf"
+        _write_records(path, records)
+
+        G = gsf(str(path))
+        G.print_records()
+
+        captured = capsys.readouterr()
+        assert captured.out.count("=== GSF_RECORD_HEADER") == 1
+        assert captured.out.count("=== GSF_RECORD_COMMENT") == 2
+
+    def test_decoded_comment_prints_key_value_pairs(self, tmp_path, capsys):
+        text = b"hello world!"
+        payload = struct.pack('>3I', 1700000000, 0, len(text)) + text
+        records = [_header_record(), _pack_record(RecordType.GSF_RECORD_COMMENT, payload)]
+        path = tmp_path / "synthetic.gsf"
+        _write_records(path, records)
+
+        G = gsf(str(path))
+        G.print_records(record_type=RecordType.GSF_RECORD_COMMENT)
+
+        captured = capsys.readouterr()
+        assert "CommentTime" in captured.out
+        assert "Comment" in captured.out
+        assert "hello world!" in captured.out
+
+    def test_undecodable_payload_falls_back_to_raw_text(self, tmp_path, capsys):
+        # A COMMENT record too short to hold its own time+length fields
+        # (needs 12 bytes minimum, but must still clear the top-level
+        # framing's own >8-byte minimum) triggers the decode-failure fallback.
+        text = b"1234567890"  # 10 bytes: > 8 (framing minimum), < 12 (decoder minimum)
+        records = [_header_record(), _pack_record(RecordType.GSF_RECORD_COMMENT, text)]
+        path = tmp_path / "synthetic.gsf"
+        _write_records(path, records)
+
+        G = gsf(str(path))
+        G.print_records(record_type=RecordType.GSF_RECORD_COMMENT)
+
+        captured = capsys.readouterr()
+        assert "decode failed" in captured.out
+        assert text.decode("ascii") in captured.out
+
+    def test_non_printable_bytes_rendered_as_dots(self, tmp_path, capsys):
+        payload = bytes([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])  # all non-printable, len > 8
+        records = [_header_record(), _pack_record(RecordType.GSF_RECORD_COMMENT, payload)]
+        path = tmp_path / "synthetic.gsf"
+        _write_records(path, records)
+
+        G = gsf(str(path))
+        G.print_records(record_type=RecordType.GSF_RECORD_COMMENT)
+
+        captured = capsys.readouterr()
+        assert "." * len(payload) in captured.out
+
+    def test_filters_to_requested_record_type_only(self, tmp_path, capsys):
+        records = [_header_record(), _comment_record(b"aaaaaaaaaa")]
+        path = tmp_path / "synthetic.gsf"
+        _write_records(path, records)
+
+        G = gsf(str(path))
+        G.print_records(record_type=RecordType.GSF_RECORD_COMMENT)
+
+        captured = capsys.readouterr()
+        assert "GSF_RECORD_HEADER" not in captured.out
+        assert "GSF_RECORD_COMMENT" in captured.out
+
+    def test_checksummed_record_payload_printed_without_checksum_bytes(self, tmp_path, capsys):
+        payload = b"checksum me"
+        records = [
+            _header_record(),
+            _pack_record(RecordType.GSF_RECORD_COMMENT, payload, checksum_flag=True),
+        ]
+        path = tmp_path / "synthetic.gsf"
+        _write_records(path, records)
+
+        G = gsf(str(path))
+        G.print_records(record_type=RecordType.GSF_RECORD_COMMENT)
+
+        captured = capsys.readouterr()
+        assert payload.decode("ascii") in captured.out
+
+
+@requires_sample_data
+class TestPrintRecordsRealData:
+    def test_header_record_prints_gsf_version_string(self, capsys):
+        G = gsf(str(SMALL_SAMPLE))
+        G.print_records(record_type=RecordType.GSF_RECORD_HEADER)
+
+        captured = capsys.readouterr()
+        assert "GSF-v" in captured.out
+
+    def test_no_filter_covers_every_indexed_record(self, capsys):
+        G = gsf(str(SMALL_SAMPLE))
+        G.index_file()
+        expected_counts = G.Index['RecordType'].value_counts().to_dict()
+
+        G2 = gsf(str(SMALL_SAMPLE))
+        G2.print_records()
+        captured = capsys.readouterr()
+
+        for record_type, count in expected_counts.items():
+            assert captured.out.count("=== %s " % record_type) == count
+
+    @pytest.mark.parametrize("rt", list(RecordType), ids=lambda rt: rt.name)
+    def test_every_record_type_decodes_without_falling_back(self, rt, capsys):
+        # Every GSF_RECORD_* type has a field-level decoder (see
+        # _decode_record); none of them should hit the "decode failed"
+        # exception fallback against real, well-formed data. Types absent
+        # from this particular sample file simply produce no output.
+        G = gsf(str(SMALL_SAMPLE))
+        G.print_records(record_type=rt)
+
+        captured = capsys.readouterr()
+        assert "decode failed" not in captured.out
+
+    def test_swath_bathymetry_ping_table_has_expected_columns(self, capsys):
+        G = gsf(str(SMALL_SAMPLE))
+        G.print_records(record_type=RecordType.GSF_RECORD_SWATH_BATHYMETRY_PING)
+
+        captured = capsys.readouterr()
+        for column in ('Depth_m', 'AcrossTrack_m', 'AlongTrack_m', 'TravelTime_s', 'BeamAngle_deg'):
+            assert column in captured.out
+        assert 'PingTime' in captured.out
+        assert 'NumberBeams' in captured.out
+
+    def test_processing_parameters_have_no_embedded_nul_bytes(self, capsys):
+        G = gsf(str(SMALL_SAMPLE))
+        G.print_records(record_type=RecordType.GSF_RECORD_PROCESSING_PARAMETERS)
+
+        captured = capsys.readouterr()
+        assert "PLATFORM_TYPE" in captured.out
+        assert '\x00' not in captured.out
+
+    def test_kmall_specific_prints_expected_sections(self, capsys):
+        G = gsf(str(SMALL_SAMPLE))
+        G.print_records(record_type=RecordType.GSF_RECORD_SWATH_BATHYMETRY_PING)
+
+        captured = capsys.readouterr()
+        assert "decode failed" not in captured.out
+        assert "KMALL.EchoSounderID" in captured.out
+        assert "-- TxSectors --" in captured.out
+        assert "IntensityTimeSeries (21," in captured.out  # noted, not decoded via -p
+
+    @pytest.mark.parametrize("path", SAMPLE_FILES, ids=lambda p: p.name)
+    def test_kmall_specific_decodes_every_ping_without_error(self, path):
+        # These sample files are all EM712 (KMALL_SPECIFIC, subrecord id
+        # 156); every ping should decode its vendor-specific subrecord
+        # cleanly, matching a real echo sounder id and a TxSectors table
+        # with exactly NumTxSectors rows. Decodes directly (bypassing
+        # print_records()'s table rendering) to keep this fast across all
+        # sample files, including the largest ones.
+        G = gsf(str(path))
+        G.index_file()
+
+        ping_offsets = G.Index.loc[
+            G.Index['RecordType'] == 'GSF_RECORD_SWATH_BATHYMETRY_PING', 'ByteOffset']
+
+        scale_factors = {}
+        for offset in ping_offsets:
+            G.FID.seek(int(offset))
+            dataSize, _readSize, data_id = G.read_record_header()
+            if data_id.checksumFlag:
+                G.FID.seek(4, 1)
+            payload = G.FID.read(dataSize)
+
+            scalars, tables, notes = _decode_swath_bathymetry_ping(
+                payload, major_version=3, scale_factors=scale_factors)
+
+            assert all("IntensityTimeSeries" in n for n in notes)
+            assert scalars['KMALL.EchoSounderID'] == 712
+            assert len(tables['TxSectors']) == scalars['KMALL.NumTxSectors']
+
+    def test_kmall_specific_num_tx_sectors_matches_tx_sectors_table_rows(self):
+        G = gsf(str(SMALL_SAMPLE))
+        G.index_file()
+        G.OpenFiletoRead()
+        first_ping_offset = int(
+            G.Index.loc[G.Index['RecordType'] == 'GSF_RECORD_SWATH_BATHYMETRY_PING', 'ByteOffset'].iloc[0])
+
+        G.FID.seek(first_ping_offset)
+        dataSize, _readSize, data_id = G.read_record_header()
+        payload = G.FID.read(dataSize)
+
+        scalars, tables, notes = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
+
+        assert all("IntensityTimeSeries" in n for n in notes)
+        assert scalars['KMALL.EchoSounderID'] == 712
+        assert len(tables['TxSectors']) == scalars['KMALL.NumTxSectors']
+
+
+class TestDecodeSwathBathymetryPingSynthetic:
+    """
+    Whitebox tests for _decode_swath_bathymetry_ping() against a hand-built
+    payload (fixed header + a scale factors subrecord + one beam array
+    subrecord), independent of any real file, to pin down the scale/offset
+    arithmetic and subrecord framing exactly.
+    """
+
+    @staticmethod
+    def _fixed_header(number_beams):
+        # major_version=2 fixed-header layout (42 bytes; skips the
+        # height/SEP/GPS-tide-corrector extension used at major_version>2).
+        return struct.pack(
+            '>2I2i4HhiH3h2H',
+            1700000000, 0,       # ping_time sec, nsec
+            -1571234567,          # longitude raw (-157.1234567 deg)
+            187654321,             # latitude raw (18.7654321 deg)
+            number_beams, number_beams // 2, 0, 0,  # number_beams, center_beam, ping_flags, reserved
+            -50,                  # tide_corrector raw (-0.50 m)
+            244,                   # depth_corrector raw (2.44 m)
+            35872,                 # heading raw (358.72 deg)
+            -358, -411, 55,        # pitch, roll, heave raw
+            0, 0,                  # course, speed raw
+        )
+
+    @staticmethod
+    def _scale_factors_subrecord(entries):
+        # entries: dict subrecordID -> (multiplier, offset)
+        body = struct.pack('>I', len(entries))
+        for subrecord_id, (multiplier, offset) in entries.items():
+            body += struct.pack('>I', (subrecord_id & 0xFF) << 24)
+            body += struct.pack('>I', int(multiplier))
+            body += struct.pack('>i', int(offset))
+        word = (100 << 24) | len(body)
+        return struct.pack('>I', word) + body
+
+    @staticmethod
+    def _array_subrecord(subrecord_id, values, fmt):
+        body = b"".join(struct.pack(fmt, v) for v in values)
+        word = ((subrecord_id & 0xFF) << 24) | len(body)
+        return struct.pack('>I', word) + body
+
+    def test_fixed_header_scalars(self):
+        payload = self._fixed_header(3) + self._scale_factors_subrecord({1: (100.0, 0)}) \
+            + self._array_subrecord(1, [1000, 1050, 995], '>H')
+
+        scalars, beams, notes = _decode_swath_bathymetry_ping(payload, major_version=2, scale_factors={})
+
+        assert scalars['NumberBeams'] == 3
+        assert scalars['CenterBeam'] == 1
+        assert scalars['TideCorrector_m'] == pytest.approx(-0.50)
+        assert scalars['DepthCorrector_m'] == pytest.approx(2.44)
+        assert scalars['Heading_deg'] == pytest.approx(358.72)
+        assert scalars['Pitch_deg'] == pytest.approx(-3.58)
+        assert scalars['Roll_deg'] == pytest.approx(-4.11)
+        assert scalars['Heave_m'] == pytest.approx(0.55)
+        assert scalars['Longitude_deg'] == pytest.approx(-157.1234567)
+        assert scalars['Latitude_deg'] == pytest.approx(18.7654321)
+        assert notes == []
+
+    def test_depth_array_decoded_with_scale_and_offset(self):
+        payload = self._fixed_header(3) + self._scale_factors_subrecord({1: (100.0, 0)}) \
+            + self._array_subrecord(1, [1000, 1050, 995], '>H')
+
+        _scalars, tables, _notes = _decode_swath_bathymetry_ping(payload, major_version=2, scale_factors={})
+        beams = tables['Beams']
+
+        assert list(beams['Depth_m']) == pytest.approx([10.0, 10.5, 9.95])
+        assert beams.index.name == 'Beam'
+        assert list(beams.index) == [0, 1, 2]
+
+    def test_signed_array_and_nonzero_offset_applied(self):
+        # across_track (id 2) is signed; multiplier=10, offset=5 =>
+        # value = raw/10 - 5. raw=-30 -> -8.0; raw=100 -> 5.0.
+        payload = self._fixed_header(2) + self._scale_factors_subrecord({2: (10.0, 5)}) \
+            + self._array_subrecord(2, [-30, 100], '>h')
+
+        _scalars, tables, notes = _decode_swath_bathymetry_ping(payload, major_version=2, scale_factors={})
+
+        assert list(tables['Beams']['AcrossTrack_m']) == pytest.approx([-8.0, 5.0])
+        assert notes == []
+
+    def test_missing_scale_factors_reported_as_note_not_crash(self):
+        # A DEPTH_ARRAY subrecord with no preceding SCALE_FACTORS (and none
+        # cached from an earlier ping) can't be scaled; it should be
+        # reported via `notes`, not raise or silently fabricate a column.
+        payload = self._fixed_header(2) + self._array_subrecord(1, [100, 200], '>H')
+
+        scalars, tables, notes = _decode_swath_bathymetry_ping(payload, major_version=2, scale_factors={})
+
+        assert 'Beams' not in tables
+        assert len(notes) == 1
+        assert "no scale factors available" in notes[0]
+
+    def test_unrecognized_subrecord_reported_as_note(self):
+        # A subrecord id with no entry in _PING_ARRAY_SUBRECORDS, no known
+        # vendor "_SPECIFIC" name, and not SCALE_FACTORS/BEAM_FLAGS/
+        # INTENSITY_SERIES -- id 154 is unused/reserved in gsf.h, so it can
+        # never collide with a real subrecord -- is skipped and reported by
+        # bare numeric id, not decoded.
+        payload = self._fixed_header(1) + self._array_subrecord(154, [0, 1, 2, 3], '>B')
+
+        _scalars, tables, notes = _decode_swath_bathymetry_ping(payload, major_version=2, scale_factors={})
+
+        assert 'Beams' not in tables
+        assert len(notes) == 1
+        assert "subrecord id 154 (4 bytes) not decoded" in notes[0]
+
+    def test_known_vendor_specific_subrecord_reported_by_name(self):
+        # A vendor "_SPECIFIC" subrecord with no field-level decoder here
+        # (id 133 = EM710_SPECIFIC) is still reported by its proper name,
+        # not a bare numeric id.
+        payload = self._fixed_header(1) + self._array_subrecord(133, [0, 1, 2, 3], '>B')
+
+        _scalars, tables, notes = _decode_swath_bathymetry_ping(payload, major_version=2, scale_factors={})
+
+        assert 'Beams' not in tables
+        assert len(notes) == 1
+        assert "EM710_SPECIFIC (133, 4 bytes) not decoded" in notes[0]
+
+    def test_scale_factors_persist_across_calls_via_shared_cache(self):
+        # Mirrors gsflib's behavior: a ping need not repeat scale factors
+        # that haven't changed since an earlier ping in the same file: the
+        # caller-supplied `scale_factors` dict carries them forward.
+        shared_cache = {}
+        first_ping = self._fixed_header(2) + self._scale_factors_subrecord({1: (100.0, 0)}) \
+            + self._array_subrecord(1, [1000, 1050], '>H')
+        _decode_swath_bathymetry_ping(first_ping, major_version=2, scale_factors=shared_cache)
+
+        second_ping = self._fixed_header(2) + self._array_subrecord(1, [2000, 500], '>H')
+        _scalars, tables, notes = _decode_swath_bathymetry_ping(
+            second_ping, major_version=2, scale_factors=shared_cache)
+
+        assert notes == []
+        assert list(tables['Beams']['Depth_m']) == pytest.approx([20.0, 5.0])
+
+
+class TestDecodeNameValueParametersSynthetic:
+    """
+    Whitebox tests for _decode_name_value_parameters() (used for both
+    GSF_RECORD_PROCESSING_PARAMETERS and GSF_RECORD_SENSOR_PARAMETERS).
+    """
+
+    @staticmethod
+    def _payload(param_strings):
+        # param_time (8 bytes) + number_parameters (2 bytes) + per-param:
+        # size (2 bytes, signed) + that many bytes of text.
+        body = struct.pack('>2I', 1700000000, 0) + struct.pack('>H', len(param_strings))
+        for text in param_strings:
+            encoded = text.encode('ascii')
+            body += struct.pack('>h', len(encoded)) + encoded
+        return body
+
+    def test_plain_name_value_pair(self):
+        payload = self._payload([b"PLATFORM_TYPE=SURFACE_SHIP".decode()])
+        scalars, _tables, _notes = _decode_name_value_parameters(payload)
+        assert scalars['PLATFORM_TYPE'] == 'SURFACE_SHIP'
+
+    def test_trailing_nul_byte_stripped_from_value(self):
+        # Some encoders count a trailing C-string NUL terminator as part of
+        # a parameter's size; it must not appear in the decoded value.
+        payload = self._payload(["ROLL_COMPENSATED=NO \x00"])
+        scalars, _tables, _notes = _decode_name_value_parameters(payload)
+        assert scalars['ROLL_COMPENSATED'] == 'NO '
+        assert '\x00' not in scalars['ROLL_COMPENSATED']
+
+    def test_trailing_space_before_nul_is_preserved(self):
+        # Only the NUL is stripped -- padding the encoder itself wrote
+        # (e.g. a trailing space) is left alone.
+        payload = self._payload(["HEAVE_COMPENSATED=YES\x00"])
+        scalars, _tables, _notes = _decode_name_value_parameters(payload)
+        assert scalars['HEAVE_COMPENSATED'] == 'YES'
+
+    def test_parameter_without_equals_sign_keyed_by_full_text(self):
+        payload = self._payload(["FREEFORM_NOTE\x00"])
+        scalars, _tables, _notes = _decode_name_value_parameters(payload)
+        assert scalars['FREEFORM_NOTE'] == ''
+
+
+class TestSensorSpecificSubrecordNames:
+    def test_kmall_specific_named(self):
+        assert _SENSOR_SPECIFIC_SUBRECORD_NAMES[156] == "KMALL_SPECIFIC"
+
+    def test_em710_specific_named(self):
+        assert _SENSOR_SPECIFIC_SUBRECORD_NAMES[133] == "EM710_SPECIFIC"
+
+    def test_id_154_is_absent(self):
+        # gsf.h has no GSF_SWATH_BATHY_SUBRECORD_* define for 154 (a gap
+        # between R2SONIC_2020_SPECIFIC=153 and RESON_TSERIES_SPECIFIC=155).
+        assert 154 not in _SENSOR_SPECIFIC_SUBRECORD_NAMES
+
+    def test_covers_ids_102_through_157_except_154(self):
+        expected = set(range(102, 158)) - {154}
+        assert set(_SENSOR_SPECIFIC_SUBRECORD_NAMES) == expected
+
+
+class TestDecodeBRBIntensitySynthetic:
+    """
+    Whitebox tests for _decode_brb_intensity() -- the per-beam backscatter
+    time series decoder -- built around a hand-crafted KMALL-sensor payload
+    (the only sensor-imagery format currently decoded).
+    """
+
+    #: gsf_dec.c's DecodeBRBIntensity() header: bits_per_sample(1) +
+    #: applied_corrections(4) + spare(16) = 21 bytes, followed here by
+    #: DecodeKMALLImagerySpecific()'s fixed 64 spare bytes.
+    _KMALL_PREAMBLE_SIZE = 21 + 64
+
+    @staticmethod
+    def _preamble(bits_per_sample, applied_corrections=0):
+        return struct.pack('>B', bits_per_sample) + struct.pack('>I', applied_corrections) \
+            + b"\x00" * 16 + b"\x00" * 64
+
+    @staticmethod
+    def _beam(sample_count, detect_sample, start_range_samples, samples, fmt):
+        header = struct.pack('>3H', sample_count, detect_sample, start_range_samples) + b"\x00" * 6
+        return header + b"".join(struct.pack(fmt, v) for v in samples)
+
+    def test_unsupported_sensor_id_returns_none(self):
+        payload = self._preamble(8) + self._beam(1, 0, 0, [42], '>B')
+        assert _decode_brb_intensity(payload, 0, num_beams=1, sensor_id=999) is None
+
+    def test_zero_beams_returns_none(self):
+        payload = self._preamble(8)
+        assert _decode_brb_intensity(payload, 0, num_beams=0, sensor_id=156) is None
+
+    def test_8_bit_samples_decoded_per_beam(self):
+        payload = self._preamble(8) \
+            + self._beam(3, 1, 100, [10, 20, 30], '>B') \
+            + self._beam(2, 0, 50, [200, 201], '>B')
+
+        header, beam_rows, consumed = _decode_brb_intensity(payload, 0, num_beams=2, sensor_id=156)
+
+        assert header['BitsPerSample'] == 8
+        assert len(beam_rows) == 2
+        assert beam_rows[0] == {
+            'SampleCount': 3, 'DetectSample': 1, 'StartRangeSamples': 100, 'Samples': [10, 20, 30]}
+        assert beam_rows[1] == {
+            'SampleCount': 2, 'DetectSample': 0, 'StartRangeSamples': 50, 'Samples': [200, 201]}
+        assert consumed == len(payload)
+
+    def test_16_bit_samples_decoded_per_beam(self):
+        payload = self._preamble(16) + self._beam(2, 5, 10, [1000, 65000], '>H')
+
+        _header, beam_rows, consumed = _decode_brb_intensity(payload, 0, num_beams=1, sensor_id=156)
+
+        assert beam_rows[0]['Samples'] == [1000, 65000]
+        assert consumed == len(payload)
+
+    def test_12_bit_packed_samples_decoded(self):
+        # Two 12-bit samples pack into 3 bytes: sample1 = (b0<<4)|(b1>>4),
+        # sample2 = ((b1&0x0F)<<8)|b2. Choose sample1=0xABC, sample2=0x123:
+        # b0 = 0xAB, b1 = (0xC<<4)|(0x1) = 0xC1, b2 = 0x23.
+        packed = bytes([0xAB, 0xC1, 0x23])
+        payload = self._preamble(12) \
+            + struct.pack('>3H', 2, 0, 0) + b"\x00" * 6 + packed
+
+        _header, beam_rows, consumed = _decode_brb_intensity(payload, 0, num_beams=1, sensor_id=156)
+
+        assert beam_rows[0]['Samples'] == [0xABC, 0x123]
+        assert consumed == len(payload)
+
+    def test_12_bit_odd_sample_count_drops_trailing_half_sample(self):
+        # sample_count=1 with 12-bit packing: only the first sample of the
+        # pair is emitted (mirrors gsf_dec.c's "if (j+1 < sample_count)" guard).
+        packed = bytes([0xAB, 0xC0, 0x00])  # sample1 = 0xABC; sample2 unused
+        payload = self._preamble(12) \
+            + struct.pack('>3H', 1, 0, 0) + b"\x00" * 6 + packed
+
+        _header, beam_rows, _consumed = _decode_brb_intensity(payload, 0, num_beams=1, sensor_id=156)
+
+        assert beam_rows[0]['Samples'] == [0xABC]
+
+
+@requires_sample_data
+class TestPrintIntensitySeriesRealData:
+    def test_runs_without_error_and_prints_csv_rows(self, capsys):
+        G = gsf(str(SMALL_SAMPLE))
+        G.print_intensity_series()
+
+        captured = capsys.readouterr()
+        assert "decode failed" not in captured.out
+        assert captured.out.count("# ping offset=") > 0
+        # At least one beam row was printed with a sample count that
+        # matches the number of trailing sample values in that same row.
+        data_lines = [line for line in captured.out.splitlines() if line and not line.startswith("#")]
+        assert data_lines
+        beam, sample_count, detect_sample, start_range, *samples = data_lines[0].split(",")
+        assert int(sample_count) == len(samples)
+
+    def test_every_sample_row_matches_its_declared_sample_count(self, capsys):
+        G = gsf(str(SMALL_SAMPLE))
+        G.print_intensity_series()
+
+        captured = capsys.readouterr()
+        for line in captured.out.splitlines():
+            if not line or line.startswith("#"):
+                continue
+            _beam, sample_count, _detect, _start, *samples = line.split(",")
+            assert int(sample_count) == len(samples)
+
+
+# ---------------------------------------------------------------------------
 # Real-file tests
 # ---------------------------------------------------------------------------
 
@@ -434,3 +969,52 @@ class TestCLI:
 
         assert rc == 1
         assert "usage" in captured.out.lower()
+
+    def test_dash_p_with_no_value_prints_every_record(self, capsys):
+        rc = main(['-f', str(SMALL_SAMPLE), '-p'])
+        captured = capsys.readouterr()
+
+        assert rc == 0
+        assert "=== GSF_RECORD_HEADER" in captured.out
+        assert "=== GSF_RECORD_ATTITUDE" in captured.out
+
+    def test_dash_p_with_short_type_name_filters_output(self, capsys):
+        rc = main(['-f', str(SMALL_SAMPLE), '-p', 'HEADER'])
+        captured = capsys.readouterr()
+
+        assert rc == 0
+        assert "=== GSF_RECORD_HEADER" in captured.out
+        assert "=== GSF_RECORD_ATTITUDE" not in captured.out
+
+    def test_dash_p_with_full_type_name_filters_output(self, capsys):
+        rc = main(['-f', str(SMALL_SAMPLE), '-p', 'GSF_RECORD_HEADER'])
+        captured = capsys.readouterr()
+
+        assert rc == 0
+        assert "=== GSF_RECORD_HEADER" in captured.out
+        assert "=== GSF_RECORD_ATTITUDE" not in captured.out
+
+    def test_dash_p_with_unknown_type_name_errors(self, capsys):
+        rc = main(['-f', str(SMALL_SAMPLE), '-p', 'BOGUS'])
+        captured = capsys.readouterr()
+
+        assert rc == 1
+        assert "Unknown record type" in captured.out
+        assert "GSF_RECORD_HEADER" in captured.out  # listed among valid types
+
+    def test_dash_I_prints_intensity_csv(self, capsys):
+        rc = main(['-f', str(SMALL_SAMPLE), '-I'])
+        captured = capsys.readouterr()
+
+        assert rc == 0
+        assert "# ping offset=" in captured.out
+        data_lines = [line for line in captured.out.splitlines() if line and not line.startswith("#")]
+        assert data_lines
+
+    def test_help_lists_every_record_type(self, capsys):
+        with pytest.raises(SystemExit):
+            main(['-h'])
+        captured = capsys.readouterr()
+
+        for rt in RecordType:
+            assert rt.name.replace('GSF_RECORD_', '') in captured.out

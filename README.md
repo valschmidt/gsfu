@@ -7,18 +7,36 @@ contains (count and bytes consumed by each) -- more functionality (reading
 and writing individual records) is planned.
 
     ./GSFU/gsfu.py -h
-    usage: gsfu.py [-h] [-f GSF_FILENAME] [-V] [-v]
+    usage: gsfu.py [-h] [-f GSF_FILENAME] [-V] [-p [RECORDTYPE]] [-v]
 
-    A python script (and class) for indexing, reading, and writing Generic
-    Sensor Format (GSF) data files.
+    A python script (and class) for indexing, reading, and writing Generic Sensor
+    Format (GSF) data files.
 
     options:
-      -h, --help        show this help message and exit
-      -f GSF_FILENAME    The path and filename to parse.
-      -V                 Index the file and print a summary of its record types
-                         (count and bytes consumed by each).
-      -v                 Increasingly verbose output (e.g. -v -vv), for
-                         debugging use -vv
+      -h, --help       show this help message and exit
+      -f GSF_FILENAME  The path and filename to parse.
+      -V               Index the file and print a summary of its record types
+                       (count and bytes consumed by each).
+      -p [RECORDTYPE]  Print records to stdout as ASCII text, for debugging. With
+                       no value, prints every record; optionally restrict to one
+                       record type, e.g. -p COMMENT or -p GSF_RECORD_COMMENT.
+      -v               Increasingly verbose output (e.g. -v -vv), for debugging
+                       use -vv
+
+    record types (short or full name accepted for -p, e.g. -p COMMENT):
+
+      HEADER                  GSF header record. Identifies the GSF version used to create the file.
+      SWATH_BATHYMETRY_PING   Data structure for a ping from a swath bathymetric system.
+      SOUND_VELOCITY_PROFILE  Sound velocity profile record.
+      PROCESSING_PARAMETERS   Internal record structure for processing parameters.
+      SENSOR_PARAMETERS       Sensor parameters record.
+      COMMENT                 Comment record.
+      HISTORY                 History record.
+      NAVIGATION_ERROR        Navigation error record. (Obsolete; replaced by GSF_RECORD_HV_NAVIGATION_ERROR.)
+      SWATH_BATHY_SUMMARY     Swath bathymetry summary record.
+      SINGLE_BEAM_PING        Single beam ping record.
+      HV_NAVIGATION_ERROR     Horizontal/Vertical navigation error record. Replaces GSF_RECORD_NAVIGATION_ERROR. (The HV stands for Horizontal and Vertical.)
+      ATTITUDE                Attitude record: one or more time-tagged pitch/roll/heave/heading measurements.
 
 ## Why a pure-Python implementation
 
@@ -80,6 +98,66 @@ GSF_RECORD_SOUND_VELOCITY_PROFILE      1         3972       3972       3972     
 GSF_RECORD_PROCESSING_PARAMETERS       1         2236       2236       2236       0.31
 GSF_RECORD_HEADER                      1           20         20         20       0.00
 ```
+
+`-p` decodes and prints records to stdout for debugging: scalar fields as
+`key : value` pairs, and any per-beam/per-point/per-measurement data (a
+ping's beam arrays, an SVP's depth/sound-speed pairs, an attitude record's
+measurements) as a table, one row per beam/point/measurement:
+
+```
+$ gsfu.py -f data/GSF/0268_20240826_052757_EM712.gsf -p SWATH_BATHYMETRY_PING
+=== GSF_RECORD_SWATH_BATHYMETRY_PING  offset=304484  size=25664 ===
+  PingTime           : 2024-08-26T05:27:53.719285+00:00
+  Longitude_deg      : -169.059375
+  Latitude_deg       : -14.2062916
+  NumberBeams        : 400
+  ...
+  # subrecord id 156 (456 bytes) not decoded
+  # subrecord id 21 (13291 bytes) not decoded
+       Depth_m  AcrossTrack_m  AlongTrack_m  TravelTime_s  BeamAngle_deg  ...
+Beam
+0     1014.072       -1150.11         62.35       2.04725         -75.85  ...
+1     1013.272       -1142.42         61.84       2.03877         -75.65  ...
+```
+
+Every `GSF_RECORD_*` type has a decoder. Within a ping's subrecord stream,
+every vendor sensor-specific subrecord is at least identified by its proper
+name (`KMALL_SPECIFIC`, `EM710_SPECIFIC`, `RESON_8101_SPECIFIC`, ... all ~30
+of gsf.h's `GSF_SWATH_BATHY_SUBRECORD_*_SPECIFIC` ids), and the KMALL format
+(Kongsberg SIS 5 / EM2040-and-newer -- id 156, shown as `KMALL.*` scalars and
+a `TxSectors` table above) is fully field-decoded; the ~29 others are
+reported by name and byte count rather than decoded. gsflib's own optional
+RLE array compression and the 2-bit packed quality-flags array are likewise
+noted rather than decoded. Any record a decoder can't make sense of (corrupt
+data, an unexpected size) falls back to the same raw ASCII rendering
+(non-printable bytes as `.`) used before decoders existed, with a note
+explaining why.
+
+Omit a value to dump every record (`-p`), or pass a short or full record
+type name to restrict output to one type (`-p COMMENT` or
+`-p GSF_RECORD_COMMENT`) -- this works the same way whether called from the
+CLI or via `gsf.print_records(record_type=...)` directly.
+
+### Per-beam backscatter time series (`-I`)
+
+The intensity series subrecord (a ping's raw per-beam backscatter time
+series -- potentially tens of thousands of samples per ping) is deliberately
+*not* included in `-p`'s per-ping table, since it would dwarf the rest of the
+output. `-I` prints it on its own, one CSV row per beam, across every ping
+in the file:
+
+```
+$ gsfu.py -f data/GSF/0268_20240826_052757_EM712.gsf -I
+# ping offset=304484 ping_time=2024-08-26T05:27:53.719285+00:00
+# Beam,SampleCount,DetectSample,StartRangeSamples,Sample0,Sample1,...
+0,140,8,38926,32666,32639,32615,32596,...
+1,17,9,34830,32690,32681,32672,32674,...
+```
+
+Each row is `Beam,SampleCount,DetectSample,StartRangeSamples,` followed by
+that beam's raw samples -- rows are naturally ragged since sample count
+varies per beam. As with the ping table, only the KMALL sensor-imagery
+format is currently decoded; other sensors are noted and skipped.
 
 ## Record types supported by the indexer
 
