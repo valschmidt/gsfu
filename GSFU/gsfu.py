@@ -28,6 +28,21 @@ are ported the same way, from gsf_dec.c's gsfDecode* and Decode*Array
 functions -- the wire-format details there (byte order, scaling, signedness)
 are not derivable from the gsf.h struct definitions alone, since those
 describe the decoded in-memory form, not the packed on-disk encoding.
+
+Verified current against GSF v3.11 (2026-09-01): gsf.h and gsf_dec.c from
+the official v3.11 distribution are byte-identical (modulo CRLF/LF) to the
+Spatialnetics/gsflib source above, so no decoder here has drifted from
+current gsflib. The v3.11 change summary documents exactly one decode
+behavior change since v3.10 -- beam_angle_forward (ping subrecord 18) was
+briefly, mistakenly encoded signed for about 8 months in v3.10 only, then
+reverted -- which this code does not special-case (see the comment at
+_PING_ARRAY_SUBRECORDS[18]): a genuine v3.10 file decodes that one field
+incorrectly, by design, rather than adding version-specific handling for a
+short-lived encoder bug. Every other version-conditional GSF wire-format
+difference this code is aware of (the ping height/SEP/GPS-tide-corrector
+fields, present only at major_version > 2) is handled dynamically from the
+file's own GSF_RECORD_HEADER version string, with no user-specified version
+required.
 """
 import argparse
 import datetime
@@ -254,6 +269,12 @@ _PING_ARRAY_SUBRECORDS = {
     # 15 GSF_SWATH_BATHY_SUBRECORD_QUALITY_FLAGS_ARRAY: 2-bit packed, not decoded.
     # 16 GSF_SWATH_BATHY_SUBRECORD_BEAM_FLAGS_ARRAY: handled separately (no scale factor).
     17: ("signal_to_noise", "SignalToNoise_dB", True),
+    # 18 beam_angle_forward: unsigned in every GSF version except v3.10,
+    # where it was briefly (and, per the v3.11 change summary, mistakenly)
+    # encoded signed for about 8 months before being reverted. Decoded
+    # unsigned unconditionally here -- correct for v3.09 and earlier and for
+    # v3.11+, silently wrong only for a file actually written by a v3.10
+    # library. Deliberately not special-cased for that narrow window.
     18: ("beam_angle_forward", "BeamAngleForward_deg", False),
     19: ("vertical_error", "VerticalError_m", False),
     20: ("horizontal_error", "HorizontalError_m", False),
