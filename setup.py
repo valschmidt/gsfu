@@ -23,7 +23,10 @@ setup(
         "Topic :: Scientific/Engineering :: GIS",
     ],
     entry_points={
-        "console_scripts": ["gsfu.py=GSFU.gsfu:main"],
+        "console_scripts": [
+            "gsfu.py=GSFU.gsfu:main",
+            "kmall2gsf.py=GSFU.kmall2gsf:main",
+        ],
     },
     keywords="hydrography multibeam sonar generic sensor format gsf",
     author="Val Schmidt",

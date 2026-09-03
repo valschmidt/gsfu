@@ -1,11 +1,13 @@
-# GSF file reader (`gsfu`)
+# GSF file reader/writer (`gsfu`)
 
-A Python class and command line utility for indexing and reading sonar data
-files in the **Generic Sensor Format (GSF)**. `gsfu.py` can index a GSF file
-and print a summary of the record types it contains (`-V`), and can decode
-and print any record's fields for debugging (`-p`, `-I`). **Writing/encoding
-GSF files is not yet implemented** -- see "Capabilities" below for the exact
-current state, and "Planned" for what's next (a `.kmall` → `.gsf` converter).
+A Python class and command line utility for indexing, reading, and writing
+sonar data files in the **Generic Sensor Format (GSF)**. `gsfu.py` can index
+a GSF file and print a summary of the record types it contains (`-V`), and
+can decode and print any record's fields for debugging (`-p`, `-I`). The
+`gsf` class also has a full set of `write_*` methods for encoding new GSF
+files from scratch -- see "Capabilities" below for the exact current state.
+The repo also includes [`kmall2gsf.py`](#kmall--gsf-conversion-kmall2gsfpy),
+a Kongsberg `.kmall` → `.gsf` converter built on the write API.
 
     ./GSFU/gsfu.py -h
     usage: gsfu.py [-h] [-f GSF_FILENAME] [-V] [-p [RECORDTYPE]] [-I] [-v]
@@ -212,29 +214,76 @@ packed quality-flags array, and the per-beam backscatter time series
 are noted rather than decoded. Anything a decoder can't make sense of falls
 back to raw ASCII rendering with a note explaining why.
 
-**Writing / encoding**: not yet implemented. `gsf.OpenFiletoWrite()` exists
-but only opens the file -- there is currently no function anywhere in this
-codebase that encodes any GSF record. The class and CLI docstrings say
-"index and read" deliberately, not "read and write".
+**Writing / encoding** (`gsf.write_*`): the write side is the inverse of the
+decoders above, ported from `gsf_enc.c` (not merely assumed to be decode's
+mirror -- the scale-factor rounding convention, NUL-terminated parameter
+strings, and other encode-only quirks were each checked against the real
+source):
 
-## Planned
+| Method | Writes |
+|---|---|
+| `gsf.write_header(version=...)` | `GSF_RECORD_HEADER` |
+| `gsf.write_processing_parameters(params, param_time=...)` | `GSF_RECORD_PROCESSING_PARAMETERS` |
+| `gsf.write_sensor_parameters(params, param_time=...)` | `GSF_RECORD_SENSOR_PARAMETERS` |
+| `gsf.write_sound_velocity_profile(...)` | `GSF_RECORD_SOUND_VELOCITY_PROFILE` |
+| `gsf.write_attitude(...)` | `GSF_RECORD_ATTITUDE` |
+| `gsf.write_swath_bathymetry_ping(scalars, beams, kmall_specific=..., tx_sectors=...)` | `GSF_RECORD_SWATH_BATHYMETRY_PING`, including scale factors, the standard beam arrays, and the `KMALL_SPECIFIC` sensor-specific subrecord + its TX sector array |
 
-A `.kmall` → `.gsf` conversion utility (`kmall2gsf.py`), reading Kongsberg
-`.kmall` files via the sibling [`kmall`](https://github.com/valschmidt/kmall)
-package and writing `PROCESSING_PARAMETERS`, `SOUND_VELOCITY_PROFILE`,
-`SWATH_BATHYMETRY_PING` (with the `KMALL_SPECIFIC` sensor-specific
-subrecord), and `ATTITUDE` records. This is what motivates adding
-write/encode support to the `gsf` class described above -- currently in
-design, not yet implemented.
+`COMMENT`, `HISTORY`, `SWATH_BATHY_SUMMARY`, `SINGLE_BEAM_PING`,
+`NAVIGATION_ERROR`/`HV_NAVIGATION_ERROR`, the per-beam intensity time series
+(subrecord id 21), and every non-KMALL sensor-specific subrecord have no
+encoder yet. The `scalars`/`beams` dict shapes accepted by `write_*` match
+what the corresponding `_decode_*` function returns, so a record decoded
+with `-p` can be re-encoded with only the field names already familiar from
+that output -- see [`convert.md`](convert.md) for a worked example.
+
+## `.kmall` → `.gsf` conversion (`kmall2gsf.py`)
+
+`GSFU/kmall2gsf.py` converts a Kongsberg `.kmall` file to `.gsf`, reading the
+source file with the sibling [`kmall`](https://github.com/valschmidt/kmall)
+package (imported lazily -- not a hard dependency of `gsfu.py` itself) and
+writing `PROCESSING_PARAMETERS`, `SOUND_VELOCITY_PROFILE`,
+`SWATH_BATHYMETRY_PING` (with the `KMALL_SPECIFIC` sensor-specific subrecord
+and its TX sector array), and `ATTITUDE` records via the `write_*` API above.
+
+```
+kmall2gsf.py -f 0007_20190513_154724_ASVBEN.kmall -o 0007.gsf
+```
+
+KMALL files can carry attitude (`#SKM`) from more than one configured sensor
+system (K-Controller's "Attitude 1/2/3..."); `-a`/`--attitude-source` selects
+which one (1 by default) supplies the ping's interpolated pitch/roll/heave
+and the `ATTITUDE` records written to the file. Ping position and heading
+always come directly from the `#MRZ` datagram's own `pingInfo`, matching how
+a native GSF writer would behave.
+
+It builds its own lightweight, seek-based index of the `.kmall` file (one
+pass reading only each datagram's 8-byte framing header) rather than reading
+every datagram's full payload, and does not modify `kmall.py` itself --
+including working around a couple of pre-existing bugs in that package
+(a file-position reset in `decode_datagram()`, and a parser crash on
+malformed installation-parameter text) entirely from within `kmall2gsf.py`.
+
+Known simplifications (see the module docstring for the full list and
+reasoning): `TideCorrector_m`/`DepthCorrector_m` and `Course_deg`/`Speed_kn`
+are always written as `0.0` (MRZ carries none of these), `CenterBeam` is
+approximated as `NumberBeams // 2` (MRZ has no explicit center-beam field),
+and the per-beam backscatter time series and `BEAM_FLAGS_ARRAY` are not
+written (no encoder for either yet).
 
 ## Testing
 
     pip install pytest
     pytest tests/
 
-The test suite has two layers: synthetic, hand-crafted GSF byte streams that
-independently verify the record framing math (bit-packing, checksum
-handling, error conditions) against gsflib's documented encoding, and tests
-against the real sample `.gsf` files in `data/GSF/` that check invariants
-that must hold for any valid GSF file (every byte accounted for, every
-record type recognized, file starts with a header record).
+The test suite has three layers: synthetic, hand-crafted GSF byte streams
+that independently verify the record framing math (bit-packing, checksum
+handling, error conditions) against gsflib's documented encoding
+(`test_gsfu.py`); round-trip encode/decode tests for every `write_*` method
+(`test_gsfu_write.py`); and tests against the real sample `.gsf` files in
+`data/GSF/` that check invariants that must hold for any valid GSF file
+(every byte accounted for, every record type recognized, file starts with a
+header record). `test_kmall2gsf.py` covers `kmall2gsf.py`'s pure-Python
+helpers unconditionally, plus end-to-end `.kmall` → `.gsf` conversion against
+real sample files when both sample data and the `KMALL` package are
+available (skipped otherwise).

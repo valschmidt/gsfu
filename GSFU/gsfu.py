@@ -2,9 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """
-A python class (and command line utility) to index and read Generic Sensor
-Format (GSF) sonar data files. Writing/encoding GSF files is not yet
-implemented.
+A python class (and command line utility) to index, read, and write Generic
+Sensor Format (GSF) sonar data files.
 
 The physical, on-disk record encoding implemented here (the record size
 field, the packed data identifier word, and the optional checksum) and the
@@ -1529,9 +1528,8 @@ def resolve_record_type(value):
 
 class gsf():
     """
-    A class for indexing and reading Generic Sensor Format (GSF) data
-    files. Writing/encoding is not yet implemented (OpenFiletoWrite() only
-    opens the file; no GSF record can currently be encoded to it).
+    A class for indexing, reading, and writing Generic Sensor Format (GSF)
+    data files.
 
     Modeled after the ``kmall`` class in kmall.py: a lightweight,
     dependency-free (no compiled GSF library required) sequential reader
