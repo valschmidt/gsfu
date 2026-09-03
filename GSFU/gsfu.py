@@ -1045,6 +1045,74 @@ def _decode_header(payload):
 #: matching this codebase's verified-current gsf_enc.c/gsf_dec.c source.
 GSF_VERSION = "GSF-v03.11"
 
+###########################################################
+# "Not available" sentinel values (ported from gsf.h)
+#
+# A field a caller omits from `scalars` when calling write_swath_
+# bathymetry_ping() is NOT encoded as 0/0.0 -- gsf.h defines an explicit,
+# out-of-valid-range sentinel for most ping-header scalar fields
+# specifically so a real (in-range) zero (a genuine 0.0 knot speed, a
+# perfectly level 0.0 degree roll) can never be confused with "this value
+# was never measured/computed". write_swath_bathymetry_ping() uses these
+# GSF_NULL_* constants as its defaults; pass them explicitly wherever you
+# have a value you know rather than merely omitting the key, to make that
+# distinction unambiguous in your own code too. See gsf.h's "Define null
+# values to be used for missing data" block, and convert.md's "Marking a
+# field as not available" section.
+###########################################################
+
+GSF_NULL_LATITUDE = 91.0
+GSF_NULL_LONGITUDE = 181.0
+GSF_NULL_HEADING = 361.0
+GSF_NULL_COURSE = 361.0
+GSF_NULL_SPEED = 99.0
+GSF_NULL_PITCH = 99.0
+GSF_NULL_ROLL = 99.0
+GSF_NULL_HEAVE = 99.0
+#: gsf.h defines this as 0.0 -- draft has no value distinguishable from a
+#: genuine zero-draft measurement; there is no way to mark it unavailable.
+GSF_NULL_DRAFT = 0.0
+GSF_NULL_DEPTH_CORRECTOR = 99.99
+GSF_NULL_TIDE_CORRECTOR = 99.99
+GSF_NULL_SOUND_SPEED_CORRECTION = 99.99
+GSF_NULL_HORIZONTAL_ERROR = -1.00
+GSF_NULL_VERTICAL_ERROR = -1.00
+GSF_NULL_HEIGHT = 9999.99
+GSF_NULL_SEP = 9999.99
+#: Also 0.0 in gsf.h -- see GSF_NULL_DRAFT.
+GSF_NULL_SEP_UNCERTAINTY = 0.0
+
+#: Null values for the per-beam array subrecords. Unlike the scalars
+#: above, gsf.h defines every one of these as plain 0.0 -- i.e. a beam
+#: array value of 0 does NOT by itself mean "not available". Use the
+#: BEAM_FLAGS_ARRAY ('BeamFlags' in `beams`, GSF_IGNORE_BEAM bit below) to
+#: mark individual beams unusable instead of relying on any array value.
+GSF_NULL_DEPTH = 0.0
+GSF_NULL_ACROSS_TRACK = 0.0
+GSF_NULL_ALONG_TRACK = 0.0
+GSF_NULL_TRAVEL_TIME = 0.0
+GSF_NULL_BEAM_ANGLE = 0.0
+GSF_NULL_MC_AMPLITUDE = 0.0
+GSF_NULL_MR_AMPLITUDE = 0.0
+GSF_NULL_ECHO_WIDTH = 0.0
+GSF_NULL_QUALITY_FACTOR = 0.0
+GSF_NULL_RECEIVE_HEAVE = 0.0
+GSF_NULL_DEPTH_ERROR = 0.0
+GSF_NULL_ACROSS_TRACK_ERROR = 0.0
+GSF_NULL_ALONG_TRACK_ERROR = 0.0
+GSF_NULL_NAV_POS_ERROR = 0.0
+
+#: Used in some sensor-specific subrecords to mark an unknown beam width.
+GSF_BEAM_WIDTH_UNKNOWN = -1.0
+
+#: PingFlags bit: the whole ping is unusable (gsf.h: GSF_IGNORE_PING).
+#: The remaining 15 bits are application-defined (GSF_PING_USER_FLAG_01-15).
+GSF_IGNORE_PING = 0x0001
+#: BeamFlags (per beam, in the 'BeamFlags' array) bit: this beam is
+#: unusable (gsf.h: GSF_IGNORE_BEAM). The remaining 7 bits are
+#: application-defined (GSF_BEAM_USER_FLAG_01-07).
+GSF_IGNORE_BEAM = 0x01
+
 _ENCODE_DTYPE = {
     (1, False): '>u1', (1, True): '>i1',
     (2, False): '>u2', (2, True): '>i2',
@@ -1417,10 +1485,16 @@ def _encode_swath_bathymetry_ping(scalars, beams, kmall_specific=None, tx_sector
     _decode_swath_bathymetry_ping() produces -- see _gsf_epoch()).
 
     :param scalars: dict; PingTime, Longitude_deg, Latitude_deg, and
-        NumberBeams are required. Every other key (CenterBeam, PingFlags,
-        TideCorrector_m, DepthCorrector_m, Heading_deg, Pitch_deg,
+        NumberBeams are required. CenterBeam, PingFlags, and (at
+        major_version > 2) GPSTideCorrector_m default to 0/0.0 if absent
+        (no GSF_NULL_* sentinel is defined for these). Every other key
+        (TideCorrector_m, DepthCorrector_m, Heading_deg, Pitch_deg,
         Roll_deg, Heave_m, Course_deg, Speed_kn, and, at major_version > 2,
-        Height_m/SEP_m/GPSTideCorrector_m) defaults to 0/0.0 if absent.
+        Height_m/SEP_m) defaults to its GSF_NULL_* sentinel (e.g.
+        GSF_NULL_SPEED = 99.0 knots) if absent, per gsf.h's convention --
+        NOT 0/0.0, since 0 is itself a valid measured value for most of
+        these fields. Pass the value explicitly (0.0 or otherwise) when
+        you have it; omit the key only when it's genuinely unavailable.
     :param beams: dict of {column label: array-like}, e.g. {'Depth_m': [...],
         'AcrossTrack_m': [...]}. Every array must have length NumberBeams.
         Only labels resolvable by _beam_array_subrecord_id() (i.e. present
@@ -1443,22 +1517,26 @@ def _encode_swath_bathymetry_ping(scalars, beams, kmall_specific=None, tx_sector
     out += struct.pack('>i', _gsf_round(scalars['Longitude_deg'] * 1.0e7))
     out += struct.pack('>i', _gsf_round(scalars['Latitude_deg'] * 1.0e7))
     out += struct.pack('>4H', number_beams, int(g('CenterBeam', 0)), int(g('PingFlags', 0)), 0)
-    out += struct.pack('>h', _gsf_round(g('TideCorrector_m', 0.0) * 100.0))
-    out += struct.pack('>i', _gsf_round(g('DepthCorrector_m', 0.0) * 100.0))
-    out += struct.pack('>H', _gsf_round(g('Heading_deg', 0.0) * 100.0))
+    out += struct.pack('>h', _gsf_round(g('TideCorrector_m', GSF_NULL_TIDE_CORRECTOR) * 100.0))
+    out += struct.pack('>i', _gsf_round(g('DepthCorrector_m', GSF_NULL_DEPTH_CORRECTOR) * 100.0))
+    out += struct.pack('>H', _gsf_round(g('Heading_deg', GSF_NULL_HEADING) * 100.0))
     out += struct.pack(
         '>3h',
-        _gsf_round(g('Pitch_deg', 0.0) * 100.0),
-        _gsf_round(g('Roll_deg', 0.0) * 100.0),
-        _gsf_round(g('Heave_m', 0.0) * 100.0))
+        _gsf_round(g('Pitch_deg', GSF_NULL_PITCH) * 100.0),
+        _gsf_round(g('Roll_deg', GSF_NULL_ROLL) * 100.0),
+        _gsf_round(g('Heave_m', GSF_NULL_HEAVE) * 100.0))
     out += struct.pack(
-        '>2H', _gsf_round(g('Course_deg', 0.0) * 100.0), _gsf_round(g('Speed_kn', 0.0) * 100.0))
+        '>2H',
+        _gsf_round(g('Course_deg', GSF_NULL_COURSE) * 100.0),
+        _gsf_round(g('Speed_kn', GSF_NULL_SPEED) * 100.0))
 
     if major_version > 2:
         out += struct.pack(
             '>3i',
-            _gsf_round(g('Height_m', 0.0) * 1000.0),
-            _gsf_round(g('SEP_m', 0.0) * 1000.0),
+            _gsf_round(g('Height_m', GSF_NULL_HEIGHT) * 1000.0),
+            _gsf_round(g('SEP_m', GSF_NULL_SEP) * 1000.0),
+            # gsf.h defines no GSF_NULL_GPS_TIDE_CORRECTOR -- 0.0 is the
+            # best available default (also a real, achievable value).
             _gsf_round(g('GPSTideCorrector_m', 0.0) * 1000.0))
         out += b'\x00' * 2
 

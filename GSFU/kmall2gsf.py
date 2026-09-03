@@ -21,13 +21,14 @@ position/heading SIS itself used for that ping), matching how a native
 GSF writer would behave -- see convert.md for the reasoning.
 
 Known simplifications, all worth revisiting if they matter to you:
-  * TideCorrector_m and DepthCorrector_m are always written as 0.0: MRZ
-    carries no tide correction, and this is a raw (uncorrected) conversion.
-  * Course_deg and Speed_kn are always written as 0.0: MRZ has no course/
-    speed-over-ground field (only #SPO/#CPO do, and this converter doesn't
-    read position datagrams -- ping position comes from MRZ itself).
+  * TideCorrector_m, DepthCorrector_m, Course_deg, and Speed_kn are always
+    written as their GSF_NULL_* "not available" sentinel (not 0.0 -- see
+    convert.md's "Marking a field as not available" section): MRZ carries
+    no tide correction (this is a raw, uncorrected conversion) and no
+    course/speed-over-ground field (only #SPO/#CPO do, and this converter
+    doesn't read position datagrams -- ping position comes from MRZ itself).
   * CenterBeam is approximated as NumberBeams // 2: MRZ has no explicit
-    "center beam index" field.
+    "center beam index" field, and gsf.h defines no null sentinel for it.
   * The per-beam backscatter time series (intensity subrecord, id 21) is
     not written -- gsfu.py has no encoder for it yet (see README).
   * BEAM_FLAGS_ARRAY is not written -- MRZ's detectionType/detectionMethod
@@ -50,7 +51,14 @@ import sys
 
 import numpy as np
 
-from GSFU.gsfu import gsf as GsfWriter
+from GSFU.gsfu import (
+    GSF_NULL_COURSE,
+    GSF_NULL_DEPTH_CORRECTOR,
+    GSF_NULL_SEP,
+    GSF_NULL_SPEED,
+    GSF_NULL_TIDE_CORRECTOR,
+    gsf as GsfWriter,
+)
 
 
 def _kmall_class():
@@ -327,16 +335,25 @@ def mrz_to_ping_scalars(mrz, pitch_deg, roll_deg, heave_m):
         'NumberBeams': number_beams,
         'CenterBeam': number_beams // 2,  # MRZ has no explicit center-beam index
         'PingFlags': 0,
-        'TideCorrector_m': 0.0,   # not present in MRZ; raw conversion
-        'DepthCorrector_m': 0.0,  # not present in MRZ; raw conversion
+        # Not present in MRZ (raw conversion, no tide/draft model applied)
+        # -- written as the GSF_NULL_* "not available" sentinel, not 0.0,
+        # since 0.0 is itself a valid corrector value and would otherwise
+        # be indistinguishable from "corrected with zero offset". See
+        # convert.md's "Marking a field as not available" section.
+        'TideCorrector_m': GSF_NULL_TIDE_CORRECTOR,
+        'DepthCorrector_m': GSF_NULL_DEPTH_CORRECTOR,
         'Heading_deg': info['headingVessel_deg'],
         'Pitch_deg': pitch_deg,
         'Roll_deg': roll_deg,
         'Heave_m': heave_m,
-        'Course_deg': 0.0,  # not present in MRZ (only in #SPO/#CPO)
-        'Speed_kn': 0.0,    # not present in MRZ (only in #SPO/#CPO)
+        # Course/speed-over-ground are only in #SPO/#CPO, which this
+        # converter doesn't read -- likewise null, not 0.0.
+        'Course_deg': GSF_NULL_COURSE,
+        'Speed_kn': GSF_NULL_SPEED,
         'Height_m': info['ellipsoidHeightReRefPoint_m'],
-        'SEP_m': 0.0,
+        'SEP_m': GSF_NULL_SEP,
+        # gsf.h defines no null sentinel for GPSTideCorrector_m; 0.0 is
+        # the best available default (also a real, achievable value).
         'GPSTideCorrector_m': 0.0,
     }
 

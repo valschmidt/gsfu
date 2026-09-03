@@ -12,6 +12,58 @@ If you just want to convert a `.kmall` file, skip to
 [`kmall2gsf.py`](README.md#kmall--gsf-conversion-kmall2gsfpy) in the README
 -- this document is about the lower-level `write_*` API it's built on.
 
+## Reference frame conventions
+
+Before populating any of the fields below, it's worth being precise about
+which direction "positive" means for each of them -- getting a sign backward
+produces a file that's silently wrong rather than one that fails to write.
+The conventions here are gsf_spec.pdf section 3.4's ("Ship-based coordinate
+system") and 3.6.7's ("Angular measures"), and every `write_*` method in
+`gsfu.py` follows them exactly -- there is no code-side correction or
+sign-flip anywhere in this codebase, so a value you hand to `write_*` is
+written to disk with the same sign you gave it.
+
+**Ship-based Cartesian axes** (used for beam offsets -- `Depth_m`,
+`AcrossTrack_m`, `AlongTrack_m` -- and for heave):
+
+* **x** points in the vessel's direction of travel (forward/bow).
+* **y** points to **starboard** (right, facing forward) -- chosen so
+  x/y/z form a right-handed system.
+* **z** points **down** -- consistent with depths being positive numbers.
+
+Concretely:
+
+* `Depth_m` is positive and increases with depth below the water surface.
+* `AcrossTrack_m` is positive to **starboard**, negative to **port**.
+* `AlongTrack_m` is positive **forward** of the ping's reference position,
+  negative **astern** of it.
+* `Heave_m` (both the ping header field and the `ATTITUDE` record's
+  `heave_m`) is positive when the vessel moves **down** relative to the
+  mean/reference surface -- i.e. it shares the z-axis's down-positive sense.
+
+**Angular measures** (heading, course, yaw, roll, pitch -- all in degrees,
+stored internally as hundredths of a degree):
+
+* `Heading_deg`/`heading_deg` and `Course_deg` are measured from true
+  North and increase as the vessel turns to **starboard** (i.e. standard
+  compass convention: 090 is due east). Heading is the direction the bow
+  points; course is the direction of travel through the water -- they
+  differ under drift/crab.
+* `Roll_deg`/`roll_deg` increases as the vessel's **starboard side moves
+  down**. Valid range -180.00 to +180.00.
+* `Pitch_deg`/`pitch_deg` increases as the **bow moves up**. Valid range
+  -180.00 to +180.00.
+
+**Geographic position**: `Latitude_deg` is positive in the Northern
+Hemisphere, `Longitude_deg` is positive in the Eastern Hemisphere (i.e.
+ordinary signed decimal degrees -- no special handling needed).
+
+**Height/separation fields** (`Height_m`, `SEP_m`): positive `Height_m` is
+**above** the ellipsoid; positive `SEP_m` (ellipsoid-to-chart-datum
+separation) indicates the chart datum is **above** the ellipsoid. Both are
+the opposite sense from depth (up-positive, not down-positive) -- easy to
+get backward if you're not watching for it.
+
 ## 1. Open a file for writing
 
 ```python
@@ -129,10 +181,12 @@ G.write_swath_bathymetry_ping(scalars, beams)
 ```
 
 Only `PingTime`, `Longitude_deg`, `Latitude_deg`, and `NumberBeams` are
-required in `scalars`; everything else (`CenterBeam`, `PingFlags`,
+required in `scalars`. `CenterBeam`, `PingFlags`, and `GPSTideCorrector_m`
+default to `0`/`0.0` if omitted. Every other optional field --
 `TideCorrector_m`, `DepthCorrector_m`, `Heading_deg`, `Pitch_deg`,
-`Roll_deg`, `Heave_m`, `Course_deg`, `Speed_kn`, `Height_m`, `SEP_m`,
-`GPSTideCorrector_m`) defaults to `0`/`0.0` if you leave it out.
+`Roll_deg`, `Heave_m`, `Course_deg`, `Speed_kn`, `Height_m`, `SEP_m` --
+defaults to its **GSF_NULL_\* sentinel**, not `0`/`0.0`, if you leave it
+out -- see "Marking a field as not available" below for why.
 
 Every array in `beams` must have exactly `NumberBeams` entries. The
 dict *key* is what selects which subrecord gets written and, in turn, its
@@ -194,6 +248,84 @@ signed)`. `write_swath_bathymetry_ping()` raises `ValueError` if a scaled
 value doesn't fit its field width (e.g. a value too large for the
 multiplier/width you chose) -- that's your signal the scale factor needs
 adjusting, not the data.
+
+## Marking a field as not available (null values)
+
+Many of the fields above are perfectly valid at `0` -- a `Speed_kn` of
+`0.0` is a vessel stopped in the water; a `Roll_deg` of `0.0` is a level
+ship; a `Course_deg` of `0.0` is a real heading, due north. If a source
+system doesn't measure or compute one of these values at all, writing `0`
+in its place would silently claim "measured, and the answer was zero" --
+indistinguishable, to anything reading the file back later, from a real
+zero measurement. gsf.h avoids this by defining an explicit "not available"
+sentinel for most scalar ping-header fields, chosen from outside (or at the
+extreme, implausible edge of) the field's valid range:
+
+| Field | GSF_NULL_\* constant | Value |
+|---|---|---|
+| `Latitude_deg` | `GSF_NULL_LATITUDE` | 91.0 |
+| `Longitude_deg` | `GSF_NULL_LONGITUDE` | 181.0 |
+| `Heading_deg`/`heading_deg` | `GSF_NULL_HEADING` | 361.0 |
+| `Course_deg` | `GSF_NULL_COURSE` | 361.0 |
+| `Speed_kn` | `GSF_NULL_SPEED` | 99.0 |
+| `Pitch_deg`/`pitch_deg` | `GSF_NULL_PITCH` | 99.0 |
+| `Roll_deg`/`roll_deg` | `GSF_NULL_ROLL` | 99.0 |
+| `Heave_m`/`heave_m` | `GSF_NULL_HEAVE` | 99.0 |
+| `DepthCorrector_m` | `GSF_NULL_DEPTH_CORRECTOR` | 99.99 |
+| `TideCorrector_m` | `GSF_NULL_TIDE_CORRECTOR` | 99.99 |
+| `HorizontalError_m` | `GSF_NULL_HORIZONTAL_ERROR` | -1.00 |
+| `VerticalError_m` | `GSF_NULL_VERTICAL_ERROR` | -1.00 |
+| `Height_m` | `GSF_NULL_HEIGHT` | 9999.99 |
+| `SEP_m` | `GSF_NULL_SEP` | 9999.99 |
+
+All are importable from `GSFU.gsfu` (`from GSFU.gsfu import GSF_NULL_SPEED`,
+etc.). `write_swath_bathymetry_ping()` already uses the appropriate one as
+the default for any of these fields you omit from `scalars` -- so simply
+leaving a field out is enough in most cases. Pass the constant explicitly
+instead of omitting the key when you want that intent visible directly in
+your own code, e.g.:
+
+```python
+from GSFU.gsfu import GSF_NULL_COURSE, GSF_NULL_SPEED
+
+scalars = {
+    "PingTime": ping_time, "Longitude_deg": lon, "Latitude_deg": lat,
+    "NumberBeams": n,
+    "Course_deg": GSF_NULL_COURSE,  # course-made-good not computed by this source
+    "Speed_kn": GSF_NULL_SPEED,
+}
+```
+
+Two fields have no defined null: `CenterBeam` and `GPSTideCorrector_m`
+default to plain `0` if omitted, since gsf.h defines no sentinel for
+either -- there's no better option than `0` available for these two.
+`DRAFT` and `SEP_UNCERTAINTY` (both metadata-file-level fields, not part of
+the ping record this API writes) are likewise stuck at `0.0` in gsf.h
+itself, for the same reason.
+
+**Per-beam arrays are different.** `Depth_m`, `AcrossTrack_m`,
+`TravelTime_s`, and the rest of the beam-array columns in `beams` have
+*no* meaningful null value -- gsf.h defines all of their nulls as plain
+`0.0`, with an explicit warning that a `0.0` beam value does **not** by
+itself mean "no data". To mark individual beams unusable, write a
+`'BeamFlags'` column in `beams` (one `GSF_IGNORE_BEAM`-or-not byte per
+beam) instead of trying to signal it through the depth/travel-time/etc.
+values themselves:
+
+```python
+from GSFU.gsfu import GSF_IGNORE_BEAM
+
+beams["BeamFlags"] = [0, GSF_IGNORE_BEAM, 0]  # beam 1 of 3 is unusable
+```
+
+And to flag an entire ping as unusable (rather than one beam within it),
+set the low bit of `PingFlags`:
+
+```python
+from GSFU.gsfu import GSF_IGNORE_PING
+
+scalars["PingFlags"] = GSF_IGNORE_PING
+```
 
 ## Closing the file
 

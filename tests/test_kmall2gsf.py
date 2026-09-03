@@ -20,6 +20,13 @@ from pathlib import Path
 
 import pytest
 
+from GSFU.gsfu import (
+    GSF_NULL_COURSE,
+    GSF_NULL_DEPTH_CORRECTOR,
+    GSF_NULL_SEP,
+    GSF_NULL_SPEED,
+    GSF_NULL_TIDE_CORRECTOR,
+)
 from GSFU.kmall2gsf import (
     _circular_lerp,
     _lenient_parse_kv_text,
@@ -178,3 +185,12 @@ class TestConvertRealFiles:
         assert -180.0 <= scalars["Longitude_deg"] <= 180.0
         assert scalars["NumberBeams"] == len(tables["Beams"])
         assert (tables["Beams"]["Depth_m"] > 0).all()
+
+        # Fields MRZ carries no data for are written as their GSF_NULL_*
+        # "not available" sentinel, not 0.0 (which would be indistinguishable
+        # from a real, computed zero) -- see convert.md.
+        assert scalars["TideCorrector_m"] == pytest.approx(GSF_NULL_TIDE_CORRECTOR)
+        assert scalars["DepthCorrector_m"] == pytest.approx(GSF_NULL_DEPTH_CORRECTOR)
+        assert scalars["Course_deg"] == pytest.approx(GSF_NULL_COURSE)
+        assert scalars["Speed_kn"] == pytest.approx(GSF_NULL_SPEED)
+        assert scalars["SEP_m"] == pytest.approx(GSF_NULL_SEP)

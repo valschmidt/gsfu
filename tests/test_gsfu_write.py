@@ -20,6 +20,16 @@ import pytest
 
 from GSFU.gsfu import (
     DEFAULT_PING_SCALE_FACTORS,
+    GSF_NULL_COURSE,
+    GSF_NULL_DEPTH_CORRECTOR,
+    GSF_NULL_HEADING,
+    GSF_NULL_HEAVE,
+    GSF_NULL_HEIGHT,
+    GSF_NULL_PITCH,
+    GSF_NULL_ROLL,
+    GSF_NULL_SEP,
+    GSF_NULL_SPEED,
+    GSF_NULL_TIDE_CORRECTOR,
     GSF_VERSION,
     RecordType,
     _decode_attitude,
@@ -367,6 +377,44 @@ class TestEncodeSwathBathymetryPing:
     def test_unknown_beams_column_raises_keyerror(self):
         with pytest.raises(KeyError):
             _encode_swath_bathymetry_ping(self._SCALARS, {'NotARealColumn': [1, 2, 3]})
+
+    def test_omitted_optional_scalars_default_to_null_sentinels_not_zero(self):
+        # Per gsf.h's "Define null values to be used for missing data": a
+        # field left out of `scalars` must not silently become 0/0.0 --
+        # several of these fields are equally valid at exactly zero.
+        required_only = {
+            'PingTime': self._SCALARS['PingTime'],
+            'Longitude_deg': self._SCALARS['Longitude_deg'],
+            'Latitude_deg': self._SCALARS['Latitude_deg'],
+            'NumberBeams': self._SCALARS['NumberBeams'],
+        }
+        payload = _encode_swath_bathymetry_ping(required_only, {}, major_version=3)
+        scalars, _tables, _notes = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
+
+        assert scalars['TideCorrector_m'] == pytest.approx(GSF_NULL_TIDE_CORRECTOR)
+        assert scalars['DepthCorrector_m'] == pytest.approx(GSF_NULL_DEPTH_CORRECTOR)
+        assert scalars['Heading_deg'] == pytest.approx(GSF_NULL_HEADING)
+        assert scalars['Pitch_deg'] == pytest.approx(GSF_NULL_PITCH)
+        assert scalars['Roll_deg'] == pytest.approx(GSF_NULL_ROLL)
+        assert scalars['Heave_m'] == pytest.approx(GSF_NULL_HEAVE)
+        assert scalars['Course_deg'] == pytest.approx(GSF_NULL_COURSE)
+        assert scalars['Speed_kn'] == pytest.approx(GSF_NULL_SPEED)
+        assert scalars['Height_m'] == pytest.approx(GSF_NULL_HEIGHT)
+        assert scalars['SEP_m'] == pytest.approx(GSF_NULL_SEP)
+        # No GSF_NULL_* sentinel is defined for these -- 0 is the only
+        # available default.
+        assert scalars['CenterBeam'] == 0
+        assert scalars['GPSTideCorrector_m'] == pytest.approx(0.0)
+
+    def test_explicit_zero_survives_round_trip_distinct_from_null_default(self):
+        # A caller-supplied 0.0 (a real, known-zero measurement) must not
+        # collapse into the same on-disk value as the null default above.
+        scalars = dict(self._SCALARS, Course_deg=0.0, Speed_kn=0.0)
+        payload = _encode_swath_bathymetry_ping(scalars, self._BEAMS, major_version=3)
+        decoded, _tables, _notes = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
+
+        assert decoded['Course_deg'] == pytest.approx(0.0)
+        assert decoded['Speed_kn'] == pytest.approx(0.0)
 
     def test_beam_flags_round_trip(self):
         beams = dict(self._BEAMS)
