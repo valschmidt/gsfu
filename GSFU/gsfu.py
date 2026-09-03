@@ -2,8 +2,9 @@
 # -*- coding: utf-8 -*-
 
 """
-A python class (and command line utility) to index, read, and write
-Generic Sensor Format (GSF) sonar data files.
+A python class (and command line utility) to index and read Generic Sensor
+Format (GSF) sonar data files. Writing/encoding GSF files is not yet
+implemented.
 
 The physical, on-disk record encoding implemented here (the record size
 field, the packed data identifier word, and the optional checksum) and the
@@ -1014,39 +1015,10 @@ def _decode_attitude(payload):
     return {'NumMeasurements': num_measurements}, {'Measurements': table}, []
 
 
-def _decode_record(record_id, payload, major_version, scale_factors, decode_intensity=False):
-    """
-    Dispatch to a field-level decoder for the given recordID, if one is
-    available.
-
-    :param decode_intensity: forwarded to _decode_swath_bathymetry_ping();
-        ignored for every other record type.
-    :return: (scalars: dict, tables: dict[str, pandas.DataFrame], notes: list[str]),
-        or None if there is no decoder for this record type.
-    """
-    if record_id == RecordType.GSF_RECORD_HEADER:
-        return {'Version': payload[:GSF_VERSION_SIZE].split(b'\x00', 1)[0].decode('ascii', 'replace')}, {}, []
-    if record_id == RecordType.GSF_RECORD_SWATH_BATHY_SUMMARY:
-        return _decode_swath_bathy_summary(payload)
-    if record_id == RecordType.GSF_RECORD_SWATH_BATHYMETRY_PING:
-        return _decode_swath_bathymetry_ping(payload, major_version, scale_factors, decode_intensity)
-    if record_id == RecordType.GSF_RECORD_SOUND_VELOCITY_PROFILE:
-        return _decode_sound_velocity_profile(payload)
-    if record_id in (RecordType.GSF_RECORD_PROCESSING_PARAMETERS, RecordType.GSF_RECORD_SENSOR_PARAMETERS):
-        return _decode_name_value_parameters(payload)
-    if record_id == RecordType.GSF_RECORD_COMMENT:
-        return _decode_comment(payload)
-    if record_id == RecordType.GSF_RECORD_HISTORY:
-        return _decode_history(payload)
-    if record_id == RecordType.GSF_RECORD_NAVIGATION_ERROR:
-        return _decode_navigation_error(payload)
-    if record_id == RecordType.GSF_RECORD_HV_NAVIGATION_ERROR:
-        return _decode_hv_navigation_error(payload)
-    if record_id == RecordType.GSF_RECORD_SINGLE_BEAM_PING:
-        return _decode_single_beam_ping(payload)
-    if record_id == RecordType.GSF_RECORD_ATTITUDE:
-        return _decode_attitude(payload)
-    return None
+def _decode_header(payload):
+    """ Decode a GSF_RECORD_HEADER payload: just the version string. """
+    version = payload[:GSF_VERSION_SIZE].split(b'\x00', 1)[0].decode('ascii', 'replace')
+    return {'Version': version}, {}, []
 
 
 def _gsf_major_version(version_string, default=3):
@@ -1089,8 +1061,9 @@ def resolve_record_type(value):
 
 class gsf():
     """
-    A class for indexing, reading, and writing Generic Sensor Format (GSF)
-    data files.
+    A class for indexing and reading Generic Sensor Format (GSF) data
+    files. Writing/encoding is not yet implemented (OpenFiletoWrite() only
+    opens the file; no GSF record can currently be encoded to it).
 
     Modeled after the ``kmall`` class in kmall.py: a lightweight,
     dependency-free (no compiled GSF library required) sequential reader
@@ -1416,9 +1389,34 @@ class gsf():
                     print("=== %s  offset=%d  size=%d ===" %
                           (name, offset, GSF_RECORD_FRAMING_SIZE + readSize))
 
+                    # Dispatch to the specific decoder for this record type,
+                    # explicitly here rather than via a generic lookup, so the
+                    # type -> decoder mapping is visible at the call site.
                     decoded = None
                     try:
-                        decoded = _decode_record(data_id.recordID, payload, major_version, scale_factors)
+                        rid = data_id.recordID
+                        if rid == RecordType.GSF_RECORD_HEADER:
+                            decoded = _decode_header(payload)
+                        elif rid == RecordType.GSF_RECORD_SWATH_BATHY_SUMMARY:
+                            decoded = _decode_swath_bathy_summary(payload)
+                        elif rid == RecordType.GSF_RECORD_SWATH_BATHYMETRY_PING:
+                            decoded = _decode_swath_bathymetry_ping(payload, major_version, scale_factors)
+                        elif rid == RecordType.GSF_RECORD_SOUND_VELOCITY_PROFILE:
+                            decoded = _decode_sound_velocity_profile(payload)
+                        elif rid in (RecordType.GSF_RECORD_PROCESSING_PARAMETERS, RecordType.GSF_RECORD_SENSOR_PARAMETERS):
+                            decoded = _decode_name_value_parameters(payload)
+                        elif rid == RecordType.GSF_RECORD_COMMENT:
+                            decoded = _decode_comment(payload)
+                        elif rid == RecordType.GSF_RECORD_HISTORY:
+                            decoded = _decode_history(payload)
+                        elif rid == RecordType.GSF_RECORD_NAVIGATION_ERROR:
+                            decoded = _decode_navigation_error(payload)
+                        elif rid == RecordType.GSF_RECORD_HV_NAVIGATION_ERROR:
+                            decoded = _decode_hv_navigation_error(payload)
+                        elif rid == RecordType.GSF_RECORD_SINGLE_BEAM_PING:
+                            decoded = _decode_single_beam_ping(payload)
+                        elif rid == RecordType.GSF_RECORD_ATTITUDE:
+                            decoded = _decode_attitude(payload)
                     except (struct.error, IndexError) as exc:
                         print("  # decode failed (%s); showing raw text" % exc)
 
@@ -1537,8 +1535,8 @@ def main(args=None):
         args = sys.argv[1:]
 
     parser = argparse.ArgumentParser(
-        description="A python script (and class) for indexing, reading, "
-                     "and writing Generic Sensor Format (GSF) data files.",
+        description="A python script (and class) for indexing and reading "
+                     "Generic Sensor Format (GSF) data files.",
         epilog=_record_type_help_text(),
         formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('-f', action='store', dest='gsf_filename',
