@@ -1021,6 +1021,474 @@ def _decode_header(payload):
     return {'Version': version}, {}, []
 
 
+###########################################################
+# Field-level record encoding (subset)
+#
+# The inverse of "Field-level record decoding" above: ported from
+# gsf_enc.c's gsfEncode* and Encode*Array functions. Confirmed field-for-
+# field symmetric with the decoders above (same order, same scale/offset
+# formulas solved for the raw integer) by reading gsf_enc.c directly
+# rather than assuming symmetry -- with two real asymmetries worth noting:
+#
+#   * gsfEncodeHeader() always stamps the library's own current version
+#     (GSF_VERSION), ignoring any caller-supplied header.version -- so
+#     does _encode_header() below.
+#   * EncodeKMALLSpecific() always writes 0 for gsfKMALLVersion regardless
+#     of the caller's struct value -- so does _encode_kmall_specific().
+#
+# Every scaled float->int field uses gsf_enc.c's own rounding convention
+# (add/subtract 0.501 then truncate toward zero, via _gsf_round()) rather
+# than Python's round() (banker's rounding) or plain truncation, so a
+# decode(encode(x)) round-trip reproduces x to the field's precision.
+###########################################################
+
+#: Current GSF version stamped into every GSF_RECORD_HEADER written here,
+#: matching this codebase's verified-current gsf_enc.c/gsf_dec.c source.
+GSF_VERSION = "GSF-v03.11"
+
+_ENCODE_DTYPE = {
+    (1, False): '>u1', (1, True): '>i1',
+    (2, False): '>u2', (2, True): '>i2',
+    (4, False): '>u4', (4, True): '>i4',
+}
+_ENCODE_DTYPE_RANGE = {
+    (1, False): (0, 255), (1, True): (-128, 127),
+    (2, False): (0, 65535), (2, True): (-32768, 32767),
+    (4, False): (0, 4294967295), (4, True): (-2147483648, 2147483647),
+}
+
+#: Default (multiplier, offset, field width in bytes, signed) for every
+#: scaled ping beam array, chosen to comfortably span depths from 1m to
+#: 10,000m without needing gsflib's auto-offset heuristic (see the
+#: DEFAULT_PING_SCALE_FACTORS docstring-equivalent discussion: offset=0
+#: with a 4-byte depth field already covers 0-4,294,967m at 1mm
+#: precision). Multipliers/offsets/field widths for depth, across/along
+#: track, travel time, beam angle, amplitude, echo width, receive heave,
+#: beam_angle_forward, and vertical/horizontal error match the convention
+#: found in real EM712 GSF files (see the scale-factor survey in the
+#: kmall2gsf design discussion); the remaining, rarer arrays use the
+#: unconditional (non-field-size-switchable) width gsf_dec.c's decode
+#: switch requires for that subrecord, with multiplier=1, offset=0.
+DEFAULT_PING_SCALE_FACTORS = {
+    1: (1000.0, 0.0, 4, False),      # Depth_m
+    14: (1000.0, 0.0, 4, False),     # NominalDepth_m
+    2: (100.0, 0.0, 4, True),        # AcrossTrack_m
+    3: (100.0, 0.0, 4, True),        # AlongTrack_m
+    4: (100000.0, 0.0, 4, False),    # TravelTime_s
+    5: (100.0, 0.0, 2, True),        # BeamAngle_deg
+    6: (1.0, 0.0, 2, True),          # MeanCalAmplitude_dB
+    7: (1.0, 0.0, 2, False),         # MeanRelAmplitude_dB
+    8: (100.0, 0.0, 2, False),       # EchoWidth_s
+    9: (1.0, 0.0, 1, False),         # QualityFactor
+    10: (100.0, 0.0, 1, True),       # ReceiveHeave_m
+    17: (1.0, 0.0, 1, True),         # SignalToNoise_dB
+    18: (100.0, 90.0, 2, False),     # BeamAngleForward_deg
+    19: (100.0, 0.0, 2, False),      # VerticalError_m
+    20: (100.0, 0.0, 2, False),      # HorizontalError_m
+    22: (1.0, 0.0, 1, False),        # SectorNumber
+    23: (1.0, 0.0, 1, False),        # DetectionInfo
+    24: (1.0, 0.0, 1, True),         # IncidentBeamAdj_deg
+    25: (1.0, 0.0, 1, False),        # SystemCleaning
+    26: (1.0, 0.0, 1, True),         # DopplerCorr
+    27: (100.0, 0.0, 2, False),      # SonarVertUncert_m
+    28: (100.0, 0.0, 2, False),      # SonarHorzUncert_m
+    29: (100.0, 0.0, 2, False),      # DetectionWindow_s
+    30: (100.0, 0.0, 2, False),      # MeanAbsCoeff
+    31: (1.0, 0.0, 1, False),        # TVG_dB
+}
+
+
+def _gsf_round(x):
+    """
+    Round `x` to the nearest integer using gsf_enc.c's own convention
+    (add/subtract 0.501, then truncate toward zero) rather than Python's
+    round() (banker's rounding) -- used everywhere gsf_enc.c scales a
+    float for storage.
+    """
+    return int(x + 0.501) if x >= 0.0 else int(x - 0.501)
+
+
+def _gsf_epoch(time_value):
+    """
+    Split a time value into (sec, nsec) ints for GSF's on-disk timespec
+    fields. Accepts a POSIX timestamp (int/float, seconds since epoch), a
+    datetime.datetime (naive datetimes are assumed UTC), or an ISO8601
+    string (as produced by _gsf_timestamp(...).isoformat(), so a decoded
+    scalars dict's time fields can be passed back to an encoder unchanged).
+    """
+    if isinstance(time_value, str):
+        time_value = datetime.datetime.fromisoformat(time_value)
+    if isinstance(time_value, datetime.datetime):
+        if time_value.tzinfo is None:
+            time_value = time_value.replace(tzinfo=datetime.timezone.utc)
+        time_value = time_value.timestamp()
+    sec = int(time_value)
+    nsec = _gsf_round((time_value - sec) * 1.0e9)
+    if nsec < 0:
+        sec -= 1
+        nsec += 1_000_000_000
+    return sec, nsec
+
+
+def _encode_header(version=None):
+    """
+    Encode a GSF_RECORD_HEADER payload. Ported from gsf_enc.c's
+    gsfEncodeHeader(), which always stamps the library's own current
+    version string, ignoring any caller-supplied value -- mirrored here:
+    `version` exists only for testing, and defaults to GSF_VERSION.
+    """
+    encoded = (version or GSF_VERSION).encode('ascii')
+    return encoded[:GSF_VERSION_SIZE].ljust(GSF_VERSION_SIZE, b'\x00')
+
+
+def _encode_name_value_parameters(param_time, params):
+    """
+    Encode the shared GSF_RECORD_PROCESSING_PARAMETERS /
+    GSF_RECORD_SENSOR_PARAMETERS wire format from a {name: value} dict.
+    Ported from gsf_enc.c's gsfEncodeProcessingParameters() /
+    gsfEncodeSensorParameters(): each entry is written as a NUL-terminated
+    "NAME=VALUE" string, with its 2-byte size field counting the NUL --
+    matching what real encoders write (see _decode_name_value_parameters()).
+
+    :param param_time: POSIX timestamp or datetime.
+    :param params: dict of {name: value}; values are str()-ed.
+    """
+    sec, nsec = _gsf_epoch(param_time)
+    out = struct.pack('>2IH', sec, nsec, len(params))
+    for name, value in params.items():
+        text = ("%s=%s" % (name, value)).encode('ascii') + b'\x00'
+        out += struct.pack('>h', len(text)) + text
+    return out
+
+
+def _encode_sound_velocity_profile(observation_time, application_time,
+                                    latitude_deg, longitude_deg,
+                                    depth_m, sound_speed_mPerSec):
+    """
+    Encode a GSF_RECORD_SOUND_VELOCITY_PROFILE payload. Ported from
+    gsf_enc.c's gsfEncodeSoundVelocityProfile().
+
+    :param depth_m, sound_speed_mPerSec: equal-length array-likes,
+        non-negative (both are stored as unsigned centimeters).
+    """
+    depth_m = np.asarray(depth_m, dtype=np.float64)
+    sound_speed_mPerSec = np.asarray(sound_speed_mPerSec, dtype=np.float64)
+    if len(depth_m) != len(sound_speed_mPerSec):
+        raise ValueError("depth_m and sound_speed_mPerSec must be the same length")
+
+    obs_sec, obs_nsec = _gsf_epoch(observation_time)
+    app_sec, app_nsec = _gsf_epoch(application_time)
+
+    out = struct.pack('>4I', obs_sec, obs_nsec, app_sec, app_nsec)
+    out += struct.pack('>i', _gsf_round(longitude_deg * 1.0e7))
+    out += struct.pack('>i', _gsf_round(latitude_deg * 1.0e7))
+    out += struct.pack('>I', len(depth_m))
+
+    raw = np.empty(2 * len(depth_m), dtype='>u4')
+    raw[0::2] = (depth_m * 100.0 + 0.501).astype('>u4')
+    raw[1::2] = (sound_speed_mPerSec * 100.0 + 0.501).astype('>u4')
+    out += raw.tobytes()
+    return out
+
+
+def _encode_attitude(attitude_time, pitch_deg, roll_deg, heave_m, heading_deg):
+    """
+    Encode a GSF_RECORD_ATTITUDE payload. Ported from gsf_enc.c's
+    gsfEncodeAttitude(): the first entry of `attitude_time` becomes the
+    record's base time, and every measurement (including the first) is
+    stored as a millisecond offset from it -- so `attitude_time` must be
+    non-decreasing (offsets are stored as an unsigned 16-bit field, and
+    must span less than 65.536 seconds).
+
+    :param attitude_time: array-like of POSIX timestamps or datetimes.
+    :param pitch_deg, roll_deg, heave_m, heading_deg: equal-length array-likes.
+    """
+    n = len(attitude_time)
+    if not (len(pitch_deg) == len(roll_deg) == len(heave_m) == len(heading_deg) == n):
+        raise ValueError("attitude arrays must all be the same length")
+
+    base_sec, base_nsec = _gsf_epoch(attitude_time[0])
+    out = struct.pack('>2IH', base_sec, base_nsec, n)
+    for i in range(n):
+        t_sec, t_nsec = _gsf_epoch(attitude_time[i])
+        offset_ms = _gsf_round((t_sec - base_sec) * 1000.0 + (t_nsec - base_nsec) / 1.0e6)
+        out += struct.pack(
+            '>H3hH', offset_ms,
+            _gsf_round(pitch_deg[i] * 100.0),
+            _gsf_round(roll_deg[i] * 100.0),
+            _gsf_round(heave_m[i] * 100.0),
+            _gsf_round(heading_deg[i] * 100.0))
+    return out
+
+
+def _encode_scale_factors(scale_factors):
+    """
+    Encode a GSF_SWATH_BATHY_SUBRECORD_SCALE_FACTORS subrecord, including
+    its own 4-byte subrecord id+size word. Ported from gsf_enc.c's
+    EncodeScaleFactors(): entries are written in ascending subrecordID
+    order regardless of the input dict's iteration order.
+
+    :param scale_factors: dict mapping subrecordID -> (multiplier, offset,
+        compressionFlag).
+    """
+    entries = sorted(scale_factors.items())
+    body = struct.pack('>I', len(entries))
+    for subrecord_id, (multiplier, offset, compression_flag) in entries:
+        word = ((subrecord_id & 0xFF) << 24) | ((compression_flag & 0xFF) << 16)
+        body += struct.pack('>I', word)
+        body += struct.pack('>I', _gsf_round(multiplier))
+        body += struct.pack('>i', _gsf_round(offset))
+    header_word = (_SUBRECORD_SCALE_FACTORS << 24) | len(body)
+    return struct.pack('>I', header_word) + body
+
+
+def _encode_ping_array(subrecord_id, values, multiplier, offset, signed, width):
+    """
+    Encode one beam-array subrecord, including its own 4-byte subrecord
+    id+size word, from engineering-unit values: raw = round((value +
+    offset) * multiplier). Vectorized with numpy -- the inverse of
+    _decode_ping_array(). Ported from gsf_enc.c's Encode*Array family.
+
+    :raises ValueError: an encoded value doesn't fit in the requested
+        integer width, rather than silently wrapping/truncating data.
+    """
+    values = np.asarray(values, dtype=np.float64)
+    scaled = (values + offset) * multiplier
+    raw = np.where(scaled >= 0, scaled + 0.501, scaled - 0.501).astype(np.int64)
+
+    lo, hi = _ENCODE_DTYPE_RANGE[(width, signed)]
+    if raw.size and (int(raw.min()) < lo or int(raw.max()) > hi):
+        raise ValueError(
+            "subrecord %d: encoded value out of range for a %d-byte %s field "
+            "(multiplier=%s, offset=%s)" %
+            (subrecord_id, width, "signed" if signed else "unsigned", multiplier, offset))
+
+    body = raw.astype(_ENCODE_DTYPE[(width, signed)]).tobytes()
+    header_word = ((subrecord_id & 0xFF) << 24) | len(body)
+    return struct.pack('>I', header_word) + body
+
+
+def _encode_kmall_specific(s, sector_rows=None, class_rows=None):
+    """
+    Encode a GSF_SWATH_BATHY_SUBRECORD_KMALL_SPECIFIC subrecord (id 156),
+    including its own 4-byte subrecord id+size word. Ported from
+    gsf_enc.c's EncodeKMALLSpecific(); the exact field-for-field inverse
+    of _decode_kmall_specific() (same key names, so a decoded dict can be
+    re-encoded directly).
+
+    :param s: dict of scalar KMALL_SPECIFIC fields (see
+        _decode_kmall_specific()'s return). Missing keys default to 0.
+        NumTxSectors/NumExtraDetectionClasses are always derived from
+        len(sector_rows)/len(class_rows), not read from `s`.
+    :param sector_rows: list of per-transmit-sector dicts (see
+        _decode_kmall_specific()), at most 9 (GSF_MAX_KMALL_SECTORS).
+    :param class_rows: list of per-extra-detection-class dicts, at most 11
+        (GSF_MAX_KMALL_EXTRA_CLASSES).
+    """
+    sector_rows = sector_rows or []
+    class_rows = class_rows or []
+    g = s.get
+
+    out = bytearray()
+    # gsf_enc.c always writes 0 for gsfKMALLVersion, regardless of `s`.
+    out += struct.pack('>4B', 0, g('DgmType', 0), g('DgmVersion', 0), g('SystemID', 0))
+    out += struct.pack('>H', g('EchoSounderID', 0))
+    out += b'\x00' * 8
+
+    out += struct.pack('>2H', g('NumBytesCmnPart', 0), g('PingCnt', 0))
+    out += struct.pack(
+        '>6B', g('RxFansPerPing', 0), g('RxFanIndex', 0), g('SwathsPerPing', 0),
+        g('SwathAlongPosition', 0), g('TxTransducerInd', 0), g('RxTransducerInd', 0))
+    out += struct.pack('>2B', g('NumRxTransducers', 0), g('AlgorithmType', 0))
+    out += b'\x00' * 16
+
+    out += struct.pack('>H', g('NumBytesInfoData', 0))
+    out += struct.pack('>I', _gsf_round(g('PingRate_Hz', 0.0) * 1.0e5))
+    out += struct.pack(
+        '>6B', g('BeamSpacing', 0), g('DepthMode', 0), g('SubDepthMode', 0),
+        g('DistanceBtwSwath', 0), g('DetectionMode', 0), g('PulseForm', 0))
+    out += struct.pack('>i', _gsf_round(g('FrequencyMode_Hz', 0.0)))
+    out += struct.pack('>i', _gsf_round(g('FreqRangeLowLim_Hz', 0.0) * 1.0e3))
+    out += struct.pack('>i', _gsf_round(g('FreqRangeHighLim_Hz', 0.0) * 1.0e3))
+    out += struct.pack('>i', _gsf_round(g('MaxTotalTxPulseLength_sec', 0.0) * 1.0e6))
+    out += struct.pack('>i', _gsf_round(g('MaxEffTxPulseLength_sec', 0.0) * 1.0e6))
+    out += struct.pack('>i', _gsf_round(g('MaxEffTxBandWidth_Hz', 0.0) * 1.0e3))
+    out += struct.pack('>i', _gsf_round(g('AbsCoeff_dBPerkm', 0.0) * 1.0e3))
+    out += struct.pack('>h', _gsf_round(g('PortSectorEdge_deg', 0.0) * 1.0e2))
+    out += struct.pack('>h', _gsf_round(g('StarbSectorEdge_deg', 0.0) * 1.0e2))
+    # Mirrors the duplicate port/starboard mean-coverage-in-degrees pair
+    # gsf_dec.c reads and discards (see _decode_kmall_specific()); written
+    # here as zero-filled padding to keep byte alignment identical.
+    out += b'\x00' * 4
+    out += struct.pack('>h', _gsf_round(g('PortMeanCov_deg', 0.0) * 1.0e2))
+    out += struct.pack('>h', _gsf_round(g('StarbMeanCov_deg', 0.0) * 1.0e2))
+    out += struct.pack('>h', _gsf_round(g('PortMeanCov_m', 0.0)))
+    out += struct.pack('>h', _gsf_round(g('StarbMeanCov_m', 0.0)))
+    out += struct.pack('>2B', g('ModeAndStabilisation', 0), g('RuntimeFilter1', 0))
+    out += struct.pack('>H', g('RuntimeFilter2', 0))
+    out += struct.pack('>i', g('PipeTrackingStatus', 0))
+    out += struct.pack('>H', _gsf_round(g('TransmitArraySizeUsed_deg', 0.0) * 1.0e3))
+    out += struct.pack('>H', _gsf_round(g('ReceiveArraySizeUsed_deg', 0.0) * 1.0e3))
+    out += struct.pack('>h', _gsf_round(g('TransmitPower_dB', 0.0) * 1.0e2))
+    out += struct.pack('>H', g('SLrampUpTimeRemaining', 0))
+    out += struct.pack('>i', _gsf_round(g('YawAngle_deg', 0.0) * 1.0e6))
+    out += struct.pack('>H', len(sector_rows))
+    out += struct.pack('>H', g('NumBytesPerTxSector', 53))
+    out += struct.pack('>i', _gsf_round(g('HeadingVessel_deg', 0.0) * 1.0e6))
+    out += struct.pack('>i', _gsf_round(g('SoundSpeedAtTxDepth_mPerSec', 0.0) * 1.0e6))
+    out += struct.pack('>i', _gsf_round(g('TxTransducerDepth_m', 0.0) * 1.0e6))
+    out += struct.pack('>i', _gsf_round(g('ZWaterLevelReRefPoint_m', 0.0) * 1.0e6))
+    out += struct.pack('>i', _gsf_round(g('XKmallToAll_m', 0.0) * 1.0e6))
+    out += struct.pack('>i', _gsf_round(g('YKmallToAll_m', 0.0) * 1.0e6))
+    out += struct.pack('>3B', g('LatLongInfo', 0), g('PosSensorStatus', 0), g('AttitudeSensorStatus', 0))
+    out += struct.pack('>i', _gsf_round(g('Latitude_deg', 0.0) * 1.0e7))
+    out += struct.pack('>i', _gsf_round(g('Longitude_deg', 0.0) * 1.0e7))
+    out += struct.pack('>i', _gsf_round(g('EllipsoidHeightReRefPoint_m', 0.0) * 1.0e3))
+    out += b'\x00' * 32
+
+    for row in sector_rows[:9]:  # gsf.h: GSF_MAX_KMALL_SECTORS
+        r = row.get
+        out += struct.pack('>3B', r('TxSectorNumb', 0), r('TxArrNumber', 0), r('TxSubArray', 0))
+        out += struct.pack('>i', _gsf_round(r('SectorTransmitDelay_sec', 0.0) * 1.0e6))
+        out += struct.pack('>i', _gsf_round(r('TiltAngleReTx_deg', 0.0) * 1.0e6))
+        out += struct.pack('>i', _gsf_round(r('TxNominalSourceLevel_dB', 0.0) * 1.0e6))
+        out += struct.pack('>i', _gsf_round(r('TxFocusRange_m', 0.0) * 1.0e3))
+        out += struct.pack('>i', _gsf_round(r('CentreFreq_Hz', 0.0) * 1.0e3))
+        out += struct.pack('>i', _gsf_round(r('SignalBandWidth_Hz', 0.0) * 1.0e3))
+        out += struct.pack('>i', _gsf_round(r('TotalSignalLength_sec', 0.0) * 1.0e6))
+        out += struct.pack('>2B', r('PulseShading', 0), r('SignalWaveForm', 0))
+        out += struct.pack('>i', _gsf_round(r('HighVoltageLevel_dB', 0.0) * 1.0e6))
+        out += struct.pack('>i', _gsf_round(r('SectorTrackingCorr_dB', 0.0) * 1.0e6))
+        out += struct.pack('>i', _gsf_round(r('EffectiveSignalLength_sec', 0.0) * 1.0e6))
+        out += b'\x00' * 8
+
+    out += struct.pack(
+        '>4H', g('NumBytesRxInfo', 0), g('NumSoundingsMaxMain', 0),
+        g('NumSoundingsValidMain', 0), g('NumBytesPerSounding', 0))
+    wc = g('WCSampleRate', 0.0)
+    wc_int = int(wc)
+    wc_frac = _gsf_round((wc - wc_int) * 1.0e9)
+    out += struct.pack('>iI', wc_int, wc_frac)
+    sb = g('SeabedImageSampleRate', 0.0)
+    sb_int = int(sb)
+    sb_frac = _gsf_round((sb - sb_int) * 1.0e9)
+    out += struct.pack('>iI', sb_int, sb_frac)
+    out += struct.pack('>i', _gsf_round(g('BSnormal_dB', 0.0) * 1.0e6))
+    out += struct.pack('>i', _gsf_round(g('BSoblique_dB', 0.0) * 1.0e6))
+    out += struct.pack('>H', g('ExtraDetectionAlarmFlag', 0))
+    out += struct.pack('>H', g('NumExtraDetections', 0))
+    out += struct.pack('>H', len(class_rows))
+    out += struct.pack('>H', g('NumBytesPerClass', 35))
+    out += b'\x00' * 32
+
+    for row in class_rows[:11]:  # gsf.h: GSF_MAX_KMALL_EXTRA_CLASSES
+        out += struct.pack('>H', row.get('NumExtraDetInClass', 0))
+        out += struct.pack('>B', row.get('AlarmFlag', 0))
+        out += b'\x00' * 32
+
+    out += b'\x00' * 32
+
+    header_word = (_SUBRECORD_KMALL_SPECIFIC << 24) | len(out)
+    return struct.pack('>I', header_word) + bytes(out)
+
+
+#: label (as used in tables['Beams']/_PING_ARRAY_SUBRECORDS) -> subrecordID.
+_LABEL_TO_SUBRECORD_ID = {label: sid for sid, (_attr, label, _signed) in _PING_ARRAY_SUBRECORDS.items()}
+
+
+def _beam_array_subrecord_id(label):
+    """ Resolve a beams dict column label to its ping subrecord id. """
+    if label == 'BeamFlags':
+        return _SUBRECORD_BEAM_FLAGS_ARRAY
+    if label in _LABEL_TO_SUBRECORD_ID:
+        return _LABEL_TO_SUBRECORD_ID[label]
+    raise KeyError("no known ping array subrecord for beams column %r" % label)
+
+
+def _encode_swath_bathymetry_ping(scalars, beams, kmall_specific=None, tx_sectors=None,
+                                   scale_factors=None, major_version=3):
+    """
+    Encode a GSF_RECORD_SWATH_BATHYMETRY_PING payload: the fixed-format
+    scalar fields, a GSF_SWATH_BATHY_SUBRECORD_SCALE_FACTORS subrecord, one
+    beam-array subrecord per entry in `beams`, and (if given) the KMALL
+    vendor-specific subrecord. The exact inverse of
+    _decode_swath_bathymetry_ping(): `scalars` and `beams` use the same
+    keys/column labels its `scalars`/`tables['Beams']` return, so a decoded
+    ping can be re-encoded directly (PingTime accepts the ISO8601 string
+    _decode_swath_bathymetry_ping() produces -- see _gsf_epoch()).
+
+    :param scalars: dict; PingTime, Longitude_deg, Latitude_deg, and
+        NumberBeams are required. Every other key (CenterBeam, PingFlags,
+        TideCorrector_m, DepthCorrector_m, Heading_deg, Pitch_deg,
+        Roll_deg, Heave_m, Course_deg, Speed_kn, and, at major_version > 2,
+        Height_m/SEP_m/GPSTideCorrector_m) defaults to 0/0.0 if absent.
+    :param beams: dict of {column label: array-like}, e.g. {'Depth_m': [...],
+        'AcrossTrack_m': [...]}. Every array must have length NumberBeams.
+        Only labels resolvable by _beam_array_subrecord_id() (i.e. present
+        in DEFAULT_PING_SCALE_FACTORS/`scale_factors`, or 'BeamFlags') can
+        be encoded.
+    :param kmall_specific: optional dict for the KMALL_SPECIFIC subrecord
+        (see _decode_kmall_specific()'s return); `tx_sectors` is its
+        matching list of per-sector dicts.
+    :param scale_factors: optional override of DEFAULT_PING_SCALE_FACTORS;
+        same shape (subrecordID -> (multiplier, offset, field_width_bytes,
+        signed)).
+    :raises KeyError: a required scalar is missing, or `beams` has a
+        column with no resolvable subrecordID.
+    :raises ValueError: an encoded beam value doesn't fit its field width.
+    """
+    g = scalars.get
+    number_beams = int(scalars['NumberBeams'])
+
+    out = struct.pack('>2I', *_gsf_epoch(scalars['PingTime']))
+    out += struct.pack('>i', _gsf_round(scalars['Longitude_deg'] * 1.0e7))
+    out += struct.pack('>i', _gsf_round(scalars['Latitude_deg'] * 1.0e7))
+    out += struct.pack('>4H', number_beams, int(g('CenterBeam', 0)), int(g('PingFlags', 0)), 0)
+    out += struct.pack('>h', _gsf_round(g('TideCorrector_m', 0.0) * 100.0))
+    out += struct.pack('>i', _gsf_round(g('DepthCorrector_m', 0.0) * 100.0))
+    out += struct.pack('>H', _gsf_round(g('Heading_deg', 0.0) * 100.0))
+    out += struct.pack(
+        '>3h',
+        _gsf_round(g('Pitch_deg', 0.0) * 100.0),
+        _gsf_round(g('Roll_deg', 0.0) * 100.0),
+        _gsf_round(g('Heave_m', 0.0) * 100.0))
+    out += struct.pack(
+        '>2H', _gsf_round(g('Course_deg', 0.0) * 100.0), _gsf_round(g('Speed_kn', 0.0) * 100.0))
+
+    if major_version > 2:
+        out += struct.pack(
+            '>3i',
+            _gsf_round(g('Height_m', 0.0) * 1000.0),
+            _gsf_round(g('SEP_m', 0.0) * 1000.0),
+            _gsf_round(g('GPSTideCorrector_m', 0.0) * 1000.0))
+        out += b'\x00' * 2
+
+    sf_table = scale_factors if scale_factors is not None else DEFAULT_PING_SCALE_FACTORS
+
+    used_scale_factors = {}
+    array_subrecords = b''
+    for label in sorted(beams, key=_beam_array_subrecord_id):
+        values = beams[label]
+        if label == 'BeamFlags':
+            body = np.asarray(values, dtype=np.uint8).astype('>u1').tobytes()
+            header_word = (_SUBRECORD_BEAM_FLAGS_ARRAY << 24) | len(body)
+            array_subrecords += struct.pack('>I', header_word) + body
+            continue
+
+        subrecord_id = _LABEL_TO_SUBRECORD_ID[label]
+        multiplier, offset, width, signed = sf_table[subrecord_id]
+        used_scale_factors[subrecord_id] = (float(multiplier), float(offset), width << 4)
+        array_subrecords += _encode_ping_array(subrecord_id, values, multiplier, offset, signed, width)
+
+    out += _encode_scale_factors(used_scale_factors)
+    out += array_subrecords
+
+    if kmall_specific is not None:
+        out += _encode_kmall_specific(kmall_specific, tx_sectors)
+
+    return out
+
+
 def _gsf_major_version(version_string, default=3):
     """ Parse the major version number out of a GSF_RECORD_HEADER version
     string (e.g. "GSF-v03.09" -> 3), falling back to `default` if it can't
@@ -1509,6 +1977,97 @@ class gsf():
                                 print(",".join(fields))
 
             self.FID.seek(offset + GSF_RECORD_FRAMING_SIZE + readSize, 0)
+
+    ###########################################################
+    # Writing
+    ###########################################################
+
+    def write_record(self, record_id, payload, checksum=False):
+        """
+        Write one GSF record: [4-byte size][4-byte data identifier
+        (+4-byte checksum if requested)][payload]. Inverse of
+        read_record_header() + the payload reads elsewhere in this class;
+        mirrors gsf.c's gsfWrite()/gsfPackStream() framing, per the same
+        encoding documented at gsfDataID above.
+
+        :param record_id: a RecordType (or int recordID).
+        :param payload: bytes -- the fully assembled record body, as
+            returned by one of the _encode_* functions above.
+        :param checksum: if True, prefix payload with gsf_checksum(payload)
+            and set the checksum flag bit in the data identifier word.
+        """
+        if self.FID is None:
+            self.OpenFiletoWrite()
+
+        record_id = int(record_id)
+        if checksum:
+            body = struct.pack('>I', gsf_checksum(payload)) + payload
+            did = 0x80000000 | (record_id & 0x003FFFFF)
+        else:
+            body = payload
+            did = record_id & 0x003FFFFF
+
+        self.FID.write(struct.pack('>II', len(payload), did) + body)
+
+    def write_header(self, version=None):
+        """
+        Write the GSF_RECORD_HEADER record and remember its version (as
+        self.gsfVersion) for subsequent write_swath_bathymetry_ping() calls.
+        Must be the first record written to a new file. See _encode_header()
+        -- note that the real GSF encoder always stamps its own current
+        version, so `version` exists mainly for testing.
+        """
+        version = version or GSF_VERSION
+        self.write_record(RecordType.GSF_RECORD_HEADER, _encode_header(version))
+        self.gsfVersion = version
+
+    def write_processing_parameters(self, params, param_time):
+        """ Write a GSF_RECORD_PROCESSING_PARAMETERS record. See
+        _encode_name_value_parameters(). """
+        self.write_record(
+            RecordType.GSF_RECORD_PROCESSING_PARAMETERS,
+            _encode_name_value_parameters(param_time, params))
+
+    def write_sensor_parameters(self, params, param_time):
+        """ Write a GSF_RECORD_SENSOR_PARAMETERS record. See
+        _encode_name_value_parameters(). """
+        self.write_record(
+            RecordType.GSF_RECORD_SENSOR_PARAMETERS,
+            _encode_name_value_parameters(param_time, params))
+
+    def write_sound_velocity_profile(self, observation_time, application_time,
+                                      latitude_deg, longitude_deg,
+                                      depth_m, sound_speed_mPerSec):
+        """ Write a GSF_RECORD_SOUND_VELOCITY_PROFILE record. See
+        _encode_sound_velocity_profile(). """
+        self.write_record(
+            RecordType.GSF_RECORD_SOUND_VELOCITY_PROFILE,
+            _encode_sound_velocity_profile(
+                observation_time, application_time, latitude_deg, longitude_deg,
+                depth_m, sound_speed_mPerSec))
+
+    def write_attitude(self, attitude_time, pitch_deg, roll_deg, heave_m, heading_deg):
+        """ Write a GSF_RECORD_ATTITUDE record. See _encode_attitude(). """
+        self.write_record(
+            RecordType.GSF_RECORD_ATTITUDE,
+            _encode_attitude(attitude_time, pitch_deg, roll_deg, heave_m, heading_deg))
+
+    def write_swath_bathymetry_ping(self, scalars, beams, kmall_specific=None,
+                                     tx_sectors=None, scale_factors=None):
+        """
+        Write a GSF_RECORD_SWATH_BATHYMETRY_PING record. See
+        _encode_swath_bathymetry_ping() for the expected shape of
+        `scalars`/`beams`/`kmall_specific`/`tx_sectors`/`scale_factors`.
+        Uses self.gsfVersion (set by write_header(), which must be called
+        first) to decide whether to include the height/SEP/GPS-tide-
+        corrector fields (major_version > 2 -- true for every GSF_VERSION
+        this codebase writes).
+        """
+        major_version = _gsf_major_version(self.gsfVersion)
+        self.write_record(
+            RecordType.GSF_RECORD_SWATH_BATHYMETRY_PING,
+            _encode_swath_bathymetry_ping(
+                scalars, beams, kmall_specific, tx_sectors, scale_factors, major_version))
 
 
 ###########################################################
