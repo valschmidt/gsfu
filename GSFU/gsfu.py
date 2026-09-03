@@ -1335,6 +1335,71 @@ def _encode_ping_array(subrecord_id, values, multiplier, offset, signed, width):
     return struct.pack('>I', header_word) + body
 
 
+def new_kmall_specific():
+    """
+    Return a new dict with every GSF_SWATH_BATHY_SUBRECORD_KMALL_SPECIFIC
+    scalar field name present, pre-set to 0/0.0 (or, for
+    NumBytesPerTxSector/NumBytesPerClass, the fixed byte counts
+    _encode_kmall_specific() itself defaults to). gsf.h defines no
+    GSF_NULL_* sentinel for these vendor-specific fields (unlike the ping
+    scalars from new_swath_bathymetry_ping_scalars()), so 0 is the only
+    "not specified" marker available -- if 0 is itself a plausible value
+    for a field you care about, be sure to actually set it here rather
+    than relying on the default. Field meanings are documented on
+    _decode_kmall_specific(); convert.md points to real sample values.
+
+    Note: GSFKMALLVersion is always forced to 0 on encode regardless of
+    what you set here (a gsf_enc.c quirk, see _encode_kmall_specific());
+    NumTxSectors/NumExtraDetectionClasses (also omitted from this dict)
+    are likewise always derived from len(tx_sectors)/len(class_rows), not
+    read from this dict, so there's no point setting them.
+    """
+    return {
+        'DgmType': 0, 'DgmVersion': 0, 'SystemID': 0, 'EchoSounderID': 0,
+        'NumBytesCmnPart': 0, 'PingCnt': 0, 'RxFansPerPing': 0, 'RxFanIndex': 0,
+        'SwathsPerPing': 0, 'SwathAlongPosition': 0, 'TxTransducerInd': 0,
+        'RxTransducerInd': 0, 'NumRxTransducers': 0, 'AlgorithmType': 0,
+        'NumBytesInfoData': 0, 'PingRate_Hz': 0.0, 'BeamSpacing': 0,
+        'DepthMode': 0, 'SubDepthMode': 0, 'DistanceBtwSwath': 0,
+        'DetectionMode': 0, 'PulseForm': 0, 'FrequencyMode_Hz': 0.0,
+        'FreqRangeLowLim_Hz': 0.0, 'FreqRangeHighLim_Hz': 0.0,
+        'MaxTotalTxPulseLength_sec': 0.0, 'MaxEffTxPulseLength_sec': 0.0,
+        'MaxEffTxBandWidth_Hz': 0.0, 'AbsCoeff_dBPerkm': 0.0,
+        'PortSectorEdge_deg': 0.0, 'StarbSectorEdge_deg': 0.0,
+        'PortMeanCov_deg': 0.0, 'StarbMeanCov_deg': 0.0,
+        'PortMeanCov_m': 0.0, 'StarbMeanCov_m': 0.0,
+        'ModeAndStabilisation': 0, 'RuntimeFilter1': 0, 'RuntimeFilter2': 0,
+        'PipeTrackingStatus': 0, 'TransmitArraySizeUsed_deg': 0.0,
+        'ReceiveArraySizeUsed_deg': 0.0, 'TransmitPower_dB': 0.0,
+        'SLrampUpTimeRemaining': 0, 'YawAngle_deg': 0.0,
+        'NumBytesPerTxSector': 53, 'HeadingVessel_deg': 0.0,
+        'SoundSpeedAtTxDepth_mPerSec': 0.0, 'TxTransducerDepth_m': 0.0,
+        'ZWaterLevelReRefPoint_m': 0.0, 'XKmallToAll_m': 0.0, 'YKmallToAll_m': 0.0,
+        'LatLongInfo': 0, 'PosSensorStatus': 0, 'AttitudeSensorStatus': 0,
+        'Latitude_deg': 0.0, 'Longitude_deg': 0.0, 'EllipsoidHeightReRefPoint_m': 0.0,
+        'NumBytesRxInfo': 0, 'NumSoundingsMaxMain': 0, 'NumSoundingsValidMain': 0,
+        'NumBytesPerSounding': 0, 'WCSampleRate': 0.0, 'SeabedImageSampleRate': 0.0,
+        'BSnormal_dB': 0.0, 'BSoblique_dB': 0.0,
+        'ExtraDetectionAlarmFlag': 0, 'NumExtraDetections': 0, 'NumBytesPerClass': 35,
+    }
+
+
+def new_kmall_tx_sector():
+    """
+    Return a new dict with every per-transmit-sector field name (one entry
+    of the `tx_sectors` list passed to write_swath_bathymetry_ping()),
+    pre-set to 0/0.0 -- see new_kmall_specific() for why 0 (not a
+    GSF_NULL_* sentinel) is the best available default here.
+    """
+    return {
+        'TxSectorNumb': 0, 'TxArrNumber': 0, 'TxSubArray': 0,
+        'SectorTransmitDelay_sec': 0.0, 'TiltAngleReTx_deg': 0.0,
+        'TxNominalSourceLevel_dB': 0.0, 'TxFocusRange_m': 0.0,
+        'CentreFreq_Hz': 0.0, 'SignalBandWidth_Hz': 0.0,
+        'TotalSignalLength_sec': 0.0, 'PulseShading': 0, 'SignalWaveForm': 0,
+    }
+
+
 def _encode_kmall_specific(s, sector_rows=None, class_rows=None):
     """
     Encode a GSF_SWATH_BATHY_SUBRECORD_KMALL_SPECIFIC subrecord (id 156),
@@ -1472,6 +1537,47 @@ def _beam_array_subrecord_id(label):
     raise KeyError("no known ping array subrecord for beams column %r" % label)
 
 
+def new_swath_bathymetry_ping_scalars():
+    """
+    Return a new dict with every GSF_RECORD_SWATH_BATHYMETRY_PING scalar
+    field name present -- the four required fields (PingTime,
+    Longitude_deg, Latitude_deg, NumberBeams) set to None as a placeholder
+    you must overwrite, and every optional field pre-set to its
+    GSF_NULL_* "not available" sentinel (or, for CenterBeam/PingFlags/
+    GPSTideCorrector_m, to 0/0.0 -- gsf.h defines no sentinel for those
+    three). Populate this dict with whatever you actually know and pass
+    it straight to write_swath_bathymetry_ping(); every field you don't
+    touch is written as "not available", not as a misleading 0/0.0, and
+    every valid key name is visible here in one place instead of having
+    to be looked up. See convert.md's "Marking a field as not available"
+    section.
+
+    :raises ValueError: (from write_swath_bathymetry_ping()/
+        _encode_swath_bathymetry_ping()) if PingTime, Longitude_deg,
+        Latitude_deg, or NumberBeams is still None when you pass this
+        dict to write_swath_bathymetry_ping().
+    """
+    return {
+        'PingTime': None,
+        'Longitude_deg': None,
+        'Latitude_deg': None,
+        'NumberBeams': None,
+        'CenterBeam': 0,
+        'PingFlags': 0,
+        'TideCorrector_m': GSF_NULL_TIDE_CORRECTOR,
+        'DepthCorrector_m': GSF_NULL_DEPTH_CORRECTOR,
+        'Heading_deg': GSF_NULL_HEADING,
+        'Pitch_deg': GSF_NULL_PITCH,
+        'Roll_deg': GSF_NULL_ROLL,
+        'Heave_m': GSF_NULL_HEAVE,
+        'Course_deg': GSF_NULL_COURSE,
+        'Speed_kn': GSF_NULL_SPEED,
+        'Height_m': GSF_NULL_HEIGHT,
+        'SEP_m': GSF_NULL_SEP,
+        'GPSTideCorrector_m': 0.0,
+    }
+
+
 def _encode_swath_bathymetry_ping(scalars, beams, kmall_specific=None, tx_sectors=None,
                                    scale_factors=None, major_version=3):
     """
@@ -1485,31 +1591,44 @@ def _encode_swath_bathymetry_ping(scalars, beams, kmall_specific=None, tx_sector
     _decode_swath_bathymetry_ping() produces -- see _gsf_epoch()).
 
     :param scalars: dict; PingTime, Longitude_deg, Latitude_deg, and
-        NumberBeams are required. CenterBeam, PingFlags, and (at
-        major_version > 2) GPSTideCorrector_m default to 0/0.0 if absent
-        (no GSF_NULL_* sentinel is defined for these). Every other key
-        (TideCorrector_m, DepthCorrector_m, Heading_deg, Pitch_deg,
-        Roll_deg, Heave_m, Course_deg, Speed_kn, and, at major_version > 2,
-        Height_m/SEP_m) defaults to its GSF_NULL_* sentinel (e.g.
-        GSF_NULL_SPEED = 99.0 knots) if absent, per gsf.h's convention --
-        NOT 0/0.0, since 0 is itself a valid measured value for most of
-        these fields. Pass the value explicitly (0.0 or otherwise) when
-        you have it; omit the key only when it's genuinely unavailable.
+        NumberBeams are required (must be present and not None). Building
+        this dict with new_swath_bathymetry_ping_scalars() is recommended
+        over hand-assembling it: it pre-fills every valid key name, so
+        there's nothing to look up and nothing to get wrong. CenterBeam,
+        PingFlags, and (at major_version > 2) GPSTideCorrector_m default
+        to 0/0.0 if absent (no GSF_NULL_* sentinel is defined for these).
+        Every other key (TideCorrector_m, DepthCorrector_m, Heading_deg,
+        Pitch_deg, Roll_deg, Heave_m, Course_deg, Speed_kn, and, at
+        major_version > 2, Height_m/SEP_m) defaults to its GSF_NULL_*
+        sentinel (e.g. GSF_NULL_SPEED = 99.0 knots) if absent, per gsf.h's
+        convention -- NOT 0/0.0, since 0 is itself a valid measured value
+        for most of these fields. Pass the value explicitly (0.0 or
+        otherwise) when you have it; omit the key only when it's
+        genuinely unavailable.
     :param beams: dict of {column label: array-like}, e.g. {'Depth_m': [...],
         'AcrossTrack_m': [...]}. Every array must have length NumberBeams.
         Only labels resolvable by _beam_array_subrecord_id() (i.e. present
         in DEFAULT_PING_SCALE_FACTORS/`scale_factors`, or 'BeamFlags') can
         be encoded.
     :param kmall_specific: optional dict for the KMALL_SPECIFIC subrecord
-        (see _decode_kmall_specific()'s return); `tx_sectors` is its
-        matching list of per-sector dicts.
+        (see new_kmall_specific()/_decode_kmall_specific()'s return);
+        `tx_sectors` is its matching list of per-sector dicts (see
+        new_kmall_tx_sector()).
     :param scale_factors: optional override of DEFAULT_PING_SCALE_FACTORS;
         same shape (subrecordID -> (multiplier, offset, field_width_bytes,
         signed)).
-    :raises KeyError: a required scalar is missing, or `beams` has a
-        column with no resolvable subrecordID.
-    :raises ValueError: an encoded beam value doesn't fit its field width.
+    :raises ValueError: PingTime, Longitude_deg, Latitude_deg, or
+        NumberBeams is missing or None in `scalars`; or an encoded beam
+        value doesn't fit its field width.
+    :raises KeyError: `beams` has a column with no resolvable subrecordID.
     """
+    missing = [k for k in ('PingTime', 'Longitude_deg', 'Latitude_deg', 'NumberBeams')
+               if scalars.get(k) is None]
+    if missing:
+        raise ValueError(
+            "scalars is missing required field(s): %s (see "
+            "new_swath_bathymetry_ping_scalars())" % ', '.join(missing))
+
     g = scalars.get
     number_beams = int(scalars['NumberBeams'])
 

@@ -152,21 +152,29 @@ than writing one record per sample.
 
 This is the record most worth walking through carefully, since it has the
 most moving parts: fixed scalar fields, a table of per-beam arrays, and an
-optional vendor-specific block.
+optional vendor-specific block. It also has by far the most scalar field
+names to keep straight (17, plus ~65 more if you add the KMALL
+vendor-specific block below) -- rather than writing that dict out by hand
+from memory, start from `new_swath_bathymetry_ping_scalars()`, which
+returns every valid key name already present, so there's nothing to look
+up and no name to mistype:
 
 ```python
-scalars = {
-    "PingTime": 1724650073.719285,
-    "Longitude_deg": -129.981855,
-    "Latitude_deg": 45.925417,
-    "NumberBeams": 3,
-    "CenterBeam": 1,
-    "Heading_deg": 210.5,
-    "Pitch_deg": 0.10,
-    "Roll_deg": -0.4,
-    "Heave_m": 0.01,
-    "Height_m": -32.1,   # antenna height above the ellipsoid, if known
-}
+from GSFU.gsfu import new_swath_bathymetry_ping_scalars
+
+scalars = new_swath_bathymetry_ping_scalars()
+scalars.update(
+    PingTime=1724650073.719285,
+    Longitude_deg=-129.981855,
+    Latitude_deg=45.925417,
+    NumberBeams=3,
+    CenterBeam=1,
+    Heading_deg=210.5,
+    Pitch_deg=0.10,
+    Roll_deg=-0.4,
+    Heave_m=0.01,
+    Height_m=-32.1,   # antenna height above the ellipsoid, if known
+)
 
 beams = {
     "Depth_m":         [7.342, 7.356, 7.370],
@@ -180,13 +188,17 @@ beams = {
 G.write_swath_bathymetry_ping(scalars, beams)
 ```
 
-Only `PingTime`, `Longitude_deg`, `Latitude_deg`, and `NumberBeams` are
-required in `scalars`. `CenterBeam`, `PingFlags`, and `GPSTideCorrector_m`
-default to `0`/`0.0` if omitted. Every other optional field --
-`TideCorrector_m`, `DepthCorrector_m`, `Heading_deg`, `Pitch_deg`,
-`Roll_deg`, `Heave_m`, `Course_deg`, `Speed_kn`, `Height_m`, `SEP_m` --
-defaults to its **GSF_NULL_\* sentinel**, not `0`/`0.0`, if you leave it
-out -- see "Marking a field as not available" below for why.
+`new_swath_bathymetry_ping_scalars()` sets the four required fields
+(`PingTime`, `Longitude_deg`, `Latitude_deg`, `NumberBeams`) to `None` as a
+placeholder -- `write_swath_bathymetry_ping()` raises `ValueError` naming
+whichever one you forget to overwrite -- and pre-fills every optional
+field with its **GSF_NULL_\* sentinel** (or, for `CenterBeam`, `PingFlags`,
+and `GPSTideCorrector_m`, `0`/`0.0` -- gsf.h defines no sentinel for those
+three). Fields you never touch are written as "not available", not as a
+misleading `0`/`0.0` -- see "Marking a field as not available" below for
+why that distinction matters. (Building `scalars` as a plain `dict` literal
+the way earlier GSF-writing tools do also still works exactly as before --
+the template is a convenience, not a required calling convention.)
 
 Every array in `beams` must have exactly `NumberBeams` entries. The
 dict *key* is what selects which subrecord gets written and, in turn, its
@@ -196,29 +208,38 @@ Any key `write_swath_bathymetry_ping()` doesn't recognize raises
 `KeyError` -- see `_PING_ARRAY_SUBRECORDS` in `gsfu.py` for the full list of
 recognized labels.
 
-To add the KMALL (Kongsberg SIS 5) vendor-specific subrecord:
+To add the KMALL (Kongsberg SIS 5) vendor-specific subrecord, the same
+template pattern applies -- `new_kmall_specific()` for the scalar block,
+`new_kmall_tx_sector()` for each entry of `tx_sectors`:
 
 ```python
-kmall_specific = {
-    "EchoSounderID": 712,
-    "PingRate_Hz": 1.2,
-    # ... see _decode_kmall_specific()'s docstring in gsfu.py for the
-    # full field list; anything omitted defaults to 0/0.0.
-}
-tx_sectors = [
-    {"TxSectorNumb": 0, "CenterFreq_Hz": 70000.0, "TiltAngleReTx_deg": 0.0},
-    {"TxSectorNumb": 1, "CenterFreq_Hz": 71000.0, "TiltAngleReTx_deg": 15.0},
-]
+from GSFU.gsfu import new_kmall_specific, new_kmall_tx_sector
+
+kmall_specific = new_kmall_specific()
+kmall_specific.update(EchoSounderID=712, PingRate_Hz=1.2)
+
+sector0 = new_kmall_tx_sector()
+sector0.update(TxSectorNumb=0, CentreFreq_Hz=70000.0, TiltAngleReTx_deg=0.0)
+sector1 = new_kmall_tx_sector()
+sector1.update(TxSectorNumb=1, CentreFreq_Hz=71000.0, TiltAngleReTx_deg=15.0)
+tx_sectors = [sector0, sector1]
 
 G.write_swath_bathymetry_ping(
     scalars, beams, kmall_specific=kmall_specific, tx_sectors=tx_sectors)
 ```
 
-`kmall_specific` is a flat dict of scalar fields (matching the `KMALL.*`
-names `-p` prints, minus the `KMALL.` prefix); `tx_sectors` is a list of
-per-sector dicts, one per transmit sector (up to `GSF_MAX_KMALL_SECTORS` =
-9). Both are optional -- omit them entirely for a non-KMALL system, or if
-you don't need the vendor-specific block.
+Note the spelling: `CentreFreq_Hz`, not `CenterFreq_Hz` -- one of the ~65
+vendor-specific field names carried over from the originating `.kmall`
+format's own (British) spelling, and exactly the kind of thing
+`new_kmall_specific()`/`new_kmall_tx_sector()` save you from having to get
+right from memory. `kmall_specific` is a flat dict of scalar fields
+(matching the `KMALL.*` names `-p` prints, minus the `KMALL.` prefix);
+`tx_sectors` is a list of per-sector dicts, one per transmit sector (up to
+`GSF_MAX_KMALL_SECTORS` = 9). Both are optional -- omit them entirely for a
+non-KMALL system, or if you don't need the vendor-specific block. Unlike
+the ping scalars above, gsf.h defines no null-value convention for these
+vendor-specific fields, so both templates default every field to plain
+`0`/`0.0` -- see "Marking a field as not available" below.
 
 ## 4. Scale factors
 
@@ -279,11 +300,12 @@ extreme, implausible edge of) the field's valid range:
 | `SEP_m` | `GSF_NULL_SEP` | 9999.99 |
 
 All are importable from `GSFU.gsfu` (`from GSFU.gsfu import GSF_NULL_SPEED`,
-etc.). `write_swath_bathymetry_ping()` already uses the appropriate one as
-the default for any of these fields you omit from `scalars` -- so simply
-leaving a field out is enough in most cases. Pass the constant explicitly
-instead of omitting the key when you want that intent visible directly in
-your own code, e.g.:
+etc.), and `new_swath_bathymetry_ping_scalars()` (above) already fills in
+every one of them for you -- if you build `scalars` that way, a field you
+never overwrite is automatically "not available", not `0`/`0.0`. Building
+`scalars` as a plain dict instead? Set the constant explicitly rather than
+omitting the key, so the "not available" intent is visible in your own
+code too:
 
 ```python
 from GSFU.gsfu import GSF_NULL_COURSE, GSF_NULL_SPEED
@@ -336,7 +358,7 @@ G.closeFile()
 ## Putting it together
 
 ```python
-from GSFU.gsfu import gsf
+from GSFU.gsfu import gsf, new_swath_bathymetry_ping_scalars
 
 G = gsf("my_survey.gsf")
 G.write_header()
@@ -348,10 +370,11 @@ G.write_sound_velocity_profile(
 
 for ping_time, lat, lon, beams in my_pings:
     G.write_attitude(...)  # or batch these separately, see above
-    G.write_swath_bathymetry_ping(
-        {"PingTime": ping_time, "Latitude_deg": lat, "Longitude_deg": lon,
-         "NumberBeams": len(beams["Depth_m"])},
-        beams)
+    scalars = new_swath_bathymetry_ping_scalars()
+    scalars.update(
+        PingTime=ping_time, Latitude_deg=lat, Longitude_deg=lon,
+        NumberBeams=len(beams["Depth_m"]))
+    G.write_swath_bathymetry_ping(scalars, beams)
 
 G.closeFile()
 ```

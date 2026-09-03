@@ -52,6 +52,9 @@ from GSFU.gsfu import (
     _gsf_round,
     gsf,
     gsf_checksum,
+    new_kmall_specific,
+    new_kmall_tx_sector,
+    new_swath_bathymetry_ping_scalars,
 )
 
 
@@ -368,11 +371,22 @@ class TestEncodeSwathBathymetryPing:
         assert 'Height_m' not in scalars_v2
         assert 'Height_m' in scalars_v3
 
-    def test_missing_required_scalar_raises_keyerror(self):
+    def test_missing_required_scalar_raises_valueerror(self):
         incomplete = dict(self._SCALARS)
         del incomplete['NumberBeams']
-        with pytest.raises(KeyError):
+        with pytest.raises(ValueError, match='NumberBeams'):
             _encode_swath_bathymetry_ping(incomplete, self._BEAMS)
+
+    def test_required_scalar_left_as_none_raises_valueerror(self):
+        # new_swath_bathymetry_ping_scalars() sets required fields to None
+        # as a placeholder -- forgetting to overwrite one must not
+        # silently encode None (a struct.pack TypeError deep in the
+        # encoder) or a nonsense value.
+        scalars = new_swath_bathymetry_ping_scalars()
+        scalars.update(Longitude_deg=-70.5, Latitude_deg=43.1, NumberBeams=1)
+        # PingTime deliberately left None.
+        with pytest.raises(ValueError, match='PingTime'):
+            _encode_swath_bathymetry_ping(scalars, {'Depth_m': [10.0]})
 
     def test_unknown_beams_column_raises_keyerror(self):
         with pytest.raises(KeyError):
@@ -447,6 +461,68 @@ class TestEncodeSwathBathymetryPing:
 
         # 10.03 rounds to the nearest 0.1m under the coarser override.
         assert list(tables['Beams']['Depth_m']) == pytest.approx([10.0])
+
+
+# ---------------------------------------------------------------------------
+# new_swath_bathymetry_ping_scalars() / new_kmall_specific() /
+# new_kmall_tx_sector() -- template-dict helpers
+# ---------------------------------------------------------------------------
+
+class TestTemplateHelpers:
+    def test_ping_scalars_template_has_required_fields_as_none(self):
+        scalars = new_swath_bathymetry_ping_scalars()
+        for key in ('PingTime', 'Longitude_deg', 'Latitude_deg', 'NumberBeams'):
+            assert scalars[key] is None
+
+    def test_ping_scalars_template_optional_fields_are_null_sentinels(self):
+        scalars = new_swath_bathymetry_ping_scalars()
+        assert scalars['Speed_kn'] == GSF_NULL_SPEED
+        assert scalars['Course_deg'] == GSF_NULL_COURSE
+        assert scalars['TideCorrector_m'] == GSF_NULL_TIDE_CORRECTOR
+        assert scalars['DepthCorrector_m'] == GSF_NULL_DEPTH_CORRECTOR
+        assert scalars['Heading_deg'] == GSF_NULL_HEADING
+        assert scalars['Pitch_deg'] == GSF_NULL_PITCH
+        assert scalars['Roll_deg'] == GSF_NULL_ROLL
+        assert scalars['Heave_m'] == GSF_NULL_HEAVE
+        assert scalars['Height_m'] == GSF_NULL_HEIGHT
+        assert scalars['SEP_m'] == GSF_NULL_SEP
+        # No GSF_NULL_* sentinel exists for these.
+        assert scalars['CenterBeam'] == 0
+        assert scalars['GPSTideCorrector_m'] == 0.0
+
+    def test_ping_scalars_template_populated_and_used_directly(self):
+        # The whole point: fill in the required fields plus whatever you
+        # know, leave the rest, and pass it straight to the encoder.
+        scalars = new_swath_bathymetry_ping_scalars()
+        scalars.update(
+            PingTime=1700000000.0, Longitude_deg=-70.5, Latitude_deg=43.1,
+            NumberBeams=1, Speed_kn=5.0)
+        payload = _encode_swath_bathymetry_ping(scalars, {'Depth_m': [10.0]})
+        decoded, _tables, _notes = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
+
+        assert decoded['Speed_kn'] == pytest.approx(5.0)
+        assert decoded['Course_deg'] == pytest.approx(GSF_NULL_COURSE)  # left untouched
+
+    def test_kmall_specific_template_round_trips_and_covers_every_encoded_key(self):
+        s = new_kmall_specific()
+        payload = _encode_kmall_specific(s)
+        decoded, _sectors, _classes, _consumed = _decode_kmall_specific(payload, 4)
+
+        # Every non-derived, non-forced key in the template must survive
+        # a round trip unchanged (within float rounding).
+        for key, value in s.items():
+            assert decoded[key] == pytest.approx(value)
+
+    def test_kmall_tx_sector_template_round_trips(self):
+        row = new_kmall_tx_sector()
+        row.update(TxSectorNumb=2, CentreFreq_Hz=71000.0)
+        payload = _encode_kmall_specific({}, sector_rows=[row])
+        _decoded, sectors, _classes, _consumed = _decode_kmall_specific(payload, 4)
+
+        assert len(sectors) == 1
+        assert sectors[0]['TxSectorNumb'] == 2
+        assert sectors[0]['CentreFreq_Hz'] == pytest.approx(71000.0)
+        assert sectors[0]['TxArrNumber'] == 0
 
 
 # ---------------------------------------------------------------------------

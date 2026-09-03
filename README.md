@@ -235,7 +235,13 @@ source):
 encoder yet. The `scalars`/`beams` dict shapes accepted by `write_*` match
 what the corresponding `_decode_*` function returns, so a record decoded
 with `-p` can be re-encoded with only the field names already familiar from
-that output -- see [`convert.md`](convert.md) for a worked example.
+that output. Rather than writing `scalars`/`kmall_specific`/a `tx_sectors`
+row out by hand, `new_swath_bathymetry_ping_scalars()`,
+`new_kmall_specific()`, and `new_kmall_tx_sector()` return a dict with
+every valid key already present -- required fields as `None`, optional
+fields pre-set to their `GSF_NULL_*` "not available" sentinel -- ready to
+populate and pass straight to `write_swath_bathymetry_ping()`. See
+[`convert.md`](convert.md) for a worked example.
 
 ## `.kmall` → `.gsf` conversion (`kmall2gsf.py`)
 
