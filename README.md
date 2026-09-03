@@ -1,16 +1,17 @@
 # GSF file reader (`gsfu`)
 
-A Python class and command line utility for indexing, reading, and writing
-sonar data files in the **Generic Sensor Format (GSF)**. The `gsfu.py`
-utility can index a GSF file and print a summary of the record types it
-contains (count and bytes consumed by each) -- more functionality (reading
-and writing individual records) is planned.
+A Python class and command line utility for indexing and reading sonar data
+files in the **Generic Sensor Format (GSF)**. `gsfu.py` can index a GSF file
+and print a summary of the record types it contains (`-V`), and can decode
+and print any record's fields for debugging (`-p`, `-I`). **Writing/encoding
+GSF files is not yet implemented** -- see "Capabilities" below for the exact
+current state, and "Planned" for what's next (a `.kmall` → `.gsf` converter).
 
     ./GSFU/gsfu.py -h
-    usage: gsfu.py [-h] [-f GSF_FILENAME] [-V] [-p [RECORDTYPE]] [-v]
+    usage: gsfu.py [-h] [-f GSF_FILENAME] [-V] [-p [RECORDTYPE]] [-I] [-v]
 
-    A python script (and class) for indexing, reading, and writing Generic Sensor
-    Format (GSF) data files.
+    A python script (and class) for indexing and reading Generic Sensor Format
+    (GSF) data files.
 
     options:
       -h, --help       show this help message and exit
@@ -20,6 +21,10 @@ and writing individual records) is planned.
       -p [RECORDTYPE]  Print records to stdout as ASCII text, for debugging. With
                        no value, prints every record; optionally restrict to one
                        record type, e.g. -p COMMENT or -p GSF_RECORD_COMMENT.
+      -I               Print each swath bathymetry ping's per-beam backscatter
+                       time series (the intensity series subrecord) to stdout as
+                       CSV, one row per beam. Currently decoded only for the KMALL
+                       (Kongsberg SIS 5) sensor-imagery format.
       -v               Increasingly verbose output (e.g. -v -vv), for debugging
                        use -vv
 
@@ -48,15 +53,16 @@ cannot be loaded on macOS or Windows, and even importing `gsfpy` on those
 platforms raises at import time. That made it unworkable as this project's
 runtime dependency.
 
-Instead, `gsfu.py` re-implements the parts of the GSF file format needed for
-indexing directly in Python, using `struct` to unpack the on-disk record
-framing -- the same approach [`kmall.py`](https://github.com/valschmidt/kmall)
-takes for Kongsberg's `.kmall` format. This keeps the tool dependency-free
-(just `pandas` and `numpy`) and portable to any platform Python runs on. The
-GSF record-array beam data (depth, travel time, amplitude, etc., stored as
-scaled 1/2/4-byte integers per `gsfScaleFactors`) is well suited to a
-`numpy`-vectorized decode when that functionality is added, avoiding a
-per-beam Python loop.
+Instead, `gsfu.py` re-implements the GSF file format directly in Python,
+using `struct` to unpack the on-disk record framing -- the same approach
+[`kmall.py`](https://github.com/valschmidt/kmall) takes for Kongsberg's
+`.kmall` format. This keeps the tool dependency-free (just `pandas` and
+`numpy`) and portable to any platform Python runs on. Ping beam arrays
+(depth, travel time, amplitude, etc., stored as scaled 1/2/4-byte integers
+per `gsfScaleFactors`) are decoded with `numpy` (`frombuffer` + a single
+vectorized scale/offset op per array), not a per-beam Python loop --
+benchmarked at roughly 100x faster than the naive per-beam-`struct.unpack`
+approach on real multi-hundred-beam pings.
 
 The record framing, naming, and constants used here are ported from the
 reference C implementation of the GSF library ("gsflib"),
@@ -107,13 +113,22 @@ measurements) as a table, one row per beam/point/measurement:
 ```
 $ gsfu.py -f data/GSF/0268_20240826_052757_EM712.gsf -p SWATH_BATHYMETRY_PING
 === GSF_RECORD_SWATH_BATHYMETRY_PING  offset=304484  size=25664 ===
-  PingTime           : 2024-08-26T05:27:53.719285+00:00
-  Longitude_deg      : -169.059375
-  Latitude_deg       : -14.2062916
-  NumberBeams        : 400
+  PingTime                          : 2024-08-26T05:27:53.719285+00:00
+  Longitude_deg                     : -169.059375
+  Latitude_deg                      : -14.2062916
+  NumberBeams                       : 400
   ...
-  # subrecord id 156 (456 bytes) not decoded
-  # subrecord id 21 (13291 bytes) not decoded
+  KMALL.GSFKMALLVersion             : 0
+  KMALL.DgmType                     : 1
+  KMALL.EchoSounderID               : 712
+  ...
+  # IntensityTimeSeries (21, 13291 bytes) not decoded here: use gsf.print_intensity_series() / -I
+-- TxSectors --
+        TxSectorNumb  TxArrNumber  TxSubArray  SectorTransmitDelay_sec  ...
+Sector
+0                  0            0           0                 0.031502  ...
+1                  1            0           0                 0.000000  ...
+-- Beams --
        Depth_m  AcrossTrack_m  AlongTrack_m  TravelTime_s  BeamAngle_deg  ...
 Beam
 0     1014.072       -1150.11         62.35       2.04725         -75.85  ...
@@ -121,13 +136,12 @@ Beam
 ```
 
 Every `GSF_RECORD_*` type has a decoder. Within a ping's subrecord stream,
-every vendor sensor-specific subrecord is at least identified by its proper
-name (`KMALL_SPECIFIC`, `EM710_SPECIFIC`, `RESON_8101_SPECIFIC`, ... all ~30
-of gsf.h's `GSF_SWATH_BATHY_SUBRECORD_*_SPECIFIC` ids), and the KMALL format
-(Kongsberg SIS 5 / EM2040-and-newer -- id 156, shown as `KMALL.*` scalars and
-a `TxSectors` table above) is fully field-decoded; the ~29 others are
-reported by name and byte count rather than decoded. gsflib's own optional
-RLE array compression and the 2-bit packed quality-flags array are likewise
+the KMALL vendor-specific subrecord (id 156, shown as `KMALL.*` scalars and
+the `TxSectors` table above) is fully field-decoded; every *other* vendor
+sensor-specific subrecord (`EM710_SPECIFIC`, `RESON_8101_SPECIFIC`, ... ~29
+of gsf.h's `GSF_SWATH_BATHY_SUBRECORD_*_SPECIFIC` ids) is at least
+identified by its proper name, but not decoded. gsflib's own optional RLE
+array compression and the 2-bit packed quality-flags array are likewise
 noted rather than decoded. Any record a decoder can't make sense of (corrupt
 data, an unexpected size) falls back to the same raw ASCII rendering
 (non-printable bytes as `.`) used before decoders existed, with a note
@@ -159,25 +173,59 @@ that beam's raw samples -- rows are naturally ragged since sample count
 varies per beam. As with the ping table, only the KMALL sensor-imagery
 format is currently decoded; other sensors are noted and skipped.
 
-## Record types supported by the indexer
+## Capabilities
 
-Every top-level GSF record type is recognized by the indexer (payloads are
-not decoded yet -- only the record framing is parsed):
+**Indexing** (`-V`, `gsf.index_file()`): every one of the 12 top-level GSF
+record types is recognized and indexed -- offset, size, and type only, the
+payload is never decoded. This is what makes indexing fast even on
+multi-hundred-thousand-record files.
 
-| Record type | Description |
-|---|---|
-| `GSF_RECORD_HEADER` | GSF header record. Identifies the GSF version used to create the file. |
-| `GSF_RECORD_SWATH_BATHYMETRY_PING` | Data structure for a ping from a swath bathymetric system. |
-| `GSF_RECORD_SOUND_VELOCITY_PROFILE` | Sound velocity profile record. |
-| `GSF_RECORD_PROCESSING_PARAMETERS` | Internal record structure for processing parameters. |
-| `GSF_RECORD_SENSOR_PARAMETERS` | Sensor parameters record. |
-| `GSF_RECORD_COMMENT` | Comment record. |
-| `GSF_RECORD_HISTORY` | History record. |
-| `GSF_RECORD_NAVIGATION_ERROR` | Navigation error record. (Obsolete; replaced by `GSF_RECORD_HV_NAVIGATION_ERROR`.) |
-| `GSF_RECORD_SWATH_BATHY_SUMMARY` | Swath bathymetry summary record. |
-| `GSF_RECORD_SINGLE_BEAM_PING` | Single beam ping record. |
-| `GSF_RECORD_HV_NAVIGATION_ERROR` | Horizontal/Vertical navigation error record. |
-| `GSF_RECORD_ATTITUDE` | Attitude record: one or more time-tagged pitch/roll/heave/heading measurements. |
+**Reading / field-level decoding** (`-p`, `-I`, `gsf.print_records()`,
+`gsf.print_intensity_series()`): all 12 record types have a field-level
+decoder, so every one of them can be fully decoded, not just indexed:
+
+| Record type | Description | Decoded by `-p`? |
+|---|---|---|
+| `GSF_RECORD_HEADER` | GSF header record. Identifies the GSF version used to create the file. | Yes |
+| `GSF_RECORD_SWATH_BATHYMETRY_PING` | Data structure for a ping from a swath bathymetric system. | Yes, with caveats* |
+| `GSF_RECORD_SOUND_VELOCITY_PROFILE` | Sound velocity profile record. | Yes |
+| `GSF_RECORD_PROCESSING_PARAMETERS` | Internal record structure for processing parameters. | Yes |
+| `GSF_RECORD_SENSOR_PARAMETERS` | Sensor parameters record. | Yes |
+| `GSF_RECORD_COMMENT` | Comment record. | Yes |
+| `GSF_RECORD_HISTORY` | History record. | Yes |
+| `GSF_RECORD_NAVIGATION_ERROR` | Navigation error record. (Obsolete; replaced by `GSF_RECORD_HV_NAVIGATION_ERROR`.) | Yes |
+| `GSF_RECORD_SWATH_BATHY_SUMMARY` | Swath bathymetry summary record. | Yes |
+| `GSF_RECORD_SINGLE_BEAM_PING` | Single beam ping record. | Yes, fixed fields only -- the sensor-specific tail is noted, not decoded |
+| `GSF_RECORD_HV_NAVIGATION_ERROR` | Horizontal/Vertical navigation error record. | Yes |
+| `GSF_RECORD_ATTITUDE` | Attitude record: one or more time-tagged pitch/roll/heave/heading measurements. | Yes |
+
+\* Within a `SWATH_BATHYMETRY_PING`'s subrecord stream: the standard
+scale-factor-encoded beam arrays (depth, across/along track, travel time,
+beam angle, amplitude, errors, etc.) are decoded and vectorized with numpy;
+the KMALL vendor-specific subrecord (id 156 -- Kongsberg SIS 5 /
+EM2040-and-newer) is fully field-decoded; every *other* vendor
+sensor-specific subrecord (~29 of gsf.h's `GSF_SWATH_BATHY_SUBRECORD_*_SPECIFIC`
+ids -- Reson, SeaBat, EM3-series, Klein, R2Sonic, etc.) is identified by name
+but not decoded; and gsflib's optional RLE array compression, the 2-bit
+packed quality-flags array, and the per-beam backscatter time series
+(decoded separately, and only for KMALL, via `-I`/`print_intensity_series()`)
+are noted rather than decoded. Anything a decoder can't make sense of falls
+back to raw ASCII rendering with a note explaining why.
+
+**Writing / encoding**: not yet implemented. `gsf.OpenFiletoWrite()` exists
+but only opens the file -- there is currently no function anywhere in this
+codebase that encodes any GSF record. The class and CLI docstrings say
+"index and read" deliberately, not "read and write".
+
+## Planned
+
+A `.kmall` → `.gsf` conversion utility (`kmall2gsf.py`), reading Kongsberg
+`.kmall` files via the sibling [`kmall`](https://github.com/valschmidt/kmall)
+package and writing `PROCESSING_PARAMETERS`, `SOUND_VELOCITY_PROFILE`,
+`SWATH_BATHYMETRY_PING` (with the `KMALL_SPECIFIC` sensor-specific
+subrecord), and `ATTITUDE` records. This is what motivates adding
+write/encode support to the `gsf` class described above -- currently in
+design, not yet implemented.
 
 ## Testing
 
