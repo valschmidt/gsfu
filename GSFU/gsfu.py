@@ -230,11 +230,16 @@ class gsfDataID:
 # gsfDecodeHVNavigationError, gsfDecodeAttitude, and the fixed portion
 # of gsfDecodeSinglebeam.
 #
-# Deliberately NOT decoded (reported as a byte count instead): the
-# per-sensor "_SPECIFIC" subrecords (~30 vendor-specific sonar payloads),
-# gsflib's own optional RLE array compression (DecodeCompressedArray),
-# the 2-bit packed GSF_SWATH_BATHY_SUBRECORD_QUALITY_FLAGS_ARRAY, and the
-# per-beam variable-length GSF_SWATH_BATHY_SUBRECORD_INTENSITY_SERIES_ARRAY.
+# Every per-sensor ping-level "_SPECIFIC" subrecord (all 55 of gsf.h's
+# GSF_SWATH_BATHY_SUBRECORD_*_SPECIFIC ids) is decoded -- KMALL_SPECIFIC
+# via its own bespoke path (_decode_kmall_specific()), every other id via
+# the _PING_SENSOR_SPECIFIC_CODECS registry. Likewise every single-beam
+# sensor-specific tail (_SINGLE_BEAM_SENSOR_SPECIFIC_CODECS) and the
+# per-beam intensity-series imagery preamble (_decode_brb_intensity() and
+# its per-family _decode_*_imagery_specific() helpers) are fully decoded.
+#
+# Deliberately NOT decoded (reported as a byte count instead): gsflib's
+# own optional RLE array compression (DecodeCompressedArray).
 ###########################################################
 
 #: Identifies the scale factors subrecord within a ping's subrecord stream.
@@ -242,6 +247,8 @@ class gsfDataID:
 _SUBRECORD_SCALE_FACTORS = 100
 #: (gsf.h: GSF_SWATH_BATHY_SUBRECORD_BEAM_FLAGS_ARRAY) -- raw bytes, no scale factor.
 _SUBRECORD_BEAM_FLAGS_ARRAY = 16
+#: (gsf.h: GSF_SWATH_BATHY_SUBRECORD_QUALITY_FLAGS_ARRAY) -- 2-bit packed, no scale factor.
+_SUBRECORD_QUALITY_FLAGS_ARRAY = 15
 
 # Beam-array subrecord id -> (attribute name, column label, is signed on disk).
 # See gsf.h's GSF_SWATH_BATHY_SUBRECORD_* defines for the id values, and
@@ -266,7 +273,8 @@ _PING_ARRAY_SUBRECORDS = {
     12: ("across_track_error", "AcrossTrackError_m", False),  # obsolete
     13: ("along_track_error", "AlongTrackError_m", False),    # obsolete
     14: ("nominal_depth", "NominalDepth_m", False),
-    # 15 GSF_SWATH_BATHY_SUBRECORD_QUALITY_FLAGS_ARRAY: 2-bit packed, not decoded.
+    # 15 GSF_SWATH_BATHY_SUBRECORD_QUALITY_FLAGS_ARRAY: handled separately, 2-bit
+    #    packed (no scale factor) -- see _decode_quality_flags_array().
     # 16 GSF_SWATH_BATHY_SUBRECORD_BEAM_FLAGS_ARRAY: handled separately (no scale factor).
     17: ("signal_to_noise", "SignalToNoise_dB", True),
     # 18 beam_angle_forward: unsigned in every GSF version except v3.10,
@@ -371,6 +379,2853 @@ _SENSOR_SPECIFIC_SUBRECORD_NAMES = {
     157: "ME70BO_SPECIFIC",
 }
 
+#: Registry of ping-level sensor-specific ("_SPECIFIC") subrecord codecs,
+#: keyed by gsf.h's GSF_SWATH_BATHY_SUBRECORD_* id: {subrecord_id: (family
+#: label, decode_fn, encode_fn)}. Several ids can share one struct/codec
+#: pair (e.g. gsf.h's t_gsfEM3Specific -- and so gsfu.py's
+#: _decode_em3_specific()/_encode_em3_specific() -- covers EM3000, EM1002,
+#: EM300, EM120, EM3002, EM3000D, EM3002D, EM121A_SIS, and EM2000).
+#:
+#: decode_fn(payload, pos) -> (fields: dict, tables: dict[str, list[dict]],
+#: bytes_consumed). encode_fn(subrecord_id, fields, tables=None) -> bytes,
+#: including its own 4-byte subrecord id+size word (subrecord_id is passed
+#: through since one encode_fn may need to stamp any of several ids).
+#:
+#: KMALL_SPECIFIC (id 156) is NOT in this registry -- it predates this
+#: mechanism and keeps its own bespoke handling (_decode_kmall_specific(),
+#: _encode_kmall_specific(), and the write_swath_bathymetry_ping()
+#: kmall_specific/tx_sectors parameters) rather than being retrofitted.
+_PING_SENSOR_SPECIFIC_CODECS = {}
+
+
+def _decode_elac_mkii_specific(payload, pos):
+    """
+    Decode a GSF_SWATH_BATHY_SUBRECORD_ELAC_MKII_SPECIFIC subrecord (id
+    117): Elac MkII multibeam sensor metadata. Ported from gsf_dec.c's
+    DecodeElacMkIISpecific().
+
+    Untested against a verified GSF file: no sample data containing an
+    ELAC_MKII_SPECIFIC subrecord is available.
+
+    :return: (fields: dict, tables: {} (none for this sensor), bytes_consumed).
+    """
+    start = pos
+    mode = payload[pos]; pos += 1
+    (ping_num,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (sound_vel,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (pulse_length,) = struct.unpack_from('>H', payload, pos); pos += 2
+    receiver_gain_stbd = payload[pos]; pos += 1
+    receiver_gain_port = payload[pos]; pos += 1
+    (reserved,) = struct.unpack_from('>H', payload, pos); pos += 2
+
+    fields = {
+        'Mode': mode,
+        'PingNumber': ping_num,
+        'SoundVelocity_mps': sound_vel,
+        'PulseLength_hundredth_ms': pulse_length,
+        'ReceiverGainStbd_dB': receiver_gain_stbd,
+        'ReceiverGainPort_dB': receiver_gain_port,
+        'Reserved': reserved,
+    }
+    return fields, {}, pos - start
+
+
+def _encode_elac_mkii_specific(subrecord_id, fields, tables=None):
+    """
+    Encode a GSF_SWATH_BATHY_SUBRECORD_ELAC_MKII_SPECIFIC subrecord,
+    including its own 4-byte subrecord id+size word: the inverse of
+    _decode_elac_mkii_specific(). Ported from gsf_enc.c's
+    EncodeElacMkIISpecific().
+    """
+    g = fields.get
+    body = struct.pack('>B', int(g('Mode', 0)) & 0xFF)
+    body += struct.pack('>H', int(g('PingNumber', 0)))
+    body += struct.pack('>H', int(g('SoundVelocity_mps', 0)))
+    body += struct.pack('>H', int(g('PulseLength_hundredth_ms', 0)))
+    body += struct.pack('>B', int(g('ReceiverGainStbd_dB', 0)) & 0xFF)
+    body += struct.pack('>B', int(g('ReceiverGainPort_dB', 0)) & 0xFF)
+    body += struct.pack('>H', int(g('Reserved', 0)))
+    header_word = ((subrecord_id & 0xFF) << 24) | len(body)
+    return struct.pack('>I', header_word) + body
+
+
+_PING_SENSOR_SPECIFIC_CODECS[117] = ("ElacMkII", _decode_elac_mkii_specific, _encode_elac_mkii_specific)
+
+
+def _decode_seabeam_specific(payload, pos):
+    """
+    Decode a GSF_SWATH_BATHY_SUBRECORD_SEABEAM_SPECIFIC subrecord (id
+    102): 16-beam SeaBeam sensor metadata. Ported from gsf_dec.c's
+    DecodeSeabeamSpecific().
+
+    Untested against a verified GSF file: no sample data containing a
+    SEABEAM_SPECIFIC subrecord is available.
+
+    :return: (fields: dict, tables: {} (none for this sensor), bytes_consumed).
+    """
+    start = pos
+    (eclipse_time,) = struct.unpack_from('>H', payload, pos); pos += 2
+
+    fields = {'EclipseTime_tenths_s': eclipse_time}
+    return fields, {}, pos - start
+
+
+def _encode_seabeam_specific(subrecord_id, fields, tables=None):
+    """
+    Encode a GSF_SWATH_BATHY_SUBRECORD_SEABEAM_SPECIFIC subrecord,
+    including its own 4-byte subrecord id+size word: the inverse of
+    _decode_seabeam_specific(). Ported from gsf_enc.c's
+    EncodeSeabeamSpecific().
+    """
+    body = struct.pack('>H', int(fields.get('EclipseTime_tenths_s', 0)))
+    header_word = ((subrecord_id & 0xFF) << 24) | len(body)
+    return struct.pack('>I', header_word) + body
+
+
+_PING_SENSOR_SPECIFIC_CODECS[102] = ("SeaBeam", _decode_seabeam_specific, _encode_seabeam_specific)
+
+
+def _decode_em12_specific(payload, pos):
+    """
+    Decode a GSF_SWATH_BATHY_SUBRECORD_EM12_SPECIFIC subrecord (id 103):
+    Simrad EM12 sensor metadata. Ported from gsf_dec.c's
+    DecodeEM12Specific().
+
+    Untested against a verified GSF file: no sample data containing an
+    EM12_SPECIFIC subrecord is available.
+
+    :return: (fields: dict, tables: {} (none for this sensor), bytes_consumed).
+    """
+    start = pos
+    (ping_number,) = struct.unpack_from('>H', payload, pos); pos += 2
+    resolution = payload[pos]; pos += 1
+    ping_quality = payload[pos]; pos += 1
+    (sound_velocity_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+    mode = payload[pos]; pos += 1
+    pos += 32  # spare
+
+    fields = {
+        'PingNumber': ping_number,
+        'Resolution': resolution,
+        'PingQuality': ping_quality,
+        'SoundVelocity_mps': sound_velocity_raw / 10.0,
+        'Mode': mode,
+    }
+    return fields, {}, pos - start
+
+
+def _encode_em12_specific(subrecord_id, fields, tables=None):
+    """
+    Encode a GSF_SWATH_BATHY_SUBRECORD_EM12_SPECIFIC subrecord, including
+    its own 4-byte subrecord id+size word: the inverse of
+    _decode_em12_specific(). Ported from gsf_enc.c's EncodeEM12Specific().
+    """
+    g = fields.get
+    body = struct.pack('>H', int(g('PingNumber', 0)))
+    body += struct.pack('>B', int(g('Resolution', 0)) & 0xFF)
+    body += struct.pack('>B', int(g('PingQuality', 0)) & 0xFF)
+    body += struct.pack('>H', _gsf_round(g('SoundVelocity_mps', 0.0) * 10.0))
+    body += struct.pack('>B', int(g('Mode', 0)) & 0xFF)
+    body += b'\x00' * 32  # spare
+    header_word = ((subrecord_id & 0xFF) << 24) | len(body)
+    return struct.pack('>I', header_word) + body
+
+
+_PING_SENSOR_SPECIFIC_CODECS[103] = ("EM12", _decode_em12_specific, _encode_em12_specific)
+
+
+def _decode_em100_specific(payload, pos):
+    """
+    Decode a GSF_SWATH_BATHY_SUBRECORD_EM100_SPECIFIC subrecord (id 104):
+    Simrad EM100 sensor metadata. Ported from gsf_dec.c's
+    DecodeEM100Specific().
+
+    Untested against a verified GSF file: no sample data containing an
+    EM100_SPECIFIC subrecord is available.
+
+    :return: (fields: dict, tables: {} (none for this sensor), bytes_consumed).
+    """
+    start = pos
+    (ship_pitch_raw,) = struct.unpack_from('>h', payload, pos); pos += 2
+    (transducer_pitch_raw,) = struct.unpack_from('>h', payload, pos); pos += 2
+    mode = payload[pos]; pos += 1
+    power = payload[pos]; pos += 1
+    attenuation = payload[pos]; pos += 1
+    tvg = payload[pos]; pos += 1
+    pulse_length = payload[pos]; pos += 1
+    (counter,) = struct.unpack_from('>H', payload, pos); pos += 2
+
+    fields = {
+        'ShipPitch_deg': ship_pitch_raw / 100.0,
+        'TransducerPitch_deg': transducer_pitch_raw / 100.0,
+        'Mode': mode,
+        'Power': power,
+        'Attenuation': attenuation,
+        'TVG': tvg,
+        'PulseLength': pulse_length,
+        'Counter': counter,
+    }
+    return fields, {}, pos - start
+
+
+def _encode_em100_specific(subrecord_id, fields, tables=None):
+    """
+    Encode a GSF_SWATH_BATHY_SUBRECORD_EM100_SPECIFIC subrecord, including
+    its own 4-byte subrecord id+size word: the inverse of
+    _decode_em100_specific(). Ported from gsf_enc.c's
+    EncodeEM100Specific().
+    """
+    g = fields.get
+    body = struct.pack('>h', _gsf_round(g('ShipPitch_deg', 0.0) * 100.0))
+    body += struct.pack('>h', _gsf_round(g('TransducerPitch_deg', 0.0) * 100.0))
+    body += struct.pack('>B', int(g('Mode', 0)) & 0xFF)
+    body += struct.pack('>B', int(g('Power', 0)) & 0xFF)
+    body += struct.pack('>B', int(g('Attenuation', 0)) & 0xFF)
+    body += struct.pack('>B', int(g('TVG', 0)) & 0xFF)
+    body += struct.pack('>B', int(g('PulseLength', 0)) & 0xFF)
+    body += struct.pack('>H', int(g('Counter', 0)))
+    header_word = ((subrecord_id & 0xFF) << 24) | len(body)
+    return struct.pack('>I', header_word) + body
+
+
+_PING_SENSOR_SPECIFIC_CODECS[104] = ("EM100", _decode_em100_specific, _encode_em100_specific)
+
+
+def _decode_cmp_sass_specific(payload, pos):
+    """
+    Decode a GSF_SWATH_BATHY_SUBRECORD_CMP_SASS_SPECIFIC subrecord (id
+    121): Compressed SASS (BOSDAT) sensor metadata. Ported from
+    gsf_dec.c's DecodeCmpSassSpecific().
+
+    Untested against a verified GSF file: no sample data containing a
+    CMP_SASS_SPECIFIC subrecord is available.
+
+    :return: (fields: dict, tables: {} (none for this sensor), bytes_consumed).
+    """
+    start = pos
+    (lfreq_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (lntens_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+
+    fields = {
+        'SurfaceSoundVelocity_ftps': lfreq_raw / 10.0,
+        'Heave_ftps': lntens_raw / 10.0,
+    }
+    return fields, {}, pos - start
+
+
+def _encode_cmp_sass_specific(subrecord_id, fields, tables=None):
+    """
+    Encode a GSF_SWATH_BATHY_SUBRECORD_CMP_SASS_SPECIFIC subrecord,
+    including its own 4-byte subrecord id+size word: the inverse of
+    _decode_cmp_sass_specific(). Ported from gsf_enc.c's
+    EncodeCmpSassSpecific().
+    """
+    g = fields.get
+    body = struct.pack('>H', _gsf_round(g('SurfaceSoundVelocity_ftps', 0.0) * 10.0))
+    body += struct.pack('>H', _gsf_round(g('Heave_ftps', 0.0) * 10.0))
+    header_word = ((subrecord_id & 0xFF) << 24) | len(body)
+    return struct.pack('>I', header_word) + body
+
+
+_PING_SENSOR_SPECIFIC_CODECS[121] = ("CmpSass", _decode_cmp_sass_specific, _encode_cmp_sass_specific)
+
+
+def _decode_em950_specific(payload, pos):
+    """
+    Decode a GSF_SWATH_BATHY_SUBRECORD_EM950_SPECIFIC or
+    _EM1000_SPECIFIC subrecord (ids 105/111 -- identical wire format, one
+    struct/decoder shared by both in gsflib). Ported from gsf_dec.c's
+    DecodeEM950Specific().
+
+    Untested against a verified GSF file: no sample data containing an
+    EM950_SPECIFIC/EM1000_SPECIFIC subrecord is available.
+
+    :return: (fields: dict, tables: {} (none for this sensor), bytes_consumed).
+    """
+    start = pos
+    (ping_number,) = struct.unpack_from('>H', payload, pos); pos += 2
+    mode = payload[pos]; pos += 1
+    (ping_quality,) = struct.unpack_from('>b', payload, pos); pos += 1
+    (ship_pitch_raw,) = struct.unpack_from('>h', payload, pos); pos += 2
+    (transducer_pitch_raw,) = struct.unpack_from('>h', payload, pos); pos += 2
+    (surface_velocity_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+
+    fields = {
+        'PingNumber': ping_number,
+        'Mode': mode,
+        'PingQuality': ping_quality,
+        'ShipPitch_deg': ship_pitch_raw / 100.0,
+        'TransducerPitch_deg': transducer_pitch_raw / 100.0,
+        'SurfaceVelocity_mps': surface_velocity_raw / 10.0,
+    }
+    return fields, {}, pos - start
+
+
+def _encode_em950_specific(subrecord_id, fields, tables=None):
+    """
+    Encode a GSF_SWATH_BATHY_SUBRECORD_EM950_SPECIFIC or _EM1000_SPECIFIC
+    subrecord (subrecord_id selects which -- see _decode_em950_specific()),
+    including its own 4-byte subrecord id+size word: the inverse of
+    _decode_em950_specific(). Ported from gsf_enc.c's EncodeEM950Specific().
+    """
+    g = fields.get
+    body = struct.pack('>H', int(g('PingNumber', 0)))
+    body += struct.pack('>B', int(g('Mode', 0)) & 0xFF)
+    body += struct.pack('>b', int(g('PingQuality', 0)))
+    body += struct.pack('>h', _gsf_round(g('ShipPitch_deg', 0.0) * 100.0))
+    body += struct.pack('>h', _gsf_round(g('TransducerPitch_deg', 0.0) * 100.0))
+    body += struct.pack('>H', _gsf_round(g('SurfaceVelocity_mps', 0.0) * 10.0))
+    header_word = ((subrecord_id & 0xFF) << 24) | len(body)
+    return struct.pack('>I', header_word) + body
+
+
+_PING_SENSOR_SPECIFIC_CODECS[105] = ("EM950", _decode_em950_specific, _encode_em950_specific)
+_PING_SENSOR_SPECIFIC_CODECS[111] = ("EM1000", _decode_em950_specific, _encode_em950_specific)
+
+
+def _decode_em121a_specific(payload, pos):
+    """
+    Decode a GSF_SWATH_BATHY_SUBRECORD_EM121A_SPECIFIC or _EM121_SPECIFIC
+    subrecord (ids 106/107 -- identical wire format, one struct/decoder
+    shared by both in gsflib). Ported from gsf_dec.c's
+    DecodeEM121ASpecific().
+
+    Untested against a verified GSF file: no sample data containing an
+    EM121A_SPECIFIC/EM121_SPECIFIC subrecord is available.
+
+    :return: (fields: dict, tables: {} (none for this sensor), bytes_consumed).
+    """
+    start = pos
+    (ping_number,) = struct.unpack_from('>H', payload, pos); pos += 2
+    mode = payload[pos]; pos += 1
+    valid_beams = payload[pos]; pos += 1
+    pulse_length = payload[pos]; pos += 1
+    beam_width = payload[pos]; pos += 1
+    tx_power = payload[pos]; pos += 1
+    tx_status = payload[pos]; pos += 1
+    rx_status = payload[pos]; pos += 1
+    (surface_velocity_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+
+    fields = {
+        'PingNumber': ping_number,
+        'Mode': mode,
+        'ValidBeams': valid_beams,
+        'PulseLength': pulse_length,
+        'BeamWidth': beam_width,
+        'TxPower': tx_power,
+        'TxStatus': tx_status,
+        'RxStatus': rx_status,
+        'SurfaceVelocity_mps': surface_velocity_raw / 10.0,
+    }
+    return fields, {}, pos - start
+
+
+def _encode_em121a_specific(subrecord_id, fields, tables=None):
+    """
+    Encode a GSF_SWATH_BATHY_SUBRECORD_EM121A_SPECIFIC or _EM121_SPECIFIC
+    subrecord (subrecord_id selects which -- see _decode_em121a_specific()),
+    including its own 4-byte subrecord id+size word: the inverse of
+    _decode_em121a_specific(). Ported from gsf_enc.c's
+    EncodeEM121ASpecific().
+    """
+    g = fields.get
+    body = struct.pack('>H', int(g('PingNumber', 0)))
+    body += struct.pack('>B', int(g('Mode', 0)) & 0xFF)
+    body += struct.pack('>B', int(g('ValidBeams', 0)) & 0xFF)
+    body += struct.pack('>B', int(g('PulseLength', 0)) & 0xFF)
+    body += struct.pack('>B', int(g('BeamWidth', 0)) & 0xFF)
+    body += struct.pack('>B', int(g('TxPower', 0)) & 0xFF)
+    body += struct.pack('>B', int(g('TxStatus', 0)) & 0xFF)
+    body += struct.pack('>B', int(g('RxStatus', 0)) & 0xFF)
+    body += struct.pack('>H', _gsf_round(g('SurfaceVelocity_mps', 0.0) * 10.0))
+    header_word = ((subrecord_id & 0xFF) << 24) | len(body)
+    return struct.pack('>I', header_word) + body
+
+
+_PING_SENSOR_SPECIFIC_CODECS[106] = ("EM121A", _decode_em121a_specific, _encode_em121a_specific)
+_PING_SENSOR_SPECIFIC_CODECS[107] = ("EM121", _decode_em121a_specific, _encode_em121a_specific)
+
+
+def _decode_seamap_specific(payload, pos):
+    """
+    Decode a GSF_SWATH_BATHY_SUBRECORD_SEAMAP_SPECIFIC subrecord (id 109):
+    SeaMap/SeaMap-II swath interferometric sonar metadata. Ported from
+    gsf_dec.c's DecodeSeaMapSpecific().
+
+    gsf_dec.c's DecodeSeaMapSpecific() takes an extra GSF_FILE_TABLE *ft
+    argument used only to gate one historical bug fix: for GSF files
+    written by gsflib older than v2.7, the pointer advance after
+    pressureDepth was missing (a documented bug -- see the "JSB
+    11/08/2007" comment in gsf_dec.c/gsf_enc.c), so pressureDepth's raw
+    bytes were immediately overwritten by altitude's decode on those old
+    files. This library doesn't track per-file gsflib-version state the
+    way gsflib's GSF_FILE_TABLE does, and only ever writes modern
+    (GSF_VERSION, > v2.7) files, so this always takes the "fixed" branch
+    (advances past pressureDepth normally) -- correct for any file this
+    library itself writes, and for any real file from a non-ancient
+    gsflib, but not bug-for-bug compatible with a SeaMap subrecord from a
+    GSF file older than v2.7.
+
+    Untested against a verified GSF file: no sample data containing a
+    SEAMAP_SPECIFIC subrecord is available.
+
+    :return: (fields: dict, tables: {} (none for this sensor), bytes_consumed).
+    """
+    start = pos
+    # 11 raw u16 words, file order: portTransmitter[0,1], stbdTransmitter[0,1],
+    # portGain, stbdGain, portPulseLength, stbdPulseLength, pressureDepth,
+    # altitude, temperature.
+    values = struct.unpack_from('>11H', payload, pos)
+    pos += 22
+
+    keys = (
+        'PortTransmitter0', 'PortTransmitter1', 'StbdTransmitter0', 'StbdTransmitter1',
+        'PortGain', 'StbdGain', 'PortPulseLength', 'StbdPulseLength',
+        'PressureDepth', 'Altitude', 'Temperature',
+    )
+    fields = {key: value / 10.0 for key, value in zip(keys, values)}
+    return fields, {}, pos - start
+
+
+def _encode_seamap_specific(subrecord_id, fields, tables=None):
+    """
+    Encode a GSF_SWATH_BATHY_SUBRECORD_SEAMAP_SPECIFIC subrecord,
+    including its own 4-byte subrecord id+size word: the inverse of
+    _decode_seamap_specific() (see its docstring re: the pre-v2.7
+    pressureDepth quirk this doesn't replicate). Ported from gsf_enc.c's
+    EncodeSeaMapSpecific().
+    """
+    g = fields.get
+    keys = (
+        'PortTransmitter0', 'PortTransmitter1', 'StbdTransmitter0', 'StbdTransmitter1',
+        'PortGain', 'StbdGain', 'PortPulseLength', 'StbdPulseLength',
+        'PressureDepth', 'Altitude', 'Temperature',
+    )
+    body = b''.join(struct.pack('>H', _gsf_round(g(key, 0.0) * 10.0)) for key in keys)
+    header_word = ((subrecord_id & 0xFF) << 24) | len(body)
+    return struct.pack('>I', header_word) + body
+
+
+_PING_SENSOR_SPECIFIC_CODECS[109] = ("SeaMap", _decode_seamap_specific, _encode_seamap_specific)
+
+
+def _decode_seabat_specific(payload, pos):
+    """
+    Decode a GSF_SWATH_BATHY_SUBRECORD_SEABAT_SPECIFIC subrecord (id 110):
+    Reson SeaBat sensor metadata. Ported from gsf_dec.c's
+    DecodeSeaBatSpecific().
+
+    Untested against a verified GSF file: no sample data containing a
+    SEABAT_SPECIFIC subrecord is available.
+
+    :return: (fields: dict, tables: {} (none for this sensor), bytes_consumed).
+    """
+    start = pos
+    (ping_number,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (surface_velocity_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+    mode = payload[pos]; pos += 1
+    sonar_range = payload[pos]; pos += 1
+    transmit_power = payload[pos]; pos += 1
+    receive_gain = payload[pos]; pos += 1
+
+    fields = {
+        'PingNumber': ping_number,
+        'SurfaceVelocity_mps': surface_velocity_raw / 10.0,
+        'Mode': mode,
+        'SonarRange_m': sonar_range,
+        'TransmitPower': transmit_power,
+        'ReceiveGain': receive_gain,
+    }
+    return fields, {}, pos - start
+
+
+def _encode_seabat_specific(subrecord_id, fields, tables=None):
+    """
+    Encode a GSF_SWATH_BATHY_SUBRECORD_SEABAT_SPECIFIC subrecord, including
+    its own 4-byte subrecord id+size word: the inverse of
+    _decode_seabat_specific(). Ported from gsf_enc.c's EncodeSeaBatSpecific().
+    """
+    g = fields.get
+    body = struct.pack('>H', int(g('PingNumber', 0)))
+    body += struct.pack('>H', _gsf_round(g('SurfaceVelocity_mps', 0.0) * 10.0))
+    body += struct.pack('>B', int(g('Mode', 0)) & 0xFF)
+    body += struct.pack('>B', int(g('SonarRange_m', 0)) & 0xFF)
+    body += struct.pack('>B', int(g('TransmitPower', 0)) & 0xFF)
+    body += struct.pack('>B', int(g('ReceiveGain', 0)) & 0xFF)
+    header_word = ((subrecord_id & 0xFF) << 24) | len(body)
+    return struct.pack('>I', header_word) + body
+
+
+_PING_SENSOR_SPECIFIC_CODECS[110] = ("SeaBat", _decode_seabat_specific, _encode_seabat_specific)
+
+
+def _decode_sb_amp_specific(payload, pos):
+    """
+    Decode a GSF_SWATH_BATHY_SUBRECORD_SB_AMP_SPECIFIC subrecord (id 113):
+    SeaBeam amplitude sensor metadata. Ported from gsf_dec.c's
+    DecodeSBAmpSpecific().
+
+    Untested against a verified GSF file: no sample data containing a
+    SB_AMP_SPECIFIC subrecord is available.
+
+    :return: (fields: dict, tables: {} (none for this sensor), bytes_consumed).
+    """
+    start = pos
+    hour = payload[pos]; pos += 1
+    minute = payload[pos]; pos += 1
+    second = payload[pos]; pos += 1
+    hundredths = payload[pos]; pos += 1
+    (block_number,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (avg_gate_depth,) = struct.unpack_from('>h', payload, pos); pos += 2
+
+    fields = {
+        'Hour': hour,
+        'Minute': minute,
+        'Second': second,
+        'Hundredths': hundredths,
+        'BlockNumber': block_number,
+        'AvgGateDepth': avg_gate_depth,
+    }
+    return fields, {}, pos - start
+
+
+def _encode_sb_amp_specific(subrecord_id, fields, tables=None):
+    """
+    Encode a GSF_SWATH_BATHY_SUBRECORD_SB_AMP_SPECIFIC subrecord, including
+    its own 4-byte subrecord id+size word: the inverse of
+    _decode_sb_amp_specific(). Ported from gsf_enc.c's EncodeSBAmpSpecific().
+    """
+    g = fields.get
+    body = struct.pack('>B', int(g('Hour', 0)) & 0xFF)
+    body += struct.pack('>B', int(g('Minute', 0)) & 0xFF)
+    body += struct.pack('>B', int(g('Second', 0)) & 0xFF)
+    body += struct.pack('>B', int(g('Hundredths', 0)) & 0xFF)
+    body += struct.pack('>I', int(g('BlockNumber', 0)))
+    body += struct.pack('>h', int(g('AvgGateDepth', 0)))
+    header_word = ((subrecord_id & 0xFF) << 24) | len(body)
+    return struct.pack('>I', header_word) + body
+
+
+_PING_SENSOR_SPECIFIC_CODECS[113] = ("SBAmp", _decode_sb_amp_specific, _encode_sb_amp_specific)
+
+
+def _decode_seabat_ii_specific(payload, pos):
+    """
+    Decode a GSF_SWATH_BATHY_SUBRECORD_SEABAT_II_SPECIFIC subrecord (id
+    114): Reson SeaBat II sensor metadata (replaces SEABAT_SPECIFIC as of
+    GSF_1.04). Ported from gsf_dec.c's DecodeSeaBatIISpecific().
+
+    Untested against a verified GSF file: no sample data containing a
+    SEABAT_II_SPECIFIC subrecord is available.
+
+    :return: (fields: dict, tables: {} (none for this sensor), bytes_consumed).
+    """
+    start = pos
+    (ping_number,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (surface_velocity_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (mode,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (sonar_range,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (transmit_power,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (receive_gain,) = struct.unpack_from('>H', payload, pos); pos += 2
+    fore_aft_bw = payload[pos]; pos += 1
+    athwart_bw = payload[pos]; pos += 1
+    pos += 4  # spare
+
+    fields = {
+        'PingNumber': ping_number,
+        'SurfaceVelocity_mps': surface_velocity_raw / 10.0,
+        'Mode': mode,
+        'SonarRange_m': sonar_range,
+        'TransmitPower': transmit_power,
+        'ReceiveGain': receive_gain,
+        'ForeAftBW_deg': fore_aft_bw / 10.0,
+        'AthwartBW_deg': athwart_bw / 10.0,
+    }
+    return fields, {}, pos - start
+
+
+def _encode_seabat_ii_specific(subrecord_id, fields, tables=None):
+    """
+    Encode a GSF_SWATH_BATHY_SUBRECORD_SEABAT_II_SPECIFIC subrecord,
+    including its own 4-byte subrecord id+size word: the inverse of
+    _decode_seabat_ii_specific(). Ported from gsf_enc.c's
+    EncodeSeaBatIISpecific().
+    """
+    g = fields.get
+    body = struct.pack('>H', int(g('PingNumber', 0)))
+    body += struct.pack('>H', _gsf_round(g('SurfaceVelocity_mps', 0.0) * 10.0))
+    body += struct.pack('>H', int(g('Mode', 0)))
+    body += struct.pack('>H', int(g('SonarRange_m', 0)))
+    body += struct.pack('>H', int(g('TransmitPower', 0)))
+    body += struct.pack('>H', int(g('ReceiveGain', 0)))
+    body += struct.pack('>B', _gsf_round(g('ForeAftBW_deg', 0.0) * 10.0) & 0xFF)
+    body += struct.pack('>B', _gsf_round(g('AthwartBW_deg', 0.0) * 10.0) & 0xFF)
+    body += b'\x00' * 4  # spare
+    header_word = ((subrecord_id & 0xFF) << 24) | len(body)
+    return struct.pack('>I', header_word) + body
+
+
+_PING_SENSOR_SPECIFIC_CODECS[114] = ("SeaBatII", _decode_seabat_ii_specific, _encode_seabat_ii_specific)
+
+
+def _decode_seabeam_2112_specific(payload, pos):
+    """
+    Decode a GSF_SWATH_BATHY_SUBRECORD_SEABEAM_2112_SPECIFIC subrecord (id
+    116): SeaBeam 2112/36 sensor metadata. Ported from gsf_dec.c's
+    DecodeSeaBeam2112Specific(). `Mode` is a raw bitmask (see gsf.h's
+    GSF_2112_* macros just after t_gsfSeaBeam2112Specific) -- not split
+    into separate booleans here, matching how this library treats other
+    bitmask fields (e.g. KMALL's PingFlags).
+
+    Untested against a verified GSF file: no sample data containing a
+    SEABEAM_2112_SPECIFIC subrecord is available.
+
+    :return: (fields: dict, tables: {} (none for this sensor), bytes_consumed).
+    """
+    start = pos
+    mode = payload[pos]; pos += 1
+    (surface_velocity_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+    ssv_source = payload[pos]; pos += 1
+    ping_gain = payload[pos]; pos += 1
+    pulse_width = payload[pos]; pos += 1
+    transmitter_attenuation = payload[pos]; pos += 1
+    number_algorithms = payload[pos]; pos += 1
+    algorithm_order = payload[pos:pos + 4].decode('ascii', 'replace').rstrip('\x00'); pos += 4
+    pos += 2  # spare
+
+    fields = {
+        'Mode': mode,
+        'SurfaceVelocity_mps': (surface_velocity_raw + 130000) / 100.0,
+        'SsvSource': ssv_source,
+        'PingGain_dB': ping_gain,
+        'PulseWidth_ms': pulse_width,
+        'TransmitterAttenuation_dB': transmitter_attenuation,
+        'NumberAlgorithms': number_algorithms,
+        'AlgorithmOrder': algorithm_order,
+    }
+    return fields, {}, pos - start
+
+
+def _encode_seabeam_2112_specific(subrecord_id, fields, tables=None):
+    """
+    Encode a GSF_SWATH_BATHY_SUBRECORD_SEABEAM_2112_SPECIFIC subrecord,
+    including its own 4-byte subrecord id+size word: the inverse of
+    _decode_seabeam_2112_specific(). Ported from gsf_enc.c's
+    EncodeSeaBeam2112Specific().
+    """
+    g = fields.get
+    body = struct.pack('>B', int(g('Mode', 0)) & 0xFF)
+    body += struct.pack('>H', _gsf_round(g('SurfaceVelocity_mps', 1300.0) * 100.0 - 130000))
+    body += struct.pack('>B', int(g('SsvSource', 0)) & 0xFF)
+    body += struct.pack('>B', int(g('PingGain_dB', 0)) & 0xFF)
+    body += struct.pack('>B', int(g('PulseWidth_ms', 0)) & 0xFF)
+    body += struct.pack('>B', int(g('TransmitterAttenuation_dB', 0)) & 0xFF)
+    body += struct.pack('>B', int(g('NumberAlgorithms', 0)) & 0xFF)
+    body += g('AlgorithmOrder', '').encode('ascii')[:4].ljust(4, b'\x00')
+    body += b'\x00' * 2  # spare
+    header_word = ((subrecord_id & 0xFF) << 24) | len(body)
+    return struct.pack('>I', header_word) + body
+
+
+_PING_SENSOR_SPECIFIC_CODECS[116] = ("SeaBeam2112", _decode_seabeam_2112_specific, _encode_seabeam_2112_specific)
+
+
+def _decode_seabat8101_specific(payload, pos):
+    """
+    Decode a GSF_SWATH_BATHY_SUBRECORD_SEABAT_8101_SPECIFIC subrecord (id
+    115). Ported from gsf_dec.c's DecodeSeaBat8101Specific().
+
+    Untested against a verified GSF file: no sample data containing a
+    SEABAT_8101_SPECIFIC subrecord is available.
+
+    :return: (fields: dict, tables: {} (none for this sensor), bytes_consumed).
+    """
+    start = pos
+    (ping_number,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (surface_velocity_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (mode,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (rng,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (power,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (gain,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (pulse_width,) = struct.unpack_from('>H', payload, pos); pos += 2
+    tvg_spreading = payload[pos]; pos += 1
+    tvg_absorption = payload[pos]; pos += 1
+    fore_aft_bw_raw = payload[pos]; pos += 1
+    athwart_bw_raw = payload[pos]; pos += 1
+    (range_filt_min,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (range_filt_max,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (depth_filt_min,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (depth_filt_max,) = struct.unpack_from('>H', payload, pos); pos += 2
+    projector = payload[pos]; pos += 1
+    pos += 4  # spare
+
+    fields = {
+        'PingNumber': ping_number,
+        'SurfaceVelocity_mps': surface_velocity_raw / 10.0,
+        'Mode': mode,
+        'Range_m': rng,
+        'Power': power,
+        'Gain': gain,
+        'PulseWidth_us': pulse_width,
+        'TvgSpreading': tvg_spreading,
+        'TvgAbsorption': tvg_absorption,
+        'ForeAftBW_deg': fore_aft_bw_raw / 10.0,
+        'AthwartBW_deg': athwart_bw_raw / 10.0,
+        'RangeFiltMin': range_filt_min,
+        'RangeFiltMax': range_filt_max,
+        'DepthFiltMin': depth_filt_min,
+        'DepthFiltMax': depth_filt_max,
+        'Projector': projector,
+    }
+    return fields, {}, pos - start
+
+
+def _encode_seabat8101_specific(subrecord_id, fields, tables=None):
+    """
+    Encode a GSF_SWATH_BATHY_SUBRECORD_SEABAT_8101_SPECIFIC subrecord,
+    including its own 4-byte subrecord id+size word: the inverse of
+    _decode_seabat8101_specific(). Ported from gsf_enc.c's
+    EncodeSeaBat8101Specific(). The reference encoder rounds
+    fore_aft_bw/athwart_bw with a plain `+ 0.5` truncating cast rather
+    than the +/-0.501 convention used elsewhere; functionally equivalent
+    since these fields are never negative, so this uses the standard
+    _gsf_round() convention for consistency with the rest of this module.
+    """
+    g = fields.get
+    body = struct.pack('>H', int(g('PingNumber', 0)))
+    body += struct.pack('>H', _gsf_round(g('SurfaceVelocity_mps', 0.0) * 10.0))
+    body += struct.pack('>H', int(g('Mode', 0)))
+    body += struct.pack('>H', int(g('Range_m', 0)))
+    body += struct.pack('>H', int(g('Power', 0)))
+    body += struct.pack('>H', int(g('Gain', 0)))
+    body += struct.pack('>H', int(g('PulseWidth_us', 0)))
+    body += struct.pack('>B', int(g('TvgSpreading', 0)) & 0xFF)
+    body += struct.pack('>B', int(g('TvgAbsorption', 0)) & 0xFF)
+    body += struct.pack('>B', _gsf_round(g('ForeAftBW_deg', 0.0) * 10.0) & 0xFF)
+    body += struct.pack('>B', _gsf_round(g('AthwartBW_deg', 0.0) * 10.0) & 0xFF)
+    body += struct.pack('>H', int(g('RangeFiltMin', 0)))
+    body += struct.pack('>H', int(g('RangeFiltMax', 0)))
+    body += struct.pack('>H', int(g('DepthFiltMin', 0)))
+    body += struct.pack('>H', int(g('DepthFiltMax', 0)))
+    body += struct.pack('>B', int(g('Projector', 0)) & 0xFF)
+    body += b'\x00' * 4  # spare
+    header_word = ((subrecord_id & 0xFF) << 24) | len(body)
+    return struct.pack('>I', header_word) + body
+
+
+_PING_SENSOR_SPECIFIC_CODECS[115] = ("SeaBat8101", _decode_seabat8101_specific, _encode_seabat8101_specific)
+
+
+def _decode_reson8100_specific(payload, pos):
+    """
+    Decode a GSF_SWATH_BATHY_SUBRECORD_RESON_8101/8111/8124/8125/8150/8160_
+    SPECIFIC subrecord (ids 122-127 -- one struct/decoder shared by the
+    whole Reson 8100 family). Ported from gsf_dec.c's
+    DecodeReson8100Specific().
+
+    Note: ProjectorAngle is kept as the raw on-disk "degrees * 100" integer,
+    NOT divided down to degrees -- gsf_dec.c itself stores it that way (the
+    struct field is a plain `int`, unlike surface_velocity/fore_aft_bw/
+    etc., which the decoder does descale into `double` fields), despite the
+    comment there describing the encoding. Preserved as-is for fidelity.
+
+    Untested against a verified GSF file: no sample data containing a
+    Reson 8100-family SPECIFIC subrecord is available.
+
+    :return: (fields: dict, tables: {} (none for this sensor), bytes_consumed).
+    """
+    start = pos
+    (latency,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (ping_number,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (sonar_id,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (sonar_model,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (frequency,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (surface_velocity_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (sample_rate,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (ping_rate,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (mode,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (rng,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (power,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (gain,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (pulse_width,) = struct.unpack_from('>H', payload, pos); pos += 2
+    tvg_spreading = payload[pos]; pos += 1
+    tvg_absorption = payload[pos]; pos += 1
+    fore_aft_bw_raw = payload[pos]; pos += 1
+    athwart_bw_raw = payload[pos]; pos += 1
+    projector_type = payload[pos]; pos += 1
+    (projector_angle,) = struct.unpack_from('>h', payload, pos); pos += 2
+    (range_filt_min,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (range_filt_max,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (depth_filt_min,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (depth_filt_max,) = struct.unpack_from('>H', payload, pos); pos += 2
+    filters_active = payload[pos]; pos += 1
+    (temperature,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (beam_spacing_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+    pos += 2  # spare
+
+    fields = {
+        'Latency_ms': latency,
+        'PingNumber': ping_number,
+        'SonarID': sonar_id,
+        'SonarModel': sonar_model,
+        'Frequency_kHz': frequency,
+        'SurfaceVelocity_mps': surface_velocity_raw / 10.0,
+        'SampleRate_Hz': sample_rate,
+        'PingRate_mHz': ping_rate,
+        'Mode': mode,
+        'Range_m': rng,
+        'Power': power,
+        'Gain': gain,
+        'PulseWidth_us': pulse_width,
+        'TvgSpreading': tvg_spreading,
+        'TvgAbsorption': tvg_absorption,
+        'ForeAftBW_deg': fore_aft_bw_raw / 10.0,
+        'AthwartBW_deg': athwart_bw_raw / 10.0,
+        'ProjectorType': projector_type,
+        'ProjectorAngle': projector_angle,
+        'RangeFiltMin': range_filt_min,
+        'RangeFiltMax': range_filt_max,
+        'DepthFiltMin': depth_filt_min,
+        'DepthFiltMax': depth_filt_max,
+        'FiltersActive': filters_active,
+        'Temperature_tenth_degC': temperature,
+        'BeamSpacing_deg': beam_spacing_raw / 10000.0,
+    }
+    return fields, {}, pos - start
+
+
+def _encode_reson8100_specific(subrecord_id, fields, tables=None):
+    """
+    Encode a GSF_SWATH_BATHY_SUBRECORD_RESON_8101/8111/8124/8125/8150/8160_
+    SPECIFIC subrecord, including its own 4-byte subrecord id+size word:
+    the inverse of _decode_reson8100_specific(). Ported from gsf_enc.c's
+    EncodeReson8100Specific().
+    """
+    g = fields.get
+    body = struct.pack('>H', int(g('Latency_ms', 0)))
+    body += struct.pack('>I', int(g('PingNumber', 0)))
+    body += struct.pack('>I', int(g('SonarID', 0)))
+    body += struct.pack('>H', int(g('SonarModel', 0)))
+    body += struct.pack('>H', int(g('Frequency_kHz', 0)))
+    body += struct.pack('>H', _gsf_round(g('SurfaceVelocity_mps', 0.0) * 10.0))
+    body += struct.pack('>H', int(g('SampleRate_Hz', 0)))
+    body += struct.pack('>H', int(g('PingRate_mHz', 0)))
+    body += struct.pack('>H', int(g('Mode', 0)))
+    body += struct.pack('>H', int(g('Range_m', 0)))
+    body += struct.pack('>H', int(g('Power', 0)))
+    body += struct.pack('>H', int(g('Gain', 0)))
+    body += struct.pack('>H', int(g('PulseWidth_us', 0)))
+    body += struct.pack('>B', int(g('TvgSpreading', 0)) & 0xFF)
+    body += struct.pack('>B', int(g('TvgAbsorption', 0)) & 0xFF)
+    body += struct.pack('>B', _gsf_round(g('ForeAftBW_deg', 0.0) * 10.0) & 0xFF)
+    body += struct.pack('>B', _gsf_round(g('AthwartBW_deg', 0.0) * 10.0) & 0xFF)
+    body += struct.pack('>B', int(g('ProjectorType', 0)) & 0xFF)
+    body += struct.pack('>h', int(g('ProjectorAngle', 0)))
+    body += struct.pack('>H', int(g('RangeFiltMin', 0)))
+    body += struct.pack('>H', int(g('RangeFiltMax', 0)))
+    body += struct.pack('>H', int(g('DepthFiltMin', 0)))
+    body += struct.pack('>H', int(g('DepthFiltMax', 0)))
+    body += struct.pack('>B', int(g('FiltersActive', 0)) & 0xFF)
+    body += struct.pack('>H', int(g('Temperature_tenth_degC', 0)))
+    body += struct.pack('>H', _gsf_round(g('BeamSpacing_deg', 0.0) * 10000.0))
+    body += b'\x00' * 2  # spare
+    header_word = ((subrecord_id & 0xFF) << 24) | len(body)
+    return struct.pack('>I', header_word) + body
+
+
+for _id in (122, 123, 124, 125, 126, 127):
+    _PING_SENSOR_SPECIFIC_CODECS[_id] = ("Reson8100", _decode_reson8100_specific, _encode_reson8100_specific)
+del _id
+
+
+def _decode_reson7125_specific(payload, pos):
+    """
+    Decode a GSF_SWATH_BATHY_SUBRECORD_RESON_7125_SPECIFIC subrecord (id
+    138). Ported from gsf_dec.c's DecodeReson7100Specific(). Bitmask
+    fields (ControlFlags, TransmitFlags, ReceiveFlags) are kept as a
+    single raw int, not split into booleans, matching this codebase's
+    convention for similar fields elsewhere (e.g. SeaBeam2112's Mode).
+
+    Note: gsf_dec.c's own DecodeReson7100Specific() has a latent bug for
+    tx_pulse_reserved -- it reads from a stale `stemp` (a leftover 2-byte
+    local from an earlier field) instead of the 4-byte `ltemp` it just
+    loaded, so the real reference decoder misreads this field. Since the
+    field is documented as reserved/unused, this port decodes it
+    correctly (the actual 4 bytes at that wire position) rather than
+    replicating the bug -- there's no meaningful data to lose either way.
+
+    Untested against a verified GSF file: no sample data containing a
+    RESON_7125_SPECIFIC subrecord is available.
+
+    :return: (fields: dict, tables: {} (no nested arrays), bytes_consumed).
+    """
+    start = pos
+    (protocol_version,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (device_id,) = struct.unpack_from('>I', payload, pos); pos += 4
+    pos += 16  # reserved_1
+    (major_serial_number,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (minor_serial_number,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (ping_number,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (multi_ping_seq,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (frequency_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (sample_rate_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (receiver_bandwidth_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (tx_pulse_width_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (tx_pulse_type_id,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (tx_pulse_envlp_id,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (tx_pulse_envlp_param_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (tx_pulse_reserved,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (max_ping_rate_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (ping_period_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (range_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (power_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (gain_raw,) = struct.unpack_from('>i', payload, pos); pos += 4
+    (control_flags,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (projector_id,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (projector_steer_vert_raw,) = struct.unpack_from('>i', payload, pos); pos += 4
+    (projector_steer_horz_raw,) = struct.unpack_from('>i', payload, pos); pos += 4
+    (projector_bw_vert_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (projector_bw_horz_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (projector_focal_pt_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (projector_weight_window_type,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (projector_weight_window_param,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (transmit_flags,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (hydrophone_id,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (rx_weight_window_type,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (rx_weight_window_param,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (receive_flags,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (rx_beam_width_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (range_filt_min_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (range_filt_max_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (depth_filt_min_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (depth_filt_max_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (absorption_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (sound_velocity_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (spreading_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    raw_data_from_7027 = payload[pos]; pos += 1
+    pos += 15  # reserved_2
+    sv_source = payload[pos]; pos += 1
+    layer_comp_flag = payload[pos]; pos += 1
+    pos += 8  # reserved_3
+
+    fields = {
+        'ProtocolVersion': protocol_version,
+        'DeviceID': device_id,
+        'MajorSerialNumber': major_serial_number,
+        'MinorSerialNumber': minor_serial_number,
+        'PingNumber': ping_number,
+        'MultiPingSeq': multi_ping_seq,
+        'Frequency_Hz': frequency_raw / 1.0e3,
+        'SampleRate_Hz': sample_rate_raw / 1.0e4,
+        'ReceiverBandwidth_Hz': receiver_bandwidth_raw / 1.0e4,
+        'TxPulseWidth_s': tx_pulse_width_raw / 1.0e7,
+        'TxPulseTypeID': tx_pulse_type_id,
+        'TxPulseEnvelopeID': tx_pulse_envlp_id,
+        'TxPulseEnvelopeParam': tx_pulse_envlp_param_raw / 1.0e2,
+        'TxPulseReserved': tx_pulse_reserved,
+        'MaxPingRate_pps': max_ping_rate_raw / 1.0e6,
+        'PingPeriod_s': ping_period_raw / 1.0e6,
+        'Range_m': range_raw / 1.0e2,
+        'Power_dB': power_raw / 1.0e2,
+        'Gain_dB': gain_raw / 1.0e2,
+        'ControlFlags': control_flags,
+        'ProjectorID': projector_id,
+        'ProjectorSteerAnglVert_deg': projector_steer_vert_raw / 1.0e3,
+        'ProjectorSteerAnglHoriz_deg': projector_steer_horz_raw / 1.0e3,
+        'ProjectorBeamWidthVert_deg': projector_bw_vert_raw / 1.0e2,
+        'ProjectorBeamWidthHoriz_deg': projector_bw_horz_raw / 1.0e2,
+        'ProjectorBeamFocalPt_m': projector_focal_pt_raw / 1.0e2,
+        'ProjectorBeamWeightingWindowType': projector_weight_window_type,
+        'ProjectorBeamWeightingWindowParam': projector_weight_window_param,
+        'TransmitFlags': transmit_flags,
+        'HydrophoneID': hydrophone_id,
+        'ReceivingBeamWeightingWindowType': rx_weight_window_type,
+        'ReceivingBeamWeightingWindowParam': rx_weight_window_param,
+        'ReceiveFlags': receive_flags,
+        'ReceiveBeamWidth_deg': rx_beam_width_raw / 1.0e2,
+        'RangeFiltMin_m': range_filt_min_raw / 1.0e1,
+        'RangeFiltMax_m': range_filt_max_raw / 1.0e1,
+        'DepthFiltMin_m': depth_filt_min_raw / 1.0e1,
+        'DepthFiltMax_m': depth_filt_max_raw / 1.0e1,
+        'Absorption_dBkm': absorption_raw / 1.0e3,
+        'SoundVelocity_mps': sound_velocity_raw / 1.0e1,
+        'Spreading_dB': spreading_raw / 1.0e3,
+        'RawDataFrom7027': raw_data_from_7027,
+        'SvSource': sv_source,
+        'LayerCompFlag': layer_comp_flag,
+    }
+    return fields, {}, pos - start
+
+
+def _encode_reson7125_specific(subrecord_id, fields, tables=None):
+    """
+    Encode a GSF_SWATH_BATHY_SUBRECORD_RESON_7125_SPECIFIC subrecord,
+    including its own 4-byte subrecord id+size word: the inverse of
+    _decode_reson7125_specific(). Ported from gsf_enc.c's
+    EncodeReson7100Specific(). Several fields (Frequency_Hz,
+    SampleRate_Hz, ReceiverBandwidth_Hz, TxPulseWidth_s,
+    TxPulseEnvelopeParam, MaxPingRate_pps, PingPeriod_s, Range_m, and the
+    beam-width/filter/absorption/sound-velocity/spreading fields) round
+    with the reference encoder's unconditional `+0.501` (they're always
+    non-negative in practice); Power_dB, Gain_dB, and the projector
+    steering angles use a sign-aware +/-0.501 branch. Both are equivalent
+    to this module's standard _gsf_round() convention, used uniformly
+    here for every scaled field.
+    """
+    g = fields.get
+    body = struct.pack('>H', int(g('ProtocolVersion', 0)))
+    body += struct.pack('>I', int(g('DeviceID', 0)))
+    body += b'\x00' * 16  # reserved_1
+    body += struct.pack('>I', int(g('MajorSerialNumber', 0)))
+    body += struct.pack('>I', int(g('MinorSerialNumber', 0)))
+    body += struct.pack('>I', int(g('PingNumber', 0)))
+    body += struct.pack('>H', int(g('MultiPingSeq', 0)))
+    body += struct.pack('>I', _gsf_round(g('Frequency_Hz', 0.0) * 1.0e3))
+    body += struct.pack('>I', _gsf_round(g('SampleRate_Hz', 0.0) * 1.0e4))
+    body += struct.pack('>I', _gsf_round(g('ReceiverBandwidth_Hz', 0.0) * 1.0e4))
+    body += struct.pack('>I', _gsf_round(g('TxPulseWidth_s', 0.0) * 1.0e7))
+    body += struct.pack('>I', int(g('TxPulseTypeID', 0)))
+    body += struct.pack('>I', int(g('TxPulseEnvelopeID', 0)))
+    body += struct.pack('>I', _gsf_round(g('TxPulseEnvelopeParam', 0.0) * 1.0e2))
+    body += struct.pack('>I', int(g('TxPulseReserved', 0)))
+    body += struct.pack('>I', _gsf_round(g('MaxPingRate_pps', 0.0) * 1.0e6))
+    body += struct.pack('>I', _gsf_round(g('PingPeriod_s', 0.0) * 1.0e6))
+    body += struct.pack('>I', _gsf_round(g('Range_m', 0.0) * 1.0e2))
+    body += struct.pack('>I', _gsf_round(g('Power_dB', 0.0) * 1.0e2))
+    body += struct.pack('>i', _gsf_round(g('Gain_dB', 0.0) * 1.0e2))
+    body += struct.pack('>I', int(g('ControlFlags', 0)))
+    body += struct.pack('>I', int(g('ProjectorID', 0)))
+    body += struct.pack('>i', _gsf_round(g('ProjectorSteerAnglVert_deg', 0.0) * 1.0e3))
+    body += struct.pack('>i', _gsf_round(g('ProjectorSteerAnglHoriz_deg', 0.0) * 1.0e3))
+    body += struct.pack('>H', _gsf_round(g('ProjectorBeamWidthVert_deg', 0.0) * 1.0e2))
+    body += struct.pack('>H', _gsf_round(g('ProjectorBeamWidthHoriz_deg', 0.0) * 1.0e2))
+    body += struct.pack('>I', _gsf_round(g('ProjectorBeamFocalPt_m', 0.0) * 1.0e2))
+    body += struct.pack('>I', int(g('ProjectorBeamWeightingWindowType', 0)))
+    body += struct.pack('>I', int(g('ProjectorBeamWeightingWindowParam', 0)))
+    body += struct.pack('>I', int(g('TransmitFlags', 0)))
+    body += struct.pack('>I', int(g('HydrophoneID', 0)))
+    body += struct.pack('>I', int(g('ReceivingBeamWeightingWindowType', 0)))
+    body += struct.pack('>I', int(g('ReceivingBeamWeightingWindowParam', 0)))
+    body += struct.pack('>I', int(g('ReceiveFlags', 0)))
+    body += struct.pack('>H', _gsf_round(g('ReceiveBeamWidth_deg', 0.0) * 1.0e2))
+    body += struct.pack('>H', _gsf_round(g('RangeFiltMin_m', 0.0) * 1.0e1))
+    body += struct.pack('>H', _gsf_round(g('RangeFiltMax_m', 0.0) * 1.0e1))
+    body += struct.pack('>H', _gsf_round(g('DepthFiltMin_m', 0.0) * 1.0e1))
+    body += struct.pack('>H', _gsf_round(g('DepthFiltMax_m', 0.0) * 1.0e1))
+    body += struct.pack('>I', _gsf_round(g('Absorption_dBkm', 0.0) * 1.0e3))
+    body += struct.pack('>H', _gsf_round(g('SoundVelocity_mps', 0.0) * 1.0e1))
+    body += struct.pack('>I', _gsf_round(g('Spreading_dB', 0.0) * 1.0e3))
+    body += struct.pack('>B', int(g('RawDataFrom7027', 0)) & 0xFF)
+    body += b'\x00' * 15  # reserved_2
+    body += struct.pack('>B', int(g('SvSource', 0)) & 0xFF)
+    body += struct.pack('>B', int(g('LayerCompFlag', 0)) & 0xFF)
+    body += b'\x00' * 8  # reserved_3
+    header_word = ((subrecord_id & 0xFF) << 24) | len(body)
+    return struct.pack('>I', header_word) + body
+
+
+_PING_SENSOR_SPECIFIC_CODECS[138] = ("Reson7125", _decode_reson7125_specific, _encode_reson7125_specific)
+
+
+def _decode_reson_tseries_specific(payload, pos):
+    """
+    Decode a GSF_SWATH_BATHY_SUBRECORD_RESON_TSERIES_SPECIFIC subrecord (id
+    155, Reson T20/T50 series). Ported from gsf_dec.c's
+    DecodeResonTSeriesSpecific() -- the largest sensor-specific struct in
+    gsf.h (~90 named fields plus large spare ranges, 715 bytes on the
+    wire). No nested arrays or bitmask-gated sub-blocks, unlike EM3/EM4 --
+    a single large flat struct, read and written straight through.
+
+    Bitmask fields (ControlFlags, TransmitFlags, ReceiveFlags,
+    DetectionFlags) are kept as a single raw int, not split into booleans,
+    matching this codebase's convention elsewhere.
+
+    Quirk (present in the real wire format, not a bug): SoundVelocity_mps
+    is stored TWICE -- once as a 2-byte low-precision value (*10) right
+    after Absorption_dBkm, and again as a 4-byte high-precision value
+    (*1.0e6) right after DeviceDescription. gsf_dec.c only keeps the
+    high-precision value if it's nonzero, overwriting the low-precision
+    read; this port does the same and exposes only the single resolved
+    'SoundVelocity_mps' field. _encode_reson_tseries_specific() writes
+    BOTH wire copies from that one field, mirroring gsf_enc.c exactly (no
+    information is lost either way).
+
+    Checked for the same tx_pulse_reserved width bug found in the related
+    Reson7125 decoder (DecodeReson7100Specific reads it from a stale
+    2-byte local instead of the 4-byte one just loaded) -- this decoder
+    does NOT have that bug: TxPulseReserved is correctly read as its own
+    fresh 2-byte value here.
+
+    A few of gsf.h's own field-comments understate the on-disk width
+    (e.g. "two byte" for what DecodeResonTSeriesSpecific/
+    EncodeResonTSeriesSpecific actually read/write as 4 bytes, or "four
+    byte" for MatchFilterShadingValue which is actually 2) -- this port
+    follows the C code's actual memcpy/htons/htonl widths, not the
+    comments, throughout.
+
+    Untested against a verified GSF file: no sample data containing a
+    RESON_TSERIES_SPECIFIC subrecord is available.
+
+    :return: (fields: dict, tables: {} (no nested arrays), bytes_consumed).
+    """
+    start = pos
+    (protocol_version,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (device_id,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (number_devices,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (system_enumerator,) = struct.unpack_from('>H', payload, pos); pos += 2
+    pos += 10  # reserved_1
+    (major_serial_number,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (minor_serial_number,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (ping_number,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (multi_ping_seq,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (frequency_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (sample_rate_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (receiver_bandwidth_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (tx_pulse_width_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (tx_pulse_type_id,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (tx_pulse_envlp_id,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (tx_pulse_envlp_param_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (tx_pulse_mode,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (tx_pulse_reserved,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (max_ping_rate_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (ping_period_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (range_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (power_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (gain_raw,) = struct.unpack_from('>i', payload, pos); pos += 4
+    (control_flags,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (projector_id,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (projector_steer_vert_raw,) = struct.unpack_from('>i', payload, pos); pos += 4
+    (projector_steer_horz_raw,) = struct.unpack_from('>i', payload, pos); pos += 4
+    (projector_bw_vert_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (projector_bw_horz_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (projector_focal_pt_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (projector_weight_window_type,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (projector_weight_window_param,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (transmit_flags,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (hydrophone_id,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (rx_weight_window_type,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (rx_weight_window_param,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (receive_flags,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (rx_beam_width_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (range_filt_min_raw,) = struct.unpack_from('>i', payload, pos); pos += 4
+    (range_filt_max_raw,) = struct.unpack_from('>i', payload, pos); pos += 4
+    (depth_filt_min_raw,) = struct.unpack_from('>i', payload, pos); pos += 4
+    (depth_filt_max_raw,) = struct.unpack_from('>i', payload, pos); pos += 4
+    (absorption_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (sound_velocity_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+    sv_source = payload[pos]; pos += 1
+    (spreading_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (beam_spacing_mode,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (sonar_source_mode,) = struct.unpack_from('>H', payload, pos); pos += 2
+    coverage_mode = payload[pos]; pos += 1
+    (coverage_angle_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (horiz_rx_steer_raw,) = struct.unpack_from('>i', payload, pos); pos += 4
+    pos += 3  # reserved_2
+    (uncertainty_type,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (tx_steering_angle_raw,) = struct.unpack_from('>i', payload, pos); pos += 4
+    (applied_roll_raw,) = struct.unpack_from('>i', payload, pos); pos += 4
+    (detection_algorithm,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (detection_flags,) = struct.unpack_from('>I', payload, pos); pos += 4
+    device_description = payload[pos:pos + 60].split(b'\x00', 1)[0].decode('ascii', 'replace'); pos += 60
+    (sound_velocity_hp_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    pos += 60  # reserved_7027
+    match_filter_control = payload[pos]; pos += 1
+    (match_filter_start_freq_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (match_filter_end_freq_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    match_filter_window_type = payload[pos]; pos += 1
+    (match_filter_shading_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (match_filter_pulse_width_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    pos += 52  # reserved_7002
+    pos += 32  # reserved_3
+    pos += 288  # reserved_4
+
+    sound_velocity_mps = sound_velocity_raw / 1.0e1
+    if sound_velocity_hp_raw > 0:
+        sound_velocity_mps = sound_velocity_hp_raw / 1.0e6
+
+    fields = {
+        'ProtocolVersion': protocol_version,
+        'DeviceID': device_id,
+        'NumberDevices': number_devices,
+        'SystemEnumerator': system_enumerator,
+        'MajorSerialNumber': major_serial_number,
+        'MinorSerialNumber': minor_serial_number,
+        'PingNumber': ping_number,
+        'MultiPingSeq': multi_ping_seq,
+        'Frequency_Hz': frequency_raw / 1.0e3,
+        'SampleRate_Hz': sample_rate_raw / 1.0e4,
+        'ReceiverBandwidth_Hz': receiver_bandwidth_raw / 1.0e4,
+        'TxPulseWidth_s': tx_pulse_width_raw / 1.0e7,
+        'TxPulseTypeID': tx_pulse_type_id,
+        'TxPulseEnvelopeID': tx_pulse_envlp_id,
+        'TxPulseEnvelopeParam': tx_pulse_envlp_param_raw / 1.0e2,
+        'TxPulseMode': tx_pulse_mode,
+        'TxPulseReserved': tx_pulse_reserved,
+        'MaxPingRate_pps': max_ping_rate_raw / 1.0e6,
+        'PingPeriod_s': ping_period_raw / 1.0e6,
+        'Range_m': range_raw / 1.0e2,
+        'Power_dB': power_raw / 1.0e2,
+        'Gain_dB': gain_raw / 1.0e2,
+        'ControlFlags': control_flags,
+        'ProjectorID': projector_id,
+        'ProjectorSteerAnglVert_deg': projector_steer_vert_raw / 1.0e3,
+        'ProjectorSteerAnglHoriz_deg': projector_steer_horz_raw / 1.0e3,
+        'ProjectorBeamWidthVert_deg': projector_bw_vert_raw / 1.0e2,
+        'ProjectorBeamWidthHoriz_deg': projector_bw_horz_raw / 1.0e2,
+        'ProjectorBeamFocalPt_m': projector_focal_pt_raw / 1.0e2,
+        'ProjectorBeamWeightingWindowType': projector_weight_window_type,
+        'ProjectorBeamWeightingWindowParam': projector_weight_window_param,
+        'TransmitFlags': transmit_flags,
+        'HydrophoneID': hydrophone_id,
+        'ReceivingBeamWeightingWindowType': rx_weight_window_type,
+        'ReceivingBeamWeightingWindowParam': rx_weight_window_param,
+        'ReceiveFlags': receive_flags,
+        'ReceiveBeamWidth_deg': rx_beam_width_raw / 1.0e2,
+        'RangeFiltMin_m': range_filt_min_raw / 1.0e1,
+        'RangeFiltMax_m': range_filt_max_raw / 1.0e1,
+        'DepthFiltMin_m': depth_filt_min_raw / 1.0e1,
+        'DepthFiltMax_m': depth_filt_max_raw / 1.0e1,
+        'Absorption_dBkm': absorption_raw / 1.0e3,
+        'SoundVelocity_mps': sound_velocity_mps,
+        'SvSource': sv_source,
+        'Spreading_dB': spreading_raw / 1.0e3,
+        'BeamSpacingMode': beam_spacing_mode,
+        'SonarSourceMode': sonar_source_mode,
+        'CoverageMode': coverage_mode,
+        'CoverageAngle_deg': coverage_angle_raw / 1.0e2,
+        'HorizontalReceiverSteeringAngle_deg': horiz_rx_steer_raw / 1.0e2,
+        'UncertaintyType': uncertainty_type,
+        'TransmitterSteeringAngle_rad': tx_steering_angle_raw / 1.0e5,
+        'AppliedRoll_rad': applied_roll_raw / 1.0e5,
+        'DetectionAlgorithm': detection_algorithm,
+        'DetectionFlags': detection_flags,
+        'DeviceDescription': device_description,
+        'MatchFilterControl': match_filter_control,
+        'MatchFilterStartFreq_Hz': match_filter_start_freq_raw / 1.0e2,
+        'MatchFilterEndFreq_Hz': match_filter_end_freq_raw / 1.0e2,
+        'MatchFilterWindowType': match_filter_window_type,
+        'MatchFilterShadingValue': match_filter_shading_raw / 1.0e4,
+        'MatchFilterEffectivePulseWidth_s': match_filter_pulse_width_raw / 1.0e11,
+    }
+    return fields, {}, pos - start
+
+
+def _encode_reson_tseries_specific(subrecord_id, fields, tables=None):
+    """
+    Encode a GSF_SWATH_BATHY_SUBRECORD_RESON_TSERIES_SPECIFIC subrecord,
+    including its own 4-byte subrecord id+size word: the inverse of
+    _decode_reson_tseries_specific(). Ported from gsf_enc.c's
+    EncodeResonTSeriesSpecific(). Writes SoundVelocity_mps out twice (a
+    2-byte low-precision copy and a 4-byte high-precision copy), matching
+    the reference encoder exactly -- see _decode_reson_tseries_specific()'s
+    docstring. Every scaled field uses this module's standard, sign-correct
+    _gsf_round() convention, equivalent to the reference encoder's mix of
+    unconditional and sign-branched +/-0.501 rounding.
+    """
+    g = fields.get
+    body = struct.pack('>H', int(g('ProtocolVersion', 0)))
+    body += struct.pack('>I', int(g('DeviceID', 0)))
+    body += struct.pack('>I', int(g('NumberDevices', 0)))
+    body += struct.pack('>H', int(g('SystemEnumerator', 0)))
+    body += b'\x00' * 10  # reserved_1
+    body += struct.pack('>I', int(g('MajorSerialNumber', 0)))
+    body += struct.pack('>I', int(g('MinorSerialNumber', 0)))
+    body += struct.pack('>I', int(g('PingNumber', 0)))
+    body += struct.pack('>H', int(g('MultiPingSeq', 0)))
+    body += struct.pack('>I', _gsf_round(g('Frequency_Hz', 0.0) * 1.0e3))
+    body += struct.pack('>I', _gsf_round(g('SampleRate_Hz', 0.0) * 1.0e4))
+    body += struct.pack('>I', _gsf_round(g('ReceiverBandwidth_Hz', 0.0) * 1.0e4))
+    body += struct.pack('>I', _gsf_round(g('TxPulseWidth_s', 0.0) * 1.0e7))
+    body += struct.pack('>I', int(g('TxPulseTypeID', 0)))
+    body += struct.pack('>I', int(g('TxPulseEnvelopeID', 0)))
+    body += struct.pack('>I', _gsf_round(g('TxPulseEnvelopeParam', 0.0) * 1.0e2))
+    body += struct.pack('>H', int(g('TxPulseMode', 0)))
+    body += struct.pack('>H', int(g('TxPulseReserved', 0)))
+    body += struct.pack('>I', _gsf_round(g('MaxPingRate_pps', 0.0) * 1.0e6))
+    body += struct.pack('>I', _gsf_round(g('PingPeriod_s', 0.0) * 1.0e6))
+    body += struct.pack('>I', _gsf_round(g('Range_m', 0.0) * 1.0e2))
+    body += struct.pack('>I', _gsf_round(g('Power_dB', 0.0) * 1.0e2))
+    body += struct.pack('>i', _gsf_round(g('Gain_dB', 0.0) * 1.0e2))
+    body += struct.pack('>I', int(g('ControlFlags', 0)))
+    body += struct.pack('>I', int(g('ProjectorID', 0)))
+    body += struct.pack('>i', _gsf_round(g('ProjectorSteerAnglVert_deg', 0.0) * 1.0e3))
+    body += struct.pack('>i', _gsf_round(g('ProjectorSteerAnglHoriz_deg', 0.0) * 1.0e3))
+    body += struct.pack('>H', _gsf_round(g('ProjectorBeamWidthVert_deg', 0.0) * 1.0e2))
+    body += struct.pack('>H', _gsf_round(g('ProjectorBeamWidthHoriz_deg', 0.0) * 1.0e2))
+    body += struct.pack('>I', _gsf_round(g('ProjectorBeamFocalPt_m', 0.0) * 1.0e2))
+    body += struct.pack('>I', int(g('ProjectorBeamWeightingWindowType', 0)))
+    body += struct.pack('>I', int(g('ProjectorBeamWeightingWindowParam', 0)))
+    body += struct.pack('>I', int(g('TransmitFlags', 0)))
+    body += struct.pack('>I', int(g('HydrophoneID', 0)))
+    body += struct.pack('>I', int(g('ReceivingBeamWeightingWindowType', 0)))
+    body += struct.pack('>I', int(g('ReceivingBeamWeightingWindowParam', 0)))
+    body += struct.pack('>I', int(g('ReceiveFlags', 0)))
+    body += struct.pack('>H', _gsf_round(g('ReceiveBeamWidth_deg', 0.0) * 1.0e2))
+    body += struct.pack('>i', _gsf_round(g('RangeFiltMin_m', 0.0) * 1.0e1))
+    body += struct.pack('>i', _gsf_round(g('RangeFiltMax_m', 0.0) * 1.0e1))
+    body += struct.pack('>i', _gsf_round(g('DepthFiltMin_m', 0.0) * 1.0e1))
+    body += struct.pack('>i', _gsf_round(g('DepthFiltMax_m', 0.0) * 1.0e1))
+    body += struct.pack('>I', _gsf_round(g('Absorption_dBkm', 0.0) * 1.0e3))
+    sound_velocity_mps = g('SoundVelocity_mps', 0.0)
+    body += struct.pack('>H', _gsf_round(sound_velocity_mps * 1.0e1))
+    body += struct.pack('>B', int(g('SvSource', 0)) & 0xFF)
+    body += struct.pack('>I', _gsf_round(g('Spreading_dB', 0.0) * 1.0e3))
+    body += struct.pack('>H', int(g('BeamSpacingMode', 0)))
+    body += struct.pack('>H', int(g('SonarSourceMode', 0)))
+    body += struct.pack('>B', int(g('CoverageMode', 0)) & 0xFF)
+    body += struct.pack('>I', _gsf_round(g('CoverageAngle_deg', 0.0) * 1.0e2))
+    body += struct.pack('>i', _gsf_round(g('HorizontalReceiverSteeringAngle_deg', 0.0) * 1.0e2))
+    body += b'\x00' * 3  # reserved_2
+    body += struct.pack('>I', int(g('UncertaintyType', 0)))
+    body += struct.pack('>i', _gsf_round(g('TransmitterSteeringAngle_rad', 0.0) * 1.0e5))
+    body += struct.pack('>i', _gsf_round(g('AppliedRoll_rad', 0.0) * 1.0e5))
+    body += struct.pack('>H', int(g('DetectionAlgorithm', 0)))
+    body += struct.pack('>I', int(g('DetectionFlags', 0)))
+    body += g('DeviceDescription', "").encode('ascii')[:60].ljust(60, b'\x00')
+    body += struct.pack('>I', _gsf_round(sound_velocity_mps * 1.0e6))
+    body += b'\x00' * 60  # reserved_7027
+    body += struct.pack('>B', int(g('MatchFilterControl', 0)) & 0xFF)
+    body += struct.pack('>I', _gsf_round(g('MatchFilterStartFreq_Hz', 0.0) * 1.0e2))
+    body += struct.pack('>I', _gsf_round(g('MatchFilterEndFreq_Hz', 0.0) * 1.0e2))
+    body += struct.pack('>B', int(g('MatchFilterWindowType', 0)) & 0xFF)
+    body += struct.pack('>H', _gsf_round(g('MatchFilterShadingValue', 0.0) * 1.0e4))
+    body += struct.pack('>I', _gsf_round(g('MatchFilterEffectivePulseWidth_s', 0.0) * 1.0e11))
+    body += b'\x00' * 52  # reserved_7002
+    body += b'\x00' * 32  # reserved_3
+    body += b'\x00' * 288  # reserved_4
+    header_word = ((subrecord_id & 0xFF) << 24) | len(body)
+    return struct.pack('>I', header_word) + body
+
+
+_PING_SENSOR_SPECIFIC_CODECS[155] = ("ResonTSeries", _decode_reson_tseries_specific, _encode_reson_tseries_specific)
+
+
+def _decode_geoswath_plus_specific(payload, pos):
+    """
+    Decode a GSF_SWATH_BATHY_SUBRECORD_GEOSWATH_PLUS_SPECIFIC subrecord
+    (id 136). Ported from gsf_dec.c's DecodeGeoSwathPlusSpecific().
+
+    Untested against a verified GSF file: no sample data containing a
+    GEOSWATH_PLUS_SPECIFIC subrecord is available.
+
+    :return: (fields: dict, tables: {} (none for this sensor), bytes_consumed).
+    """
+    start = pos
+    (data_source,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (side,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (model_number,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (frequency_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (echosounder_type,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (ping_number,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (num_nav_samples,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (num_attitude_samples,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (num_heading_samples,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (num_minisvs_samples,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (num_echosounder_samples,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (num_raa_samples,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (mean_sv_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (surface_velocity_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (valid_beams,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (sample_rate_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (pulse_length,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (ping_length,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (transmit_power,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (sidescan_gain_channel,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (stabilization,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (gps_quality,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (range_uncertainty_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (angle_uncertainty_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+    pos += 32  # spare
+
+    fields = {
+        'DataSource': data_source,
+        'Side': side,
+        'ModelNumber': model_number,
+        'Frequency_Hz': frequency_raw * 10.0,
+        'EchosounderType': echosounder_type,
+        'PingNumber': ping_number,
+        'NumNavSamples': num_nav_samples,
+        'NumAttitudeSamples': num_attitude_samples,
+        'NumHeadingSamples': num_heading_samples,
+        'NumMiniSVSSamples': num_minisvs_samples,
+        'NumEchosounderSamples': num_echosounder_samples,
+        'NumRaaSamples': num_raa_samples,
+        'MeanSV_mps': mean_sv_raw / 20.0,
+        'SurfaceVelocity_mps': surface_velocity_raw / 20.0,
+        'ValidBeams': valid_beams,
+        'SampleRate_Hz': sample_rate_raw * 10.0,
+        'PulseLength_us': float(pulse_length),
+        'PingLength_m': ping_length,
+        'TransmitPower': transmit_power,
+        'SidescanGainChannel': sidescan_gain_channel,
+        'Stabilization': stabilization,
+        'GpsQuality': gps_quality,
+        'RangeUncertainty_m': range_uncertainty_raw / 1000.0,
+        'AngleUncertainty_deg': angle_uncertainty_raw / 100.0,
+    }
+    return fields, {}, pos - start
+
+
+def _encode_geoswath_plus_specific(subrecord_id, fields, tables=None):
+    """
+    Encode a GSF_SWATH_BATHY_SUBRECORD_GEOSWATH_PLUS_SPECIFIC subrecord,
+    including its own 4-byte subrecord id+size word: the inverse of
+    _decode_geoswath_plus_specific(). Ported from gsf_enc.c's
+    EncodeGeoSwathPlusSpecific() (all fields here are non-negative in
+    practice, so the reference encoder's unconditional `+ 0.501` and this
+    module's sign-correct _gsf_round() agree).
+    """
+    g = fields.get
+    body = struct.pack('>H', int(g('DataSource', 0)))
+    body += struct.pack('>H', int(g('Side', 0)))
+    body += struct.pack('>H', int(g('ModelNumber', 0)))
+    body += struct.pack('>H', _gsf_round(g('Frequency_Hz', 0.0) / 10.0))
+    body += struct.pack('>H', int(g('EchosounderType', 0)))
+    body += struct.pack('>I', int(g('PingNumber', 0)))
+    body += struct.pack('>H', int(g('NumNavSamples', 0)))
+    body += struct.pack('>H', int(g('NumAttitudeSamples', 0)))
+    body += struct.pack('>H', int(g('NumHeadingSamples', 0)))
+    body += struct.pack('>H', int(g('NumMiniSVSSamples', 0)))
+    body += struct.pack('>H', int(g('NumEchosounderSamples', 0)))
+    body += struct.pack('>H', int(g('NumRaaSamples', 0)))
+    body += struct.pack('>H', _gsf_round(g('MeanSV_mps', 0.0) * 20.0))
+    body += struct.pack('>H', _gsf_round(g('SurfaceVelocity_mps', 0.0) * 20.0))
+    body += struct.pack('>H', int(g('ValidBeams', 0)))
+    body += struct.pack('>H', _gsf_round(g('SampleRate_Hz', 0.0) / 10.0))
+    body += struct.pack('>H', int(g('PulseLength_us', 0)))
+    body += struct.pack('>H', int(g('PingLength_m', 0)))
+    body += struct.pack('>H', int(g('TransmitPower', 0)))
+    body += struct.pack('>H', int(g('SidescanGainChannel', 0)))
+    body += struct.pack('>H', int(g('Stabilization', 0)))
+    body += struct.pack('>H', int(g('GpsQuality', 0)))
+    body += struct.pack('>H', _gsf_round(g('RangeUncertainty_m', 0.0) * 1000.0))
+    body += struct.pack('>H', _gsf_round(g('AngleUncertainty_deg', 0.0) * 100.0))
+    body += b'\x00' * 32  # spare
+    header_word = ((subrecord_id & 0xFF) << 24) | len(body)
+    return struct.pack('>I', header_word) + body
+
+
+_PING_SENSOR_SPECIFIC_CODECS[136] = (
+    "GeoSwathPlus", _decode_geoswath_plus_specific, _encode_geoswath_plus_specific)
+
+
+def _decode_klein5410bss_specific(payload, pos):
+    """
+    Decode a GSF_SWATH_BATHY_SUBRECORD_KLEIN_5410_BSS_SPECIFIC subrecord
+    (id 137) -- the ping-level sensor-specific block, distinct from
+    _decode_klein5410bss_imagery_specific() (the smaller preamble inside
+    the BRB intensity subrecord, id 21). Ported from gsf_dec.c's
+    DecodeKlein5410BssSpecific().
+
+    Note: FishDepth_V/FishAltitude_m/SoundSpeed_mps are decoded from their
+    raw 4-byte field as UNSIGNED (matching gsf_dec.c's own `(double)
+    ntohl(ltemp)`, with no sign reinterpretation), even though
+    EncodeKlein5410BssSpecific() allows negative values in for those same
+    three fields via a signed rounding branch -- an asymmetry in the
+    reference library itself (a file written with a negative value there
+    would not decode back correctly even with the real gsflib). This
+    encoder matches gsf_dec.c's decode side; see
+    _encode_klein5410bss_specific()'s docstring for the encode-side
+    consequence.
+
+    Untested against a verified GSF file: no sample data containing a
+    KLEIN_5410_BSS_SPECIFIC subrecord is available.
+
+    :return: (fields: dict, tables: {} (none for this sensor), bytes_consumed).
+    """
+    start = pos
+    (data_source,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (side,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (model_number,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (acoustic_frequency_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (sampling_frequency_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (ping_number,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (num_samples,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (num_raa_samples,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (error_flags,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (rng,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (fish_depth_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (fish_altitude_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (sound_speed_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (tx_waveform,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (altimeter,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (raw_data_config,) = struct.unpack_from('>I', payload, pos); pos += 4
+    pos += 32  # spare
+
+    fields = {
+        'DataSource': data_source,
+        'Side': side,
+        'ModelNumber': model_number,
+        'AcousticFrequency_Hz': acoustic_frequency_raw / 1000.0,
+        'SamplingFrequency_Hz': sampling_frequency_raw / 1000.0,
+        'PingNumber': ping_number,
+        'NumSamples': num_samples,
+        'NumRaaSamples': num_raa_samples,
+        'ErrorFlags': error_flags,
+        'Range': rng,
+        'FishDepth_V': fish_depth_raw / 1000.0,
+        'FishAltitude_m': fish_altitude_raw / 1000.0,
+        'SoundSpeed_mps': sound_speed_raw / 1000.0,
+        'TxWaveform': tx_waveform,
+        'Altimeter': altimeter,
+        'RawDataConfig': raw_data_config,
+    }
+    return fields, {}, pos - start
+
+
+def _encode_klein5410bss_specific(subrecord_id, fields, tables=None):
+    """
+    Encode a GSF_SWATH_BATHY_SUBRECORD_KLEIN_5410_BSS_SPECIFIC subrecord,
+    including its own 4-byte subrecord id+size word: the inverse of
+    _decode_klein5410bss_specific(). Ported from gsf_enc.c's
+    EncodeKlein5410BssSpecific().
+
+    FishDepth_V/FishAltitude_m/SoundSpeed_mps are packed as unsigned
+    32-bit fields (matching how _decode_klein5410bss_specific() reads
+    them back) -- a negative value raises struct.error rather than
+    silently producing bytes the decoder can't recover, which is the
+    practical effect of the same asymmetry in gsf_enc.c/gsf_dec.c (see
+    _decode_klein5410bss_specific()'s docstring).
+    """
+    g = fields.get
+    body = struct.pack('>H', int(g('DataSource', 0)))
+    body += struct.pack('>H', int(g('Side', 0)))
+    body += struct.pack('>H', int(g('ModelNumber', 0)))
+    body += struct.pack('>I', _gsf_round(g('AcousticFrequency_Hz', 0.0) * 1000.0))
+    body += struct.pack('>I', _gsf_round(g('SamplingFrequency_Hz', 0.0) * 1000.0))
+    body += struct.pack('>I', int(g('PingNumber', 0)))
+    body += struct.pack('>I', int(g('NumSamples', 0)))
+    body += struct.pack('>I', int(g('NumRaaSamples', 0)))
+    body += struct.pack('>I', int(g('ErrorFlags', 0)))
+    body += struct.pack('>I', int(g('Range', 0)))
+    body += struct.pack('>I', _gsf_round(g('FishDepth_V', 0.0) * 1000.0))
+    body += struct.pack('>I', _gsf_round(g('FishAltitude_m', 0.0) * 1000.0))
+    body += struct.pack('>I', _gsf_round(g('SoundSpeed_mps', 0.0) * 1000.0))
+    body += struct.pack('>H', int(g('TxWaveform', 0)))
+    body += struct.pack('>H', int(g('Altimeter', 0)))
+    body += struct.pack('>I', int(g('RawDataConfig', 0)))
+    body += b'\x00' * 32  # spare
+    header_word = ((subrecord_id & 0xFF) << 24) | len(body)
+    return struct.pack('>I', header_word) + body
+
+
+_PING_SENSOR_SPECIFIC_CODECS[137] = (
+    "Klein5410Bss", _decode_klein5410bss_specific, _encode_klein5410bss_specific)
+
+
+def _decode_sass_specific(payload, pos):
+    """
+    Decode a GSF_SWATH_BATHY_SUBRECORD_SASS_SPECIFIC (id 108) or
+    _TYPEIII_SEABEAM_SPECIFIC (id 112) subrecord -- identical wire format,
+    one struct (gsf.h's t_gsfTypeIIISpecific) and decoder shared by both in
+    gsflib. Ported from gsf_dec.c's DecodeSASSSpecific() (byte-for-byte
+    identical to DecodeTypeIIISeaBeamSpecific(), verified against both).
+    Both record types are marked obsolete in gsf.h (replaced by
+    CMP_SASS_SPECIFIC, see _decode_cmp_sass_specific()), but gsflib still
+    ships a full decode/encode pair for them, so this does too.
+
+    Untested against a verified GSF file: no sample data containing a
+    SASS_SPECIFIC/TYPEIII_SEABEAM_SPECIFIC subrecord is available.
+
+    :return: (fields: dict, tables: {} (none for this sensor), bytes_consumed).
+    """
+    start = pos
+    (leftmost_beam,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (rightmost_beam,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (total_beams,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (nav_mode,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (ping_number,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (mission_number,) = struct.unpack_from('>H', payload, pos); pos += 2
+
+    fields = {
+        'LeftmostBeam': leftmost_beam,
+        'RightmostBeam': rightmost_beam,
+        'TotalBeams': total_beams,
+        'NavMode': nav_mode,
+        'PingNumber': ping_number,
+        'MissionNumber': mission_number,
+    }
+    return fields, {}, pos - start
+
+
+def _encode_sass_specific(subrecord_id, fields, tables=None):
+    """
+    Encode a GSF_SWATH_BATHY_SUBRECORD_SASS_SPECIFIC or
+    _TYPEIII_SEABEAM_SPECIFIC subrecord (subrecord_id selects which -- see
+    _decode_sass_specific()), including its own 4-byte subrecord id+size
+    word: the inverse of _decode_sass_specific(). Ported from gsf_enc.c's
+    EncodeSASSSpecific() (byte-for-byte identical to
+    EncodeTypeIIISeaBeamSpecific()).
+    """
+    g = fields.get
+    body = struct.pack(
+        '>6H',
+        int(g('LeftmostBeam', 0)), int(g('RightmostBeam', 0)), int(g('TotalBeams', 0)),
+        int(g('NavMode', 0)), int(g('PingNumber', 0)), int(g('MissionNumber', 0)))
+    header_word = ((subrecord_id & 0xFF) << 24) | len(body)
+    return struct.pack('>I', header_word) + body
+
+
+_PING_SENSOR_SPECIFIC_CODECS[108] = ("SASS", _decode_sass_specific, _encode_sass_specific)
+_PING_SENSOR_SPECIFIC_CODECS[112] = ("TypeIIISeaBeam", _decode_sass_specific, _encode_sass_specific)
+
+
+def _decode_delta_t_specific(payload, pos):
+    """
+    Decode a GSF_SWATH_BATHY_SUBRECORD_DELTA_T_SPECIFIC subrecord (id 150):
+    Imagenex Delta T multibeam sensor metadata. Ported from gsf_dec.c's
+    DecodeDeltaTSpecific(). Field scaling follows the C source exactly,
+    including its asymmetries between similar-looking fields -- e.g.
+    start_angle is stored as (angle+180)*100 but profile_tilt_angle as
+    plain (angle+180) with no *100, and sector_size/acoustic_range/
+    acoustic_frequency/range_resolution/repetition_rate carry no scale
+    factor at all despite being stored as doubles.
+
+    Untested against a verified GSF file: no sample data containing a
+    DELTA_T_SPECIFIC subrecord is available.
+
+    :return: (fields: dict, tables: {} (none for this sensor), bytes_consumed).
+    """
+    start = pos
+    decode_file_type = payload[pos:pos + 4].decode('ascii', 'replace').rstrip('\x00'); pos += 4
+    version = payload[pos]; pos += 1
+    (ping_byte_size,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (sec, nsec) = struct.unpack_from('>2I', payload, pos); pos += 8
+    (samples_per_beam,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (sector_size_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (start_angle_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (angle_increment_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (acoustic_range,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (acoustic_frequency,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (sound_velocity_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (range_resolution_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (profile_tilt_angle_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (repetition_rate_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (ping_number,) = struct.unpack_from('>I', payload, pos); pos += 4
+    intensity_flag = payload[pos]; pos += 1
+    (ping_latency_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (data_latency_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+    sample_rate_flag = payload[pos]; pos += 1
+    option_flags = payload[pos]; pos += 1
+    num_pings_avg = payload[pos]; pos += 1
+    (center_ping_time_offset_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+    user_defined_byte = payload[pos]; pos += 1
+    (altitude_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    external_sensor_flags = payload[pos]; pos += 1
+    (pulse_length_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    fore_aft_beamwidth_raw = payload[pos]; pos += 1
+    athwartships_beamwidth_raw = payload[pos]; pos += 1
+    pos += 32  # spare
+
+    fields = {
+        'DecodeFileType': decode_file_type,
+        'Version': version,
+        'PingByteSize': ping_byte_size,
+        'InterrogationTime': _gsf_timestamp(sec, nsec),
+        'SamplesPerBeam': samples_per_beam,
+        'SectorSize_deg': float(sector_size_raw),
+        'StartAngle_deg': start_angle_raw / 100.0 - 180.0,
+        'AngleIncrement_deg': angle_increment_raw / 100.0,
+        'AcousticRange_m': acoustic_range,
+        'AcousticFrequency_kHz': acoustic_frequency,
+        'SoundVelocity_mps': sound_velocity_raw / 10.0,
+        'RangeResolution_cm': float(range_resolution_raw),
+        'ProfileTiltAngle_deg': profile_tilt_angle_raw - 180.0,
+        'RepetitionRate_ms': float(repetition_rate_raw),
+        'PingNumber': ping_number,
+        'IntensityFlag': intensity_flag,
+        'PingLatency_s': ping_latency_raw / 10000.0,
+        'DataLatency_s': data_latency_raw / 10000.0,
+        'SampleRateFlag': sample_rate_flag,
+        'OptionFlags': option_flags,
+        'NumPingsAvg': num_pings_avg,
+        'CenterPingTimeOffset_s': center_ping_time_offset_raw / 10000.0,
+        'UserDefinedByte': user_defined_byte,
+        'Altitude_m': altitude_raw / 100.0,
+        'ExternalSensorFlags': external_sensor_flags,
+        'PulseLength_s': pulse_length_raw / 1.0e6,
+        'ForeAftBeamwidth_deg': fore_aft_beamwidth_raw / 10.0,
+        'AthwartshipsBeamwidth_deg': athwartships_beamwidth_raw / 10.0,
+    }
+    return fields, {}, pos - start
+
+
+def _encode_delta_t_specific(subrecord_id, fields, tables=None):
+    """
+    Encode a GSF_SWATH_BATHY_SUBRECORD_DELTA_T_SPECIFIC subrecord,
+    including its own 4-byte subrecord id+size word: the inverse of
+    _decode_delta_t_specific(). Ported from gsf_enc.c's
+    EncodeDeltaTSpecific() -- see that decoder's docstring for the
+    per-field scaling asymmetries this preserves.
+    """
+    g = fields.get
+    decode_file_type = str(g('DecodeFileType', '')).encode('ascii')[:4].ljust(4, b'\x00')
+    body = decode_file_type
+    body += struct.pack('>B', int(g('Version', 0)) & 0xFF)
+    body += struct.pack('>H', int(g('PingByteSize', 0)))
+    sec, nsec = _gsf_epoch(g('InterrogationTime', 0))
+    body += struct.pack('>2I', sec, nsec)
+    body += struct.pack('>H', int(g('SamplesPerBeam', 0)))
+    body += struct.pack('>H', _gsf_round(g('SectorSize_deg', 0.0)))
+    body += struct.pack('>H', _gsf_round((g('StartAngle_deg', -180.0) + 180.0) * 100.0))
+    body += struct.pack('>H', _gsf_round(g('AngleIncrement_deg', 0.0) * 100.0))
+    body += struct.pack('>H', int(g('AcousticRange_m', 0)))
+    body += struct.pack('>H', int(g('AcousticFrequency_kHz', 0)))
+    body += struct.pack('>H', _gsf_round(g('SoundVelocity_mps', 0.0) * 10.0))
+    body += struct.pack('>H', _gsf_round(g('RangeResolution_cm', 0.0)))
+    body += struct.pack('>H', _gsf_round(g('ProfileTiltAngle_deg', -180.0) + 180.0))
+    body += struct.pack('>H', _gsf_round(g('RepetitionRate_ms', 0.0)))
+    body += struct.pack('>I', int(g('PingNumber', 0)))
+    body += struct.pack('>B', int(g('IntensityFlag', 0)) & 0xFF)
+    body += struct.pack('>H', _gsf_round(g('PingLatency_s', 0.0) * 10000.0))
+    body += struct.pack('>H', _gsf_round(g('DataLatency_s', 0.0) * 10000.0))
+    body += struct.pack('>B', int(g('SampleRateFlag', 0)) & 0xFF)
+    body += struct.pack('>B', int(g('OptionFlags', 0)) & 0xFF)
+    body += struct.pack('>B', int(g('NumPingsAvg', 0)) & 0xFF)
+    body += struct.pack('>H', _gsf_round(g('CenterPingTimeOffset_s', 0.0) * 10000.0))
+    body += struct.pack('>B', int(g('UserDefinedByte', 0)) & 0xFF)
+    body += struct.pack('>I', _gsf_round(g('Altitude_m', 0.0) * 100.0))
+    body += struct.pack('>B', int(g('ExternalSensorFlags', 0)) & 0xFF)
+    body += struct.pack('>I', _gsf_round(g('PulseLength_s', 0.0) * 1.0e6))
+    body += struct.pack('>B', _gsf_round(g('ForeAftBeamwidth_deg', 0.0) * 10.0) & 0xFF)
+    body += struct.pack('>B', _gsf_round(g('AthwartshipsBeamwidth_deg', 0.0) * 10.0) & 0xFF)
+    body += b'\x00' * 32  # spare
+    header_word = ((subrecord_id & 0xFF) << 24) | len(body)
+    return struct.pack('>I', header_word) + body
+
+
+_PING_SENSOR_SPECIFIC_CODECS[150] = ("DeltaT", _decode_delta_t_specific, _encode_delta_t_specific)
+
+
+def _decode_r2sonic_specific(payload, pos):
+    """
+    Decode an R2SONIC_2020/2022/2024_SPECIFIC subrecord (ids 153/151/152 --
+    one struct/codec shared by all three). Ported from gsf_dec.c's
+    DecodeR2SonicSpecific(). Distinct from _decode_r2sonic_imagery_specific()
+    (a different, smaller struct nested in the intensity-series subrecord,
+    id 21) -- this is the ping-level "_SPECIFIC" subrecord.
+
+    Untested against a verified GSF file: no sample data containing an
+    R2SONIC_SPECIFIC subrecord is available.
+
+    :return: (fields: dict, tables: {} (none for this sensor), bytes_consumed).
+    """
+    start = pos
+    model_number = payload[pos:pos + 12].split(b'\x00', 1)[0].decode('ascii', 'replace'); pos += 12
+    serial_number = payload[pos:pos + 12].split(b'\x00', 1)[0].decode('ascii', 'replace'); pos += 12
+    (sec,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (nsec,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (ping_number,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (ping_period_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (sound_speed_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (frequency_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (tx_power_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (tx_pulse_width_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (tx_beamwidth_vert_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (tx_beamwidth_horiz_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (tx_steering_vert_raw,) = struct.unpack_from('>i', payload, pos); pos += 4
+    (tx_steering_horiz_raw,) = struct.unpack_from('>i', payload, pos); pos += 4
+    (tx_misc_info,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (rx_bandwidth_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (rx_sample_rate_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (rx_range_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (rx_gain_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (rx_spreading_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (rx_absorption_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (rx_mount_tilt_raw,) = struct.unpack_from('>i', payload, pos); pos += 4
+    (rx_misc_info,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (reserved,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (num_beams,) = struct.unpack_from('>H', payload, pos); pos += 2
+    a0_more_info = [v / 1.0e6 for v in struct.unpack_from('>6i', payload, pos)]; pos += 24
+    a2_more_info = [v / 1.0e6 for v in struct.unpack_from('>6i', payload, pos)]; pos += 24
+    (g0_depth_gate_min_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (g0_depth_gate_max_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (g0_depth_gate_slope_raw,) = struct.unpack_from('>i', payload, pos); pos += 4
+    pos += 32  # spare
+
+    fields = {
+        'ModelNumber': model_number,
+        'SerialNumber': serial_number,
+        'PingTime': _gsf_timestamp(sec, nsec),
+        'PingNumber': ping_number,
+        'PingPeriod_s': ping_period_raw / 1.0e6,
+        'SoundSpeed_mps': sound_speed_raw / 1.0e2,
+        'Frequency_Hz': frequency_raw / 1.0e3,
+        'TxPower_dB': tx_power_raw / 1.0e2,
+        'TxPulseWidth_s': tx_pulse_width_raw / 1.0e7,
+        'TxBeamwidthVert_deg': tx_beamwidth_vert_raw / 1.0e6,
+        'TxBeamwidthHoriz_deg': tx_beamwidth_horiz_raw / 1.0e6,
+        'TxSteeringVert_deg': tx_steering_vert_raw / 1.0e6,
+        'TxSteeringHoriz_deg': tx_steering_horiz_raw / 1.0e6,
+        'TxMiscInfo': tx_misc_info,
+        'RxBandwidth_Hz': rx_bandwidth_raw / 1.0e4,
+        'RxSampleRate_Hz': rx_sample_rate_raw / 1.0e3,
+        'RxRange_m': rx_range_raw / 1.0e5,
+        'RxGain_dB': rx_gain_raw / 1.0e2,
+        'RxSpreading': rx_spreading_raw / 1.0e3,
+        'RxAbsorption_dBkm': rx_absorption_raw / 1.0e3,
+        'RxMountTilt_deg': rx_mount_tilt_raw / 1.0e6,
+        'RxMiscInfo': rx_misc_info,
+        'Reserved': reserved,
+        'NumBeams': num_beams,
+        'A0MoreInfo': a0_more_info,
+        'A2MoreInfo': a2_more_info,
+        'G0DepthGateMin_s': g0_depth_gate_min_raw / 1.0e6,
+        'G0DepthGateMax_s': g0_depth_gate_max_raw / 1.0e6,
+        'G0DepthGateSlope_deg': g0_depth_gate_slope_raw / 1.0e6,
+    }
+    return fields, {}, pos - start
+
+
+def _encode_r2sonic_specific(subrecord_id, fields, tables=None):
+    """
+    Encode an R2SONIC_2020/2022/2024_SPECIFIC subrecord, including its own
+    4-byte subrecord id+size word: the inverse of _decode_r2sonic_specific().
+    Ported from gsf_enc.c's EncodeR2SonicSpecific(). The reference encoder
+    rounds most fields with an unconditional `+0.501` (fields that are
+    physically non-negative) and a few with a sign-aware +/-0.501 branch
+    (tx_steering_vert/horiz, rx_mount_tilt, A0/A2_more_info,
+    G0_depth_gate_slope); this uses the standard sign-correct _gsf_round()
+    convention for every field, which is equivalent for the non-negative
+    ones and matches the reference exactly for the signed ones.
+    """
+    g = fields.get
+
+    def model_bytes(key):
+        return g(key, "").encode('ascii')[:12].ljust(12, b'\x00')
+
+    body = model_bytes('ModelNumber')
+    body += model_bytes('SerialNumber')
+    ping_time = g('PingTime')
+    sec, nsec = _gsf_epoch(ping_time) if ping_time is not None else (0, 0)
+    body += struct.pack('>2I', sec, nsec)
+    body += struct.pack('>I', int(g('PingNumber', 0)))
+    body += struct.pack('>I', _gsf_round(g('PingPeriod_s', 0.0) * 1.0e6))
+    body += struct.pack('>I', _gsf_round(g('SoundSpeed_mps', 0.0) * 1.0e2))
+    body += struct.pack('>I', _gsf_round(g('Frequency_Hz', 0.0) * 1.0e3))
+    body += struct.pack('>I', _gsf_round(g('TxPower_dB', 0.0) * 1.0e2))
+    body += struct.pack('>I', _gsf_round(g('TxPulseWidth_s', 0.0) * 1.0e7))
+    body += struct.pack('>I', _gsf_round(g('TxBeamwidthVert_deg', 0.0) * 1.0e6))
+    body += struct.pack('>I', _gsf_round(g('TxBeamwidthHoriz_deg', 0.0) * 1.0e6))
+    body += struct.pack('>i', _gsf_round(g('TxSteeringVert_deg', 0.0) * 1.0e6))
+    body += struct.pack('>i', _gsf_round(g('TxSteeringHoriz_deg', 0.0) * 1.0e6))
+    body += struct.pack('>I', int(g('TxMiscInfo', 0)))
+    body += struct.pack('>I', _gsf_round(g('RxBandwidth_Hz', 0.0) * 1.0e4))
+    body += struct.pack('>I', _gsf_round(g('RxSampleRate_Hz', 0.0) * 1.0e3))
+    body += struct.pack('>I', _gsf_round(g('RxRange_m', 0.0) * 1.0e5))
+    body += struct.pack('>I', _gsf_round(g('RxGain_dB', 0.0) * 1.0e2))
+    body += struct.pack('>I', _gsf_round(g('RxSpreading', 0.0) * 1.0e3))
+    body += struct.pack('>I', _gsf_round(g('RxAbsorption_dBkm', 0.0) * 1.0e3))
+    body += struct.pack('>i', _gsf_round(g('RxMountTilt_deg', 0.0) * 1.0e6))
+    body += struct.pack('>I', int(g('RxMiscInfo', 0)))
+    body += struct.pack('>H', int(g('Reserved', 0)))
+    body += struct.pack('>H', int(g('NumBeams', 0)))
+    a0_more_info = g('A0MoreInfo', [0.0] * 6)
+    a2_more_info = g('A2MoreInfo', [0.0] * 6)
+    body += struct.pack('>6i', *(_gsf_round(v * 1.0e6) for v in a0_more_info))
+    body += struct.pack('>6i', *(_gsf_round(v * 1.0e6) for v in a2_more_info))
+    body += struct.pack('>I', _gsf_round(g('G0DepthGateMin_s', 0.0) * 1.0e6))
+    body += struct.pack('>I', _gsf_round(g('G0DepthGateMax_s', 0.0) * 1.0e6))
+    body += struct.pack('>i', _gsf_round(g('G0DepthGateSlope_deg', 0.0) * 1.0e6))
+    body += b'\x00' * 32  # spare
+    header_word = ((subrecord_id & 0xFF) << 24) | len(body)
+    return struct.pack('>I', header_word) + body
+
+
+_PING_SENSOR_SPECIFIC_CODECS[151] = ("R2Sonic", _decode_r2sonic_specific, _encode_r2sonic_specific)
+_PING_SENSOR_SPECIFIC_CODECS[152] = ("R2Sonic", _decode_r2sonic_specific, _encode_r2sonic_specific)
+_PING_SENSOR_SPECIFIC_CODECS[153] = ("R2Sonic", _decode_r2sonic_specific, _encode_r2sonic_specific)
+
+
+def _decode_em_run_time(payload, pos):
+    """
+    Decode one t_gsfEMRunTime block (Kongsberg EM-series run-time
+    parameters). This is an inline sub-block, not a standalone subrecord
+    -- it's used unconditionally once inside EM4_SPECIFIC (see
+    _decode_em4_specific()) and, identically, inside the EM3 "_RAW"-variant
+    subrecords. Ported from the run-time-parameter field reads inlined in
+    gsf_dec.c's DecodeEM4Specific() (byte-for-byte duplicated there and in
+    DecodeEM3RawSpecific() -- factored into a shared helper here instead).
+
+    :return: (fields: dict, bytes_consumed: int) -- bytes_consumed always 63.
+    """
+    start = pos
+    (model_number,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (sec,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (nsec,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (ping_counter,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (serial_number,) = struct.unpack_from('>H', payload, pos); pos += 2
+    operator_station_status = payload[pos]; pos += 1
+    processing_unit_status = payload[pos]; pos += 1
+    bsp_status = payload[pos]; pos += 1
+    head_transceiver_status = payload[pos]; pos += 1
+    mode = payload[pos]; pos += 1
+    filter_id = payload[pos]; pos += 1
+    (min_depth,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (max_depth,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (absorption_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (tx_pulse_length,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (tx_beam_width_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (tx_power_re_max,) = struct.unpack_from('>b', payload, pos); pos += 1
+    rx_beam_width_raw = payload[pos]; pos += 1
+    rx_bandwidth_raw = payload[pos]; pos += 1
+    rx_fixed_gain = payload[pos]; pos += 1
+    tvg_cross_over_angle = payload[pos]; pos += 1
+    ssv_source = payload[pos]; pos += 1
+    (max_port_swath_width,) = struct.unpack_from('>H', payload, pos); pos += 2
+    beam_spacing = payload[pos]; pos += 1
+    max_port_coverage = payload[pos]; pos += 1
+    stabilization = payload[pos]; pos += 1
+    max_stbd_coverage = payload[pos]; pos += 1
+    (max_stbd_swath_width,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (tx_along_tilt_raw,) = struct.unpack_from('>h', payload, pos); pos += 2
+    filter_id_2 = payload[pos]; pos += 1
+    pos += 16  # spare
+
+    fields = {
+        'ModelNumber': model_number,
+        'PingTime': _gsf_timestamp(sec, nsec),
+        'PingCounter': ping_counter,
+        'SerialNumber': serial_number,
+        'OperatorStationStatus': operator_station_status,
+        'ProcessingUnitStatus': processing_unit_status,
+        'BspStatus': bsp_status,
+        'HeadTransceiverStatus': head_transceiver_status,
+        'Mode': mode,
+        'FilterID': filter_id,
+        'MinDepth_m': float(min_depth),
+        'MaxDepth_m': float(max_depth),
+        'Absorption_dBkm': absorption_raw / 100.0,
+        'TxPulseLength_us': float(tx_pulse_length),
+        'TxBeamWidth_deg': tx_beam_width_raw / 10.0,
+        'TxPowerReMax_dB': float(tx_power_re_max),
+        'RxBeamWidth_deg': rx_beam_width_raw / 10.0,
+        'RxBandwidth_Hz': rx_bandwidth_raw * 50.0,
+        'RxFixedGain_dB': float(rx_fixed_gain),
+        'TvgCrossOverAngle_deg': float(tvg_cross_over_angle),
+        'SsvSource': ssv_source,
+        'MaxPortSwathWidth_m': max_port_swath_width,
+        'BeamSpacing': beam_spacing,
+        'MaxPortCoverage_deg': max_port_coverage,
+        'Stabilization': stabilization,
+        'MaxStbdCoverage_deg': max_stbd_coverage,
+        'MaxStbdSwathWidth_m': max_stbd_swath_width,
+        'TxAlongTilt_deg': tx_along_tilt_raw / 100.0,
+        'FilterID2': filter_id_2,
+    }
+    return fields, pos - start
+
+
+def _encode_em_run_time(fields):
+    """
+    Encode one t_gsfEMRunTime block: raw bytes only, no subrecord header
+    (an inline sub-block of EM4_SPECIFIC/EM3 "_RAW"-variant subrecords, not
+    its own subrecord). The inverse of _decode_em_run_time(). Ported from
+    the run-time-parameter field writes inlined in gsf_enc.c's
+    EncodeEM4Specific() (duplicated there and in EncodeEM3RawSpecific()).
+
+    Deliberate deviation: the reference encoder writes min_depth,
+    max_depth, tx_pulse_length, tx_power_re_max, and rx_fixed_gain/
+    tvg_cross_over_angle via a direct truncating cast with no +/-0.501
+    rounding offset (unlike every other scaled field here, which does
+    round). This uses the standard _gsf_round() convention for all of
+    them, consistent with every other encoder in this module.
+    """
+    g = fields.get
+    ping_time = g('PingTime')
+    sec, nsec = _gsf_epoch(ping_time) if ping_time is not None else (0, 0)
+
+    out = struct.pack('>H', int(g('ModelNumber', 0)))
+    out += struct.pack('>2I', sec, nsec)
+    out += struct.pack('>H', int(g('PingCounter', 0)))
+    out += struct.pack('>H', int(g('SerialNumber', 0)))
+    out += struct.pack('>B', int(g('OperatorStationStatus', 0)) & 0xFF)
+    out += struct.pack('>B', int(g('ProcessingUnitStatus', 0)) & 0xFF)
+    out += struct.pack('>B', int(g('BspStatus', 0)) & 0xFF)
+    out += struct.pack('>B', int(g('HeadTransceiverStatus', 0)) & 0xFF)
+    out += struct.pack('>B', int(g('Mode', 0)) & 0xFF)
+    out += struct.pack('>B', int(g('FilterID', 0)) & 0xFF)
+    out += struct.pack('>H', _gsf_round(g('MinDepth_m', 0.0)))
+    out += struct.pack('>H', _gsf_round(g('MaxDepth_m', 0.0)))
+    out += struct.pack('>H', _gsf_round(g('Absorption_dBkm', 0.0) * 100.0))
+    out += struct.pack('>H', _gsf_round(g('TxPulseLength_us', 0.0)))
+    out += struct.pack('>H', _gsf_round(g('TxBeamWidth_deg', 0.0) * 10.0))
+    out += struct.pack('>b', _gsf_round(g('TxPowerReMax_dB', 0.0)))
+    out += struct.pack('>B', _gsf_round(g('RxBeamWidth_deg', 0.0) * 10.0) & 0xFF)
+    out += struct.pack('>B', _gsf_round(g('RxBandwidth_Hz', 0.0) / 50.0) & 0xFF)
+    out += struct.pack('>B', _gsf_round(g('RxFixedGain_dB', 0.0)) & 0xFF)
+    out += struct.pack('>B', _gsf_round(g('TvgCrossOverAngle_deg', 0.0)) & 0xFF)
+    out += struct.pack('>B', int(g('SsvSource', 0)) & 0xFF)
+    out += struct.pack('>H', int(g('MaxPortSwathWidth_m', 0)))
+    out += struct.pack('>B', int(g('BeamSpacing', 0)) & 0xFF)
+    out += struct.pack('>B', int(g('MaxPortCoverage_deg', 0)) & 0xFF)
+    out += struct.pack('>B', int(g('Stabilization', 0)) & 0xFF)
+    out += struct.pack('>B', int(g('MaxStbdCoverage_deg', 0)) & 0xFF)
+    out += struct.pack('>H', int(g('MaxStbdSwathWidth_m', 0)))
+    out += struct.pack('>h', _gsf_round(g('TxAlongTilt_deg', 0.0) * 100.0))
+    out += struct.pack('>B', int(g('FilterID2', 0)) & 0xFF)
+    out += b'\x00' * 16
+    return out
+
+
+def _decode_em_pu_status(payload, pos):
+    """
+    Decode one t_gsfEMPUStatus block (Kongsberg EM-series processing-unit
+    status). Like _decode_em_run_time(), this is an inline sub-block used
+    unconditionally once inside EM4_SPECIFIC and the EM3 "_RAW"-variant
+    subrecords, ported from field reads duplicated identically in
+    gsf_dec.c's DecodeEM4Specific() and DecodeEM3RawSpecific().
+
+    :return: (fields: dict, bytes_consumed: int) -- bytes_consumed always 23.
+    """
+    start = pos
+    pu_cpu_load = payload[pos]; pos += 1
+    (sensor_status,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (achieved_port_coverage,) = struct.unpack_from('>b', payload, pos); pos += 1
+    (achieved_stbd_coverage,) = struct.unpack_from('>b', payload, pos); pos += 1
+    (yaw_stabilization_raw,) = struct.unpack_from('>h', payload, pos); pos += 2
+    pos += 16  # spare
+
+    fields = {
+        'PuCpuLoad_pct': float(pu_cpu_load),
+        'SensorStatus': sensor_status,
+        'AchievedPortCoverage_deg': achieved_port_coverage,
+        'AchievedStbdCoverage_deg': achieved_stbd_coverage,
+        'YawStabilization_deg': yaw_stabilization_raw / 100.0,
+    }
+    return fields, pos - start
+
+
+def _encode_em_pu_status(fields):
+    """
+    Encode one t_gsfEMPUStatus block: raw bytes only, no subrecord header.
+    The inverse of _decode_em_pu_status(). Ported from field writes
+    duplicated identically in gsf_enc.c's EncodeEM4Specific() and
+    EncodeEM3RawSpecific().
+
+    Deliberate deviation: like _encode_em_run_time(), pu_cpu_load is
+    written via a direct truncating cast with no rounding offset in the
+    reference encoder -- this uses _gsf_round() instead, for consistency.
+    """
+    g = fields.get
+    out = struct.pack('>B', _gsf_round(g('PuCpuLoad_pct', 0.0)) & 0xFF)
+    out += struct.pack('>H', int(g('SensorStatus', 0)))
+    out += struct.pack('>b', int(g('AchievedPortCoverage_deg', 0)))
+    out += struct.pack('>b', int(g('AchievedStbdCoverage_deg', 0)))
+    out += struct.pack('>h', _gsf_round(g('YawStabilization_deg', 0.0) * 100.0))
+    out += b'\x00' * 16
+    return out
+
+
+def _decode_em4_specific(payload, pos):
+    """
+    Decode a GSF_SWATH_BATHY_SUBRECORD_EM4_SPECIFIC subrecord (ids 133
+    EM710, 134 EM302, 135 EM122, 149 EM2040, 157 ME70BO): Kongsberg
+    EM4-series per-ping sensor metadata, plus its per-transmit-sector
+    array and inline run-time-parameters/PU-status blocks. Ported from
+    gsf_dec.c's DecodeEM4Specific().
+
+    Untested against a verified GSF file: no sample data containing an
+    EM4_SPECIFIC subrecord is available.
+
+    :return: (fields: dict -- the 9 top-level scalars plus every
+        _decode_em_run_time()/_decode_em_pu_status() field merged in with
+        a 'RunTime.'/'PuStatus.' prefix; tables: {'TxSectors':
+        list[dict]}; bytes_consumed).
+    """
+    start = pos
+    (model_number,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (ping_counter,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (serial_number,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (surface_velocity_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (transducer_depth_raw,) = struct.unpack_from('>i', payload, pos); pos += 4
+    (valid_detections,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (freq_int,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (freq_frac,) = struct.unpack_from('>I', payload, pos); pos += 4
+    sampling_frequency = freq_int + freq_frac / 4.0e9
+    (doppler_corr_scale,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (vehicle_depth_raw,) = struct.unpack_from('>i', payload, pos); pos += 4
+    pos += 16  # spare_1
+
+    (transmit_sectors,) = struct.unpack_from('>H', payload, pos); pos += 2
+    transmit_sectors = min(transmit_sectors, 9)  # gsf.h: GSF_MAX_EM4_SECTORS
+
+    sector_rows = []
+    for _ in range(transmit_sectors):
+        row = {}
+        (tilt_angle_raw,) = struct.unpack_from('>h', payload, pos); pos += 2
+        row['TiltAngle_deg'] = tilt_angle_raw / 100.0
+        (focus_range_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+        row['FocusRange_m'] = focus_range_raw / 10.0
+        (signal_length_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+        row['SignalLength_sec'] = signal_length_raw / 1.0e6
+        (transmit_delay_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+        row['TransmitDelay_sec'] = transmit_delay_raw / 1.0e6
+        (center_frequency_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+        row['CenterFrequency_Hz'] = center_frequency_raw / 1.0e3
+        (mean_absorption_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+        row['MeanAbsorption_dBkm'] = mean_absorption_raw / 100.0
+        row['WaveformID'] = payload[pos]; pos += 1
+        row['SectorNumber'] = payload[pos]; pos += 1
+        (signal_bandwidth_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+        row['SignalBandwidth_Hz'] = signal_bandwidth_raw / 1.0e3
+        pos += 16  # spare
+        sector_rows.append(row)
+
+    pos += 16  # spare_2
+
+    run_time_fields, consumed = _decode_em_run_time(payload, pos)
+    pos += consumed
+    pu_status_fields, consumed = _decode_em_pu_status(payload, pos)
+    pos += consumed
+
+    fields = {
+        'ModelNumber': model_number,
+        'PingCounter': ping_counter,
+        'SerialNumber': serial_number,
+        'SurfaceVelocity_mps': surface_velocity_raw / 10.0,
+        'TransducerDepth_m': transducer_depth_raw / 20000.0,
+        'ValidDetections': valid_detections,
+        'SamplingFrequency_Hz': sampling_frequency,
+        'DopplerCorrScale': doppler_corr_scale,
+        'VehicleDepth_m': vehicle_depth_raw / 1000.0,
+    }
+    fields.update({'RunTime.' + k: v for k, v in run_time_fields.items()})
+    fields.update({'PuStatus.' + k: v for k, v in pu_status_fields.items()})
+
+    return fields, {'TxSectors': sector_rows}, pos - start
+
+
+def _encode_em4_specific(subrecord_id, fields, tables=None):
+    """
+    Encode a GSF_SWATH_BATHY_SUBRECORD_EM4_SPECIFIC subrecord, including
+    its own 4-byte subrecord id+size word: the inverse of
+    _decode_em4_specific(). Ported from gsf_enc.c's EncodeEM4Specific().
+
+    :param tables: optional {'TxSectors': list[dict]}; transmit_sectors on
+        the wire is len() of that list.
+    """
+    g = fields.get
+    tables = tables or {}
+    sectors = tables.get('TxSectors', [])
+
+    body = struct.pack('>H', int(g('ModelNumber', 0)))
+    body += struct.pack('>H', int(g('PingCounter', 0)))
+    body += struct.pack('>H', int(g('SerialNumber', 0)))
+    body += struct.pack('>H', _gsf_round(g('SurfaceVelocity_mps', 0.0) * 10.0))
+    body += struct.pack('>i', _gsf_round(g('TransducerDepth_m', 0.0) * 20000.0))
+    body += struct.pack('>H', int(g('ValidDetections', 0)))
+
+    sampling_frequency = g('SamplingFrequency_Hz', 0.0)
+    freq_int = int(sampling_frequency)
+    freq_frac = _gsf_round((sampling_frequency - freq_int) * 4.0e9)
+    body += struct.pack('>I', freq_int)
+    body += struct.pack('>I', freq_frac)
+
+    body += struct.pack('>I', int(g('DopplerCorrScale', 0)))
+    body += struct.pack('>i', _gsf_round(g('VehicleDepth_m', 0.0) * 1000.0))
+    body += b'\x00' * 16  # spare_1
+
+    body += struct.pack('>H', len(sectors))
+    for row in sectors:
+        r = row.get
+        body += struct.pack('>h', _gsf_round(r('TiltAngle_deg', 0.0) * 100.0))
+        body += struct.pack('>H', _gsf_round(r('FocusRange_m', 0.0) * 10.0))
+        body += struct.pack('>I', _gsf_round(r('SignalLength_sec', 0.0) * 1.0e6))
+        body += struct.pack('>I', _gsf_round(r('TransmitDelay_sec', 0.0) * 1.0e6))
+        body += struct.pack('>I', _gsf_round(r('CenterFrequency_Hz', 0.0) * 1.0e3))
+        body += struct.pack('>H', _gsf_round(r('MeanAbsorption_dBkm', 0.0) * 100.0))
+        body += struct.pack('>B', int(r('WaveformID', 0)) & 0xFF)
+        body += struct.pack('>B', int(r('SectorNumber', 0)) & 0xFF)
+        body += struct.pack('>I', _gsf_round(r('SignalBandwidth_Hz', 0.0) * 1.0e3))
+        body += b'\x00' * 16  # spare
+
+    body += b'\x00' * 16  # spare_2
+
+    run_time_fields = {k[len('RunTime.'):]: v for k, v in fields.items() if k.startswith('RunTime.')}
+    pu_status_fields = {k[len('PuStatus.'):]: v for k, v in fields.items() if k.startswith('PuStatus.')}
+    body += _encode_em_run_time(run_time_fields)
+    body += _encode_em_pu_status(pu_status_fields)
+
+    header_word = ((subrecord_id & 0xFF) << 24) | len(body)
+    return struct.pack('>I', header_word) + body
+
+
+_PING_SENSOR_SPECIFIC_CODECS[133] = ("EM4", _decode_em4_specific, _encode_em4_specific)
+_PING_SENSOR_SPECIFIC_CODECS[134] = ("EM4", _decode_em4_specific, _encode_em4_specific)
+_PING_SENSOR_SPECIFIC_CODECS[135] = ("EM4", _decode_em4_specific, _encode_em4_specific)
+_PING_SENSOR_SPECIFIC_CODECS[149] = ("EM4", _decode_em4_specific, _encode_em4_specific)
+_PING_SENSOR_SPECIFIC_CODECS[157] = ("EM4", _decode_em4_specific, _encode_em4_specific)
+
+
+def _decode_em3raw_specific(payload, pos):
+    """
+    Decode a GSF_SWATH_BATHY_SUBRECORD_EM3xxx_RAW_SPECIFIC subrecord (ids
+    140-148: EM300/1002/2000/3000/120/3002/3000D/3002D/121A_SIS, each with
+    raw range and beam angle data): Kongsberg EM3-series per-ping sensor
+    metadata, plus its per-transmit-sector array and inline
+    run-time-parameters/PU-status blocks (reusing _decode_em_run_time()/
+    _decode_em_pu_status(), which EM4_SPECIFIC also uses -- gsf.h defines
+    both subrecords using the same t_gsfEMRunTime/t_gsfEMPUStatus struct
+    types by value). Ported from gsf_dec.c's DecodeEM3RawSpecific().
+
+    Field order and scaling here differ from EM4_SPECIFIC in several
+    places despite the superficially similar shape -- verified against
+    DecodeEM3RawSpecific() directly rather than assumed from EM4: no
+    doppler_corr_scale field; vehicle_depth precedes depth_difference
+    (EM4 has no depth_difference at all); offset_multiplier is a signed
+    byte; the TX sector struct has no mean_absorption field (8 fields,
+    not EM4's 9); and the max sector count is 20 (GSF_MAX_EM3_SECTORS),
+    not EM4's 9 (GSF_MAX_EM4_SECTORS).
+
+    Untested against a verified GSF file: no sample data containing an
+    EM3xxx_RAW_SPECIFIC subrecord is available.
+
+    :return: (fields: dict -- the 10 top-level scalars plus every
+        _decode_em_run_time()/_decode_em_pu_status() field merged in with
+        a 'RunTime.'/'PuStatus.' prefix; tables: {'TxSectors':
+        list[dict]}; bytes_consumed).
+    """
+    start = pos
+    (model_number,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (ping_counter,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (serial_number,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (surface_velocity_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (transducer_depth_raw,) = struct.unpack_from('>i', payload, pos); pos += 4
+    (valid_detections,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (freq_int,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (freq_frac,) = struct.unpack_from('>I', payload, pos); pos += 4
+    sampling_frequency = freq_int + freq_frac / 4.0e9
+    (vehicle_depth_raw,) = struct.unpack_from('>i', payload, pos); pos += 4
+    (depth_difference_raw,) = struct.unpack_from('>h', payload, pos); pos += 2
+    (offset_multiplier,) = struct.unpack_from('>b', payload, pos); pos += 1
+    pos += 16  # spare_1
+
+    (transmit_sectors,) = struct.unpack_from('>H', payload, pos); pos += 2
+    transmit_sectors = min(transmit_sectors, 20)  # gsf.h: GSF_MAX_EM3_SECTORS
+
+    sector_rows = []
+    for _ in range(transmit_sectors):
+        row = {}
+        (tilt_angle_raw,) = struct.unpack_from('>h', payload, pos); pos += 2
+        row['TiltAngle_deg'] = tilt_angle_raw / 100.0
+        (focus_range_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+        row['FocusRange_m'] = focus_range_raw / 10.0
+        (signal_length_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+        row['SignalLength_sec'] = signal_length_raw / 1.0e6
+        (transmit_delay_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+        row['TransmitDelay_sec'] = transmit_delay_raw / 1.0e6
+        (center_frequency_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+        row['CenterFrequency_Hz'] = center_frequency_raw / 1.0e3
+        row['WaveformID'] = payload[pos]; pos += 1
+        row['SectorNumber'] = payload[pos]; pos += 1
+        (signal_bandwidth_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+        row['SignalBandwidth_Hz'] = signal_bandwidth_raw / 1.0e3
+        pos += 16  # spare
+        sector_rows.append(row)
+
+    pos += 16  # spare_2
+
+    run_time_fields, consumed = _decode_em_run_time(payload, pos)
+    pos += consumed
+    pu_status_fields, consumed = _decode_em_pu_status(payload, pos)
+    pos += consumed
+
+    fields = {
+        'ModelNumber': model_number,
+        'PingCounter': ping_counter,
+        'SerialNumber': serial_number,
+        'SurfaceVelocity_mps': surface_velocity_raw / 10.0,
+        'TransducerDepth_m': transducer_depth_raw / 20000.0,
+        'ValidDetections': valid_detections,
+        'SamplingFrequency_Hz': sampling_frequency,
+        'VehicleDepth_m': vehicle_depth_raw / 1000.0,
+        'DepthDifference_m': depth_difference_raw / 100.0,
+        'OffsetMultiplier': offset_multiplier,
+    }
+    fields.update({'RunTime.' + k: v for k, v in run_time_fields.items()})
+    fields.update({'PuStatus.' + k: v for k, v in pu_status_fields.items()})
+
+    return fields, {'TxSectors': sector_rows}, pos - start
+
+
+def _encode_em3raw_specific(subrecord_id, fields, tables=None):
+    """
+    Encode a GSF_SWATH_BATHY_SUBRECORD_EM3xxx_RAW_SPECIFIC subrecord,
+    including its own 4-byte subrecord id+size word: the inverse of
+    _decode_em3raw_specific(). Ported from gsf_enc.c's
+    EncodeEM3RawSpecific().
+
+    :param tables: optional {'TxSectors': list[dict]}; transmit_sectors on
+        the wire is len() of that list.
+    """
+    g = fields.get
+    tables = tables or {}
+    sectors = tables.get('TxSectors', [])
+
+    body = struct.pack('>H', int(g('ModelNumber', 0)))
+    body += struct.pack('>H', int(g('PingCounter', 0)))
+    body += struct.pack('>H', int(g('SerialNumber', 0)))
+    body += struct.pack('>H', _gsf_round(g('SurfaceVelocity_mps', 0.0) * 10.0))
+    body += struct.pack('>i', _gsf_round(g('TransducerDepth_m', 0.0) * 20000.0))
+    body += struct.pack('>H', int(g('ValidDetections', 0)))
+
+    sampling_frequency = g('SamplingFrequency_Hz', 0.0)
+    freq_int = int(sampling_frequency)
+    freq_frac = _gsf_round((sampling_frequency - freq_int) * 4.0e9)
+    body += struct.pack('>I', freq_int)
+    body += struct.pack('>I', freq_frac)
+
+    body += struct.pack('>i', _gsf_round(g('VehicleDepth_m', 0.0) * 1000.0))
+    body += struct.pack('>h', _gsf_round(g('DepthDifference_m', 0.0) * 100.0))
+    body += struct.pack('>b', int(g('OffsetMultiplier', 0)))
+    body += b'\x00' * 16  # spare_1
+
+    body += struct.pack('>H', len(sectors))
+    for row in sectors:
+        r = row.get
+        body += struct.pack('>h', _gsf_round(r('TiltAngle_deg', 0.0) * 100.0))
+        body += struct.pack('>H', _gsf_round(r('FocusRange_m', 0.0) * 10.0))
+        body += struct.pack('>I', _gsf_round(r('SignalLength_sec', 0.0) * 1.0e6))
+        body += struct.pack('>I', _gsf_round(r('TransmitDelay_sec', 0.0) * 1.0e6))
+        body += struct.pack('>I', _gsf_round(r('CenterFrequency_Hz', 0.0) * 1.0e3))
+        body += struct.pack('>B', int(r('WaveformID', 0)) & 0xFF)
+        body += struct.pack('>B', int(r('SectorNumber', 0)) & 0xFF)
+        body += struct.pack('>I', _gsf_round(r('SignalBandwidth_Hz', 0.0) * 1.0e3))
+        body += b'\x00' * 16  # spare
+
+    body += b'\x00' * 16  # spare_2
+
+    run_time_fields = {k[len('RunTime.'):]: v for k, v in fields.items() if k.startswith('RunTime.')}
+    pu_status_fields = {k[len('PuStatus.'):]: v for k, v in fields.items() if k.startswith('PuStatus.')}
+    body += _encode_em_run_time(run_time_fields)
+    body += _encode_em_pu_status(pu_status_fields)
+
+    header_word = ((subrecord_id & 0xFF) << 24) | len(body)
+    return struct.pack('>I', header_word) + body
+
+
+for _em3raw_id in (140, 141, 142, 143, 144, 145, 146, 147, 148):
+    _PING_SENSOR_SPECIFIC_CODECS[_em3raw_id] = ("EM3Raw", _decode_em3raw_specific, _encode_em3raw_specific)
+del _em3raw_id
+
+
+def _decode_em3_run_time(payload, pos):
+    """
+    Decode one gsfEM3RunTime block (the OLDER, plain-EM3-specific
+    run-time-parameters struct -- distinct from t_gsfEMRunTime/
+    _decode_em_run_time(), which is used by EM4_SPECIFIC and the EM3
+    "_RAW"-variant subrecords instead). This is an inline sub-block, used
+    0, 1, or 2 times depending on EM3_SPECIFIC's run_time_id bitmask (see
+    _decode_em3_specific()), not a standalone subrecord. Ported from the
+    run-time-parameter field reads inlined in gsf_dec.c's
+    DecodeEM3Specific() (duplicated there once per head).
+
+    Also computes SwathWidth_m/CoverageSector_deg, matching gsf_dec.c's
+    own post-decode derivation: derived from port/stbd swath width (resp.
+    coverage sector) alone if stbd is 0 (the total is then split evenly
+    back into port/stbd), or their sum otherwise. These two fields exist
+    for read-side convenience only -- there is no separate wire storage
+    for them, and _encode_em3_run_time() ignores them entirely.
+
+    :return: (fields: dict, bytes_consumed: int) -- bytes_consumed always 49.
+    """
+    start = pos
+    (model_number,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (sec,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (nsec,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (ping_number,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (serial_number,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (system_status,) = struct.unpack_from('>I', payload, pos); pos += 4
+    mode = payload[pos]; pos += 1
+    filter_id = payload[pos]; pos += 1
+    (min_depth,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (max_depth,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (absorption_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (pulse_length,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (transmit_beam_width_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+    power_reduction = payload[pos]; pos += 1
+    receive_beam_width_raw = payload[pos]; pos += 1
+    receive_bandwidth_raw = payload[pos]; pos += 1
+    receive_gain = payload[pos]; pos += 1
+    cross_over_angle = payload[pos]; pos += 1
+    ssv_source = payload[pos]; pos += 1
+    (port_swath_width,) = struct.unpack_from('>H', payload, pos); pos += 2
+    beam_spacing = payload[pos]; pos += 1
+    port_coverage_sector = payload[pos]; pos += 1
+    stabilization = payload[pos]; pos += 1
+    stbd_coverage_sector = payload[pos]; pos += 1
+    (stbd_swath_width,) = struct.unpack_from('>H', payload, pos); pos += 2
+    hilo_freq_absorp_ratio = payload[pos]; pos += 1
+    pos += 4  # spare1
+
+    if stbd_swath_width:
+        swath_width = port_swath_width + stbd_swath_width
+    else:
+        swath_width = port_swath_width
+        port_swath_width = swath_width // 2
+        stbd_swath_width = swath_width // 2
+
+    if stbd_coverage_sector:
+        coverage_sector = port_coverage_sector + stbd_coverage_sector
+    else:
+        coverage_sector = port_coverage_sector
+        port_coverage_sector = coverage_sector // 2
+        stbd_coverage_sector = coverage_sector // 2
+
+    fields = {
+        'ModelNumber': model_number,
+        'PingTime': _gsf_timestamp(sec, nsec),
+        'PingNumber': ping_number,
+        'SerialNumber': serial_number,
+        'SystemStatus': system_status,
+        'Mode': mode,
+        'FilterID': filter_id,
+        'MinDepth_m': float(min_depth),
+        'MaxDepth_m': float(max_depth),
+        'Absorption_dBkm': absorption_raw / 100.0,
+        'PulseLength_us': float(pulse_length),
+        'TransmitBeamWidth_deg': transmit_beam_width_raw / 10.0,
+        'PowerReduction_dB': power_reduction,
+        'ReceiveBeamWidth_deg': receive_beam_width_raw / 10.0,
+        'ReceiveBandwidth_Hz': receive_bandwidth_raw * 50,
+        'ReceiveGain_dB': receive_gain,
+        'CrossOverAngle_deg': cross_over_angle,
+        'SsvSource': ssv_source,
+        'PortSwathWidth_m': port_swath_width,
+        'BeamSpacing': beam_spacing,
+        'PortCoverageSector_deg': port_coverage_sector,
+        'Stabilization': stabilization,
+        'StbdCoverageSector_deg': stbd_coverage_sector,
+        'StbdSwathWidth_m': stbd_swath_width,
+        'HiloFreqAbsorpRatio': hilo_freq_absorp_ratio,
+        'SwathWidth_m': swath_width,
+        'CoverageSector_deg': coverage_sector,
+    }
+    return fields, pos - start
+
+
+def _encode_em3_run_time(fields):
+    """
+    Encode one gsfEM3RunTime block: raw bytes only, no subrecord header
+    (an inline sub-block of EM3_SPECIFIC, not its own subrecord). The
+    inverse of _decode_em3_run_time() -- except SwathWidth_m/
+    CoverageSector_deg, which are derived read-only fields with no wire
+    storage of their own (see _decode_em3_run_time()'s docstring) and are
+    ignored here; only PortSwathWidth_m/StbdSwathWidth_m and
+    PortCoverageSector_deg/StbdCoverageSector_deg are written. Ported from
+    the run-time-parameter field writes inlined in gsf_enc.c's
+    EncodeEM3Specific() (duplicated there once per head).
+
+    Deliberate deviation: the reference encoder writes min_depth,
+    max_depth, and pulse_length via a direct truncating cast with no
+    +/-0.501 rounding offset (unlike every other scaled field here, which
+    does round). This uses the standard _gsf_round() convention for all
+    of them, consistent with every other encoder in this module.
+    """
+    g = fields.get
+    ping_time = g('PingTime')
+    sec, nsec = _gsf_epoch(ping_time) if ping_time is not None else (0, 0)
+
+    out = struct.pack('>H', int(g('ModelNumber', 0)))
+    out += struct.pack('>2I', sec, nsec)
+    out += struct.pack('>H', int(g('PingNumber', 0)))
+    out += struct.pack('>H', int(g('SerialNumber', 0)))
+    out += struct.pack('>I', int(g('SystemStatus', 0)))
+    out += struct.pack('>B', int(g('Mode', 0)) & 0xFF)
+    out += struct.pack('>B', int(g('FilterID', 0)) & 0xFF)
+    out += struct.pack('>H', _gsf_round(g('MinDepth_m', 0.0)))
+    out += struct.pack('>H', _gsf_round(g('MaxDepth_m', 0.0)))
+    out += struct.pack('>H', _gsf_round(g('Absorption_dBkm', 0.0) * 100.0))
+    out += struct.pack('>H', _gsf_round(g('PulseLength_us', 0.0)))
+    out += struct.pack('>H', _gsf_round(g('TransmitBeamWidth_deg', 0.0) * 10.0))
+    out += struct.pack('>B', int(g('PowerReduction_dB', 0)) & 0xFF)
+    out += struct.pack('>B', _gsf_round(g('ReceiveBeamWidth_deg', 0.0) * 10.0) & 0xFF)
+    out += struct.pack('>B', _gsf_round(g('ReceiveBandwidth_Hz', 0.0) / 50.0) & 0xFF)
+    out += struct.pack('>B', int(g('ReceiveGain_dB', 0)) & 0xFF)
+    out += struct.pack('>B', int(g('CrossOverAngle_deg', 0)) & 0xFF)
+    out += struct.pack('>B', int(g('SsvSource', 0)) & 0xFF)
+    out += struct.pack('>H', int(g('PortSwathWidth_m', 0)))
+    out += struct.pack('>B', int(g('BeamSpacing', 0)) & 0xFF)
+    out += struct.pack('>B', int(g('PortCoverageSector_deg', 0)) & 0xFF)
+    out += struct.pack('>B', int(g('Stabilization', 0)) & 0xFF)
+    out += struct.pack('>B', int(g('StbdCoverageSector_deg', 0)) & 0xFF)
+    out += struct.pack('>H', int(g('StbdSwathWidth_m', 0)))
+    out += struct.pack('>B', int(g('HiloFreqAbsorpRatio', 0)) & 0xFF)
+    out += b'\x00' * 4
+    return out
+
+
+def _decode_em3_specific(payload, pos):
+    """
+    Decode a GSF_SWATH_BATHY_SUBRECORD_EM3xxx_SPECIFIC subrecord (the
+    plain, non-"_RAW" EM3-series family: EM3000/EM1002/EM300/EM120/
+    EM3002/EM3000D/EM3002D/EM121A_SIS/EM2000). Ported from gsf_dec.c's
+    DecodeEM3Specific().
+
+    Unlike every other ping-level sensor-specific subrecord in this
+    module, this one is genuinely variable-length: after the 17 fixed
+    bytes + a 4-byte run_time_id bitmask, bit 0 (0x1) gates whether a
+    run-time-parameters block for head 0 follows. Bit 1 (0x2) gates a
+    SECOND block for head 1 (EM3000D dual-head), but -- matching
+    DecodeEM3Specific()'s own nesting exactly -- bit 1 is only even
+    inspected, and a head-1 block only ever decoded, when bit 0 is also
+    set; a file with bit 1 set but bit 0 clear has no run-time blocks at
+    all on the wire (there is nothing there to read a head-1 block from).
+    Each present block is decoded by _decode_em3_run_time() and returned
+    as a row (with a 'Head' key, 0 or 1) in tables['RunTime'] -- an empty
+    list if bit 0 is clear.
+
+    Untested against a verified GSF file: no sample data containing an
+    EM3_SPECIFIC subrecord is available.
+
+    :return: (fields: dict, tables: {'RunTime': list[dict]}, bytes_consumed).
+    """
+    start = pos
+    (model_number,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (ping_number,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (serial_number,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (surface_velocity_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (transducer_depth_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (valid_beams,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (sample_rate,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (depth_difference_raw,) = struct.unpack_from('>h', payload, pos); pos += 2
+    (offset_multiplier,) = struct.unpack_from('>b', payload, pos); pos += 1
+    (run_time_id,) = struct.unpack_from('>I', payload, pos); pos += 4
+
+    fields = {
+        'ModelNumber': model_number,
+        'PingNumber': ping_number,
+        'SerialNumber': serial_number,
+        'SurfaceVelocity_mps': surface_velocity_raw / 10.0,
+        'TransducerDepth_m': transducer_depth_raw / 100.0,
+        'ValidBeams': valid_beams,
+        'SampleRate_Hz': sample_rate,
+        'DepthDifference_m': depth_difference_raw / 100.0,
+        'OffsetMultiplier': offset_multiplier,
+    }
+
+    run_time_rows = []
+    if run_time_id & 0x1:
+        head0_fields, consumed = _decode_em3_run_time(payload, pos)
+        pos += consumed
+        run_time_rows.append({'Head': 0, **head0_fields})
+
+        if run_time_id & 0x2:
+            head1_fields, consumed = _decode_em3_run_time(payload, pos)
+            pos += consumed
+            run_time_rows.append({'Head': 1, **head1_fields})
+
+    return fields, {'RunTime': run_time_rows}, pos - start
+
+
+def _encode_em3_specific(subrecord_id, fields, tables=None):
+    """
+    Encode a GSF_SWATH_BATHY_SUBRECORD_EM3xxx_SPECIFIC subrecord,
+    including its own 4-byte subrecord id+size word: the inverse of
+    _decode_em3_specific(). Ported from gsf_enc.c's EncodeEM3Specific(),
+    with one deliberate improvement: the reference encoder as currently
+    shipped hardcodes run_time_id = 1 unconditionally (the code path that
+    would set bit 1 for an EM3000D dual-head run-time update is entirely
+    commented out / dead in gsf_enc.c -- a real limitation of gsflib
+    itself). Since the wire format and DecodeEM3Specific() both fully
+    support 0 or 1 head-0-only or both-heads run-time blocks, this
+    encoder writes exactly the blocks the caller supplies via
+    tables['RunTime'] instead of always forcing exactly one.
+
+    :param tables: optional {'RunTime': list[dict]}; each row needs a
+        'Head' key (0 or 1) selecting which position it's written at.
+        Bit 0 of the on-disk run_time_id is set iff a Head==0 row is
+        present, bit 1 iff a Head==1 row is present. A Head==1 row with
+        no matching Head==0 row is rejected (see below) -- matching
+        DecodeEM3Specific()'s nesting (bit 1 only means anything, and a
+        head-1 block is only ever written, alongside a head-0 block; an
+        unpaired head-1-only row could not be read back by this
+        decoder, or by real gsflib). An empty/absent list writes
+        run_time_id = 0 (no run-time blocks at all).
+    :raises ValueError: a row's 'Head' isn't 0 or 1; the same Head
+        appears more than once; or a Head==1 row is present without a
+        matching Head==0 row.
+    """
+    g = fields.get
+    tables = tables or {}
+    rows_by_head = {}
+    for row in tables.get('RunTime', []):
+        head = row.get('Head')
+        if head not in (0, 1):
+            raise ValueError("EM3 RunTime row 'Head' must be 0 or 1, got %r" % (head,))
+        if head in rows_by_head:
+            raise ValueError("EM3 RunTime: more than one row with Head=%d" % head)
+        rows_by_head[head] = row
+    if 1 in rows_by_head and 0 not in rows_by_head:
+        raise ValueError(
+            "EM3 RunTime: a Head=1 row requires a matching Head=0 row "
+            "(the wire format can't represent head 1 alone)")
+
+    body = struct.pack('>H', int(g('ModelNumber', 0)))
+    body += struct.pack('>H', int(g('PingNumber', 0)))
+    body += struct.pack('>H', int(g('SerialNumber', 0)))
+    body += struct.pack('>H', _gsf_round(g('SurfaceVelocity_mps', 0.0) * 10.0))
+    body += struct.pack('>H', _gsf_round(g('TransducerDepth_m', 0.0) * 100.0))
+    body += struct.pack('>H', int(g('ValidBeams', 0)))
+    body += struct.pack('>H', int(g('SampleRate_Hz', 0)))
+    body += struct.pack('>h', _gsf_round(g('DepthDifference_m', 0.0) * 100.0))
+    body += struct.pack('>b', int(g('OffsetMultiplier', 0)))
+
+    run_time_id = (0x1 if 0 in rows_by_head else 0) | (0x2 if 1 in rows_by_head else 0)
+    body += struct.pack('>I', run_time_id)
+    if 0 in rows_by_head:
+        body += _encode_em3_run_time(rows_by_head[0])
+    if 1 in rows_by_head:
+        body += _encode_em3_run_time(rows_by_head[1])
+
+    header_word = ((subrecord_id & 0xFF) << 24) | len(body)
+    return struct.pack('>I', header_word) + body
+
+
+for _em3_id in (118, 119, 120, 128, 129, 130, 131, 132, 139):
+    _PING_SENSOR_SPECIFIC_CODECS[_em3_id] = ("EM3", _decode_em3_specific, _encode_em3_specific)
+del _em3_id
+
+
+#: Registry of GSF_RECORD_SINGLE_BEAM_PING sensor-specific subrecord codecs,
+#: keyed by gsf.h's GSF_SINGLE_BEAM_SUBRECORD_* id (a separate id
+#: namespace, 201-205, from the swath-ping GSF_SWATH_BATHY_SUBRECORD_* ids
+#: above -- no overlap). Same {subrecord_id: (family label, decode_fn,
+#: encode_fn)} shape as _PING_SENSOR_SPECIFIC_CODECS; see that constant's
+#: comment for the decode_fn/encode_fn contract.
+_SINGLE_BEAM_SENSOR_SPECIFIC_CODECS = {}
+
+#: gsf.h GSF_SINGLE_BEAM_SUBRECORD_* id -> name, for the "not decoded yet"
+#: fallback note (mirrors _SENSOR_SPECIFIC_SUBRECORD_NAMES for swath pings).
+#: gsf.h also defines t_gsfSBPDDSpecific/t_gsfSBNavisoundSpecific structs,
+#: but gsf_dec.c's gsfDecodeSinglebeam() switch has no case that ever
+#: reaches them (no GSF_SINGLE_BEAM_SUBRECORD_PDD_SPECIFIC/_NAVISOUND_SPECIFIC
+#: id is defined), so they're omitted here -- they cannot occur in a real
+#: GSF file.
+_SINGLE_BEAM_SENSOR_SPECIFIC_NAMES = {
+    201: "ECHOTRAC_SPECIFIC",
+    202: "BATHY2000_SPECIFIC",
+    203: "MGD77_SPECIFIC",
+    204: "BDB_SPECIFIC",
+    205: "NOSHDB_SPECIFIC",
+}
+
+
+def _decode_echotrac_specific(payload, pos):
+    """
+    Decode a GSF_SINGLE_BEAM_SUBRECORD_ECHOTRAC_SPECIFIC or
+    _BATHY2000_SPECIFIC subrecord (ids 201/202 -- identical wire format,
+    one struct/decoder shared by both in gsflib). Ported from gsf_dec.c's
+    DecodeEchotracSpecific().
+
+    Untested against a verified GSF file: no sample data containing an
+    ECHOTRAC_SPECIFIC/BATHY2000_SPECIFIC subrecord is available.
+
+    :return: (fields: dict, tables: {} (none for this sensor), bytes_consumed).
+    """
+    start = pos
+    (navigation_error,) = struct.unpack_from('>h', payload, pos); pos += 2
+    mpp_source = payload[pos]; pos += 1
+    tide_source = payload[pos]; pos += 1
+
+    fields = {
+        'NavigationError': navigation_error,
+        'MppSource': mpp_source,
+        'TideSource': tide_source,
+    }
+    return fields, {}, pos - start
+
+
+def _encode_echotrac_specific(subrecord_id, fields, tables=None):
+    """
+    Encode a GSF_SINGLE_BEAM_SUBRECORD_ECHOTRAC_SPECIFIC or
+    _BATHY2000_SPECIFIC subrecord (subrecord_id selects which -- see
+    _decode_echotrac_specific()), including its own 4-byte subrecord
+    id+size word: the inverse of _decode_echotrac_specific(). Ported from
+    gsf_enc.c's EncodeEchotracSpecific().
+    """
+    g = fields.get
+    body = struct.pack('>h', int(g('NavigationError', 0)))
+    body += struct.pack('>B', int(g('MppSource', 0)) & 0xFF)
+    body += struct.pack('>B', int(g('TideSource', 0)) & 0xFF)
+    header_word = ((subrecord_id & 0xFF) << 24) | len(body)
+    return struct.pack('>I', header_word) + body
+
+
+_SINGLE_BEAM_SENSOR_SPECIFIC_CODECS[201] = ("Echotrac", _decode_echotrac_specific, _encode_echotrac_specific)
+_SINGLE_BEAM_SENSOR_SPECIFIC_CODECS[202] = ("Bathy2000", _decode_echotrac_specific, _encode_echotrac_specific)
+
+
+def _decode_mgd77_specific(payload, pos):
+    """
+    Decode a GSF_SINGLE_BEAM_SUBRECORD_MGD77_SPECIFIC subrecord (id 203):
+    MGD77 survey trackline data. Ported from gsf_dec.c's
+    DecodeMGD77Specific().
+
+    Untested against a verified GSF file: no sample data containing an
+    MGD77_SPECIFIC subrecord is available.
+
+    :return: (fields: dict, tables: {} (none for this sensor), bytes_consumed).
+    """
+    start = pos
+    (time_zone_corr,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (position_type_code,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (correction_code,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (bathy_type_code,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (quality_code,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (travel_time_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+
+    fields = {
+        'TimeZoneCorr': time_zone_corr,
+        'PositionTypeCode': position_type_code,
+        'CorrectionCode': correction_code,
+        'BathyTypeCode': bathy_type_code,
+        'QualityCode': quality_code,
+        'TravelTime_sec': travel_time_raw / 10000.0,
+    }
+    return fields, {}, pos - start
+
+
+def _encode_mgd77_specific(subrecord_id, fields, tables=None):
+    """
+    Encode a GSF_SINGLE_BEAM_SUBRECORD_MGD77_SPECIFIC subrecord, including
+    its own 4-byte subrecord id+size word: the inverse of
+    _decode_mgd77_specific(). Ported from gsf_enc.c's EncodeMGD77Specific().
+    """
+    g = fields.get
+    body = struct.pack('>H', int(g('TimeZoneCorr', 0)))
+    body += struct.pack('>H', int(g('PositionTypeCode', 0)))
+    body += struct.pack('>H', int(g('CorrectionCode', 0)))
+    body += struct.pack('>H', int(g('BathyTypeCode', 0)))
+    body += struct.pack('>H', int(g('QualityCode', 0)))
+    body += struct.pack('>I', _gsf_round(float(g('TravelTime_sec', 0.0)) * 10000.0))
+    header_word = ((subrecord_id & 0xFF) << 24) | len(body)
+    return struct.pack('>I', header_word) + body
+
+
+_SINGLE_BEAM_SENSOR_SPECIFIC_CODECS[203] = ("MGD77", _decode_mgd77_specific, _encode_mgd77_specific)
+
+
+def _decode_bdb_specific(payload, pos):
+    """
+    Decode a GSF_SINGLE_BEAM_SUBRECORD_BDB_SPECIFIC subrecord (id 204):
+    BDB survey trackline data. Ported from gsf_dec.c's DecodeBDBSpecific().
+    Every flag field here is a single ASCII character on disk (per gsf.h's
+    field comments, e.g. eval is '1'-'4', datum_flag is 'W' or 'D'), so
+    each is decoded to a one-character str rather than a raw int.
+
+    Untested against a verified GSF file: no sample data containing a
+    BDB_SPECIFIC subrecord is available.
+
+    :return: (fields: dict, tables: {} (none for this sensor), bytes_consumed).
+    """
+    start = pos
+    (doc_no,) = struct.unpack_from('>i', payload, pos); pos += 4
+    eval_flag = payload[pos:pos + 1].decode('ascii', 'replace'); pos += 1
+    classification = payload[pos:pos + 1].decode('ascii', 'replace'); pos += 1
+    track_adj_flag = payload[pos:pos + 1].decode('ascii', 'replace'); pos += 1
+    source_flag = payload[pos:pos + 1].decode('ascii', 'replace'); pos += 1
+    pt_or_track_ln = payload[pos:pos + 1].decode('ascii', 'replace'); pos += 1
+    datum_flag = payload[pos:pos + 1].decode('ascii', 'replace'); pos += 1
+
+    fields = {
+        'DocNo': doc_no,
+        'Eval': eval_flag,
+        'Classification': classification,
+        'TrackAdjFlag': track_adj_flag,
+        'SourceFlag': source_flag,
+        'PtOrTrackLn': pt_or_track_ln,
+        'DatumFlag': datum_flag,
+    }
+    return fields, {}, pos - start
+
+
+def _encode_bdb_specific(subrecord_id, fields, tables=None):
+    """
+    Encode a GSF_SINGLE_BEAM_SUBRECORD_BDB_SPECIFIC subrecord, including
+    its own 4-byte subrecord id+size word: the inverse of
+    _decode_bdb_specific(). Ported from gsf_enc.c's EncodeBDBSpecific().
+    Each flag field is written as the first byte of the given string (or
+    NUL if omitted/empty), matching the single-ASCII-character on-disk format.
+    """
+    def _char(value):
+        text = str(value) if value else '\x00'
+        return text.encode('ascii')[:1]
+
+    g = fields.get
+    body = struct.pack('>i', int(g('DocNo', 0)))
+    body += _char(g('Eval', ''))
+    body += _char(g('Classification', ''))
+    body += _char(g('TrackAdjFlag', ''))
+    body += _char(g('SourceFlag', ''))
+    body += _char(g('PtOrTrackLn', ''))
+    body += _char(g('DatumFlag', ''))
+    header_word = ((subrecord_id & 0xFF) << 24) | len(body)
+    return struct.pack('>I', header_word) + body
+
+
+_SINGLE_BEAM_SENSOR_SPECIFIC_CODECS[204] = ("BDB", _decode_bdb_specific, _encode_bdb_specific)
+
+
+def _decode_noshdb_specific(payload, pos):
+    """
+    Decode a GSF_SINGLE_BEAM_SUBRECORD_NOSHDB_SPECIFIC subrecord (id 205):
+    NOS HDB survey trackline data. Ported from gsf_dec.c's
+    DecodeNOSHDBSpecific().
+
+    Untested against a verified GSF file: no sample data containing a
+    NOSHDB_SPECIFIC subrecord is available.
+
+    :return: (fields: dict, tables: {} (none for this sensor), bytes_consumed).
+    """
+    start = pos
+    (type_code,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (carto_code,) = struct.unpack_from('>H', payload, pos); pos += 2
+
+    fields = {
+        'TypeCode': type_code,
+        'CartoCode': carto_code,
+    }
+    return fields, {}, pos - start
+
+
+def _encode_noshdb_specific(subrecord_id, fields, tables=None):
+    """
+    Encode a GSF_SINGLE_BEAM_SUBRECORD_NOSHDB_SPECIFIC subrecord, including
+    its own 4-byte subrecord id+size word: the inverse of
+    _decode_noshdb_specific(). Ported from gsf_enc.c's EncodeNOSHDBSpecific().
+    """
+    g = fields.get
+    body = struct.pack('>H', int(g('TypeCode', 0)))
+    body += struct.pack('>H', int(g('CartoCode', 0)))
+    header_word = ((subrecord_id & 0xFF) << 24) | len(body)
+    return struct.pack('>I', header_word) + body
+
+
+_SINGLE_BEAM_SENSOR_SPECIFIC_CODECS[205] = ("NOSHDB", _decode_noshdb_specific, _encode_noshdb_specific)
+
+
+#: gsf.h GSF_SWATH_BATHY_SUBRECORD_*_SPECIFIC ids sharing
+#: DecodeEM3ImagerySpecific()'s 18-byte sensor-imagery preamble: older
+#: Simrad/Kongsberg EM3-series sonars, normal and "_RAW" range/angle variants.
+_SUBRECORD_EM3_IMAGERY_IDS = {
+    118, 119, 120, 128, 129, 130, 131, 132, 139,
+    140, 141, 142, 143, 144, 145, 146, 147, 148,
+}
+#: ids sharing DecodeEM4ImagerySpecific()'s 50-byte preamble: EM122, EM302,
+#: EM710, EM2040, ME70BO.
+_SUBRECORD_EM4_IMAGERY_IDS = {133, 134, 135, 149, 157}
+#: ids sharing the identical 66-byte "size + spare" preamble used by Reson
+#: 7125 (DecodeReson7100ImagerySpecific()) and Reson T-series
+#: (DecodeResonTSeriesImagerySpecific()).
+_SUBRECORD_RESON_SIZE_SPARE_IMAGERY_IDS = {138, 155}
+#: ids sharing DecodeReson8100ImagerySpecific()'s 8-byte, all-spare preamble.
+_SUBRECORD_RESON_8100_IMAGERY_IDS = {122, 123, 124, 125, 126, 127}
+#: ids sharing DecodeR2SonicImagerySpecific()'s 168-byte preamble.
+_SUBRECORD_R2SONIC_IMAGERY_IDS = {151, 152, 153}
+_SUBRECORD_KLEIN_5410_BSS_SPECIFIC = 137
+
 
 def _decode_kmall_imagery_specific(payload, pos):
     """
@@ -382,6 +3237,217 @@ def _decode_kmall_imagery_specific(payload, pos):
     :return: bytes_consumed (always 64).
     """
     return 64
+
+
+def _decode_em3_imagery_specific(payload, pos):
+    """
+    Decode the EM3-series sensor-specific portion of a
+    GSF_SWATH_BATHY_SUBRECORD_INTENSITY_SERIES_ARRAY subrecord (older
+    Simrad/Kongsberg EM3000/EM1002/EM300/EM120/EM3002/EM3000D/EM3002D/
+    EM121A-SIS/EM2000, and their "_RAW" range/angle variants). Ported from
+    gsf_dec.c's DecodeEM3ImagerySpecific().
+
+    Untested against a verified GSF file: no sample data containing an
+    EM3-series intensity series subrecord is available.
+
+    :return: (fields: dict, bytes_consumed: int) -- bytes_consumed always 18.
+    """
+    start = pos
+    (range_norm,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (start_tvg_ramp,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (stop_tvg_ramp,) = struct.unpack_from('>H', payload, pos); pos += 2
+    bsn = payload[pos]; pos += 1
+    bso = payload[pos]; pos += 1
+    (mean_absorption_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (offset,) = struct.unpack_from('>h', payload, pos); pos += 2
+    (scale,) = struct.unpack_from('>h', payload, pos); pos += 2
+    pos += 4  # spare
+
+    fields = {
+        'RangeNorm_samples': range_norm,
+        'StartTvgRamp_samples': start_tvg_ramp,
+        'StopTvgRamp_samples': stop_tvg_ramp,
+        'BSNormal_dB': bsn,
+        'BSOblique_dB': bso,
+        'MeanAbsorption_dBkm': mean_absorption_raw / 100.0,
+        'Offset': offset,
+        'Scale': scale,
+    }
+    return fields, pos - start
+
+
+def _decode_em4_imagery_specific(payload, pos):
+    """
+    Decode the EM4-series sensor-specific portion of a
+    GSF_SWATH_BATHY_SUBRECORD_INTENSITY_SERIES_ARRAY subrecord (EM122,
+    EM302, EM710, EM2040, ME70BO). Ported from gsf_dec.c's
+    DecodeEM4ImagerySpecific().
+
+    Untested against a verified GSF file: none of the checked-in sample
+    files carry an intensity series subrecord for these sensors (the
+    EM712 sample data is all KMALL_SPECIFIC, which uses the separate
+    Kongsberg SIS 5 imagery format decoded by
+    _decode_kmall_imagery_specific()).
+
+    :return: (fields: dict, bytes_consumed: int) -- bytes_consumed always 50.
+    """
+    start = pos
+    (freq_int,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (freq_frac,) = struct.unpack_from('>I', payload, pos); pos += 4
+    sampling_frequency = freq_int + freq_frac / 4.0e9
+    (mean_absorption_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (tx_pulse_length,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (range_norm,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (start_tvg_ramp,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (stop_tvg_ramp,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (bsn_raw,) = struct.unpack_from('>h', payload, pos); pos += 2
+    (bso_raw,) = struct.unpack_from('>h', payload, pos); pos += 2
+    (tx_beam_width_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (tvg_cross_over_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (offset,) = struct.unpack_from('>h', payload, pos); pos += 2
+    (scale,) = struct.unpack_from('>h', payload, pos); pos += 2
+    pos += 20  # spare
+
+    fields = {
+        'SamplingFrequency_Hz': sampling_frequency,
+        'MeanAbsorption_dBkm': mean_absorption_raw / 100.0,
+        'TxPulseLength_us': tx_pulse_length,
+        'RangeNorm_samples': range_norm,
+        'StartTvgRamp_samples': start_tvg_ramp,
+        'StopTvgRamp_samples': stop_tvg_ramp,
+        'BSNormal_dB': bsn_raw / 10.0,
+        'BSOblique_dB': bso_raw / 10.0,
+        'TxBeamWidth_deg': tx_beam_width_raw / 10.0,
+        'TvgCrossOver_deg': tvg_cross_over_raw / 10.0,
+        'Offset': offset,
+        'Scale': scale,
+    }
+    return fields, pos - start
+
+
+def _decode_reson_size_spare_imagery_specific(payload, pos):
+    """
+    Decode the 66-byte sensor-specific preamble shared by Reson 7125 and
+    Reson T-series (a 2-byte record size followed by 64 spare bytes).
+    Ported from gsf_dec.c's DecodeReson7100ImagerySpecific() /
+    DecodeResonTSeriesImagerySpecific(), which are byte-for-byte identical
+    apart from name.
+
+    Untested against a verified GSF file: no sample data containing a
+    Reson 7125 or Reson T-series intensity series subrecord is available.
+
+    :return: (fields: dict, bytes_consumed: int) -- bytes_consumed always 66.
+    """
+    start = pos
+    (size,) = struct.unpack_from('>H', payload, pos); pos += 2
+    pos += 64  # spare
+    return {'Size': size}, pos - start
+
+
+def _decode_reson8100_imagery_specific(payload, pos):
+    """
+    Decode the Reson 8100-family sensor-specific portion of a
+    GSF_SWATH_BATHY_SUBRECORD_INTENSITY_SERIES_ARRAY subrecord (8101/8111/
+    8124/8125/8150/8160): entirely spare/reserved. Ported from gsf_dec.c's
+    DecodeReson8100ImagerySpecific().
+
+    Untested against a verified GSF file: no sample data containing a
+    Reson 8100-family intensity series subrecord is available.
+
+    :return: (fields: dict (always empty), bytes_consumed: int) -- bytes_consumed always 8.
+    """
+    return {}, 8
+
+
+def _decode_klein5410bss_imagery_specific(payload, pos):
+    """
+    Decode the Klein 5410 BSS sensor-specific portion of a
+    GSF_SWATH_BATHY_SUBRECORD_INTENSITY_SERIES_ARRAY subrecord. Ported from
+    gsf_dec.c's DecodeKlein5410BssImagerySpecific().
+
+    Untested against a verified GSF file: no sample data containing a
+    Klein 5410 BSS intensity series subrecord is available.
+
+    :return: (fields: dict, bytes_consumed: int) -- bytes_consumed always 18.
+    """
+    start = pos
+    (res_mode,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (tvg_page,) = struct.unpack_from('>H', payload, pos); pos += 2
+    beam_id = list(struct.unpack_from('>5H', payload, pos)); pos += 10
+    pos += 4  # spare
+
+    fields = {'ResMode': res_mode, 'TvgPage': tvg_page, 'BeamID': beam_id}
+    return fields, pos - start
+
+
+def _decode_r2sonic_imagery_specific(payload, pos):
+    """
+    Decode the R2Sonic sensor-specific portion of a
+    GSF_SWATH_BATHY_SUBRECORD_INTENSITY_SERIES_ARRAY subrecord (2020/2022/
+    2024). Ported from gsf_dec.c's DecodeR2SonicImagerySpecific().
+
+    Untested against a verified GSF file: no sample data containing an
+    R2Sonic intensity series subrecord is available.
+
+    :return: (fields: dict, bytes_consumed: int) -- bytes_consumed always 168.
+    """
+    start = pos
+    model_number = payload[pos:pos + 12].split(b'\x00', 1)[0].decode('ascii', 'replace'); pos += 12
+    serial_number = payload[pos:pos + 12].split(b'\x00', 1)[0].decode('ascii', 'replace'); pos += 12
+    (sec,) = struct.unpack_from('>i', payload, pos); pos += 4
+    (nsec,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (ping_number,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (ping_period_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (sound_speed_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (frequency_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (tx_power_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (tx_pulse_width_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (tx_beamwidth_vert_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (tx_beamwidth_horiz_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (tx_steering_vert_raw,) = struct.unpack_from('>i', payload, pos); pos += 4
+    (tx_steering_horiz_raw,) = struct.unpack_from('>i', payload, pos); pos += 4
+    (tx_misc_info,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (rx_bandwidth_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (rx_sample_rate_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (rx_range_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (rx_gain_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (rx_spreading_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (rx_absorption_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (rx_mount_tilt_raw,) = struct.unpack_from('>i', payload, pos); pos += 4
+    (rx_misc_info,) = struct.unpack_from('>I', payload, pos); pos += 4
+    (reserved,) = struct.unpack_from('>H', payload, pos); pos += 2
+    (num_beams,) = struct.unpack_from('>H', payload, pos); pos += 2
+    more_info = [v / 1.0e6 for v in struct.unpack_from('>6i', payload, pos)]; pos += 24
+    pos += 32  # spare
+
+    fields = {
+        'ModelNumber': model_number,
+        'SerialNumber': serial_number,
+        'PingTime': _gsf_timestamp(sec, nsec),
+        'PingNumber': ping_number,
+        'PingPeriod_s': ping_period_raw / 1.0e6,
+        'SoundSpeed_mps': sound_speed_raw / 1.0e2,
+        'Frequency_Hz': frequency_raw / 1.0e3,
+        'TxPower_dB': tx_power_raw / 1.0e2,
+        'TxPulseWidth_s': tx_pulse_width_raw / 1.0e7,
+        'TxBeamwidthVert_deg': tx_beamwidth_vert_raw / 1.0e6,
+        'TxBeamwidthHoriz_deg': tx_beamwidth_horiz_raw / 1.0e6,
+        'TxSteeringVert_deg': tx_steering_vert_raw / 1.0e6,
+        'TxSteeringHoriz_deg': tx_steering_horiz_raw / 1.0e6,
+        'TxMiscInfo': tx_misc_info,
+        'RxBandwidth_Hz': rx_bandwidth_raw / 1.0e4,
+        'RxSampleRate_Hz': rx_sample_rate_raw / 1.0e3,
+        'RxRange_m': rx_range_raw / 1.0e5,
+        'RxGain_dB': rx_gain_raw / 1.0e2,
+        'RxSpreading': rx_spreading_raw / 1.0e3,
+        'RxAbsorption_dBkm': rx_absorption_raw / 1.0e3,
+        'RxMountTilt_deg': rx_mount_tilt_raw / 1.0e6,
+        'RxMiscInfo': rx_misc_info,
+        'Reserved': reserved,
+        'NumBeams': num_beams,
+        'MoreInfo': more_info,
+    }
+    return fields, pos - start
 
 
 def _decode_kmall_specific(payload, pos):
@@ -526,18 +3592,26 @@ def _decode_brb_intensity(payload, pos, num_beams, sensor_id):
     """
     Decode a GSF_SWATH_BATHY_SUBRECORD_INTENSITY_SERIES_ARRAY subrecord: a
     per-beam receive-beam backscatter time series. Ported from gsf_dec.c's
-    DecodeBRBIntensity(). Only the KMALL sensor-imagery format (sensor_id
-    156) is supported -- every other vendor's imagery-specific block has a
-    different, sensor-dependent size, which would misalign every beam
-    after it; unsupported sensors return None rather than guess.
+    DecodeBRBIntensity(). The fixed header and per-beam sample loop are
+    sensor-agnostic, but gsflib inserts an optional sensor-specific
+    "imagery" preamble between them whose size depends on sensor_id --
+    every vendor format gsf_dec.c special-cases (KMALL, EM3-series,
+    EM4-series, Reson 7125/T-series/8100-family, Klein 5410 BSS, R2Sonic)
+    is decoded here via the matching _decode_*_imagery_specific() helper;
+    any other sensor_id (including sensors gsflib itself doesn't
+    special-case, e.g. SeaBat, SeaBeam, EM12/100/950/1000/121, GeoSwath,
+    DeltaT) has no preamble at all (gsf_dec.c's switch default,
+    sensor_size=0) and decodes straight through to the per-beam samples.
 
     :param sensor_id: the vendor "_SPECIFIC" subrecord id most recently
         seen for this ping (identifies which sensor-imagery format, if
         any, precedes the per-beam samples).
-    :return: (header: dict, beam_rows: list[dict] with 'SampleCount',
-        'DetectSample', 'StartRangeSamples', 'Samples' (a list of ints),
-        bytes_consumed), or None if the sensor-imagery format isn't
-        supported.
+    :return: (header: dict with 'BitsPerSample', 'AppliedCorrections', and
+        any fields decoded from a sensor-imagery preamble; beam_rows:
+        list[dict] with 'SampleCount', 'DetectSample', 'StartRangeSamples',
+        'Samples' (a list of ints); bytes_consumed), or None if num_beams
+        is non-positive or bits_per_sample doesn't resolve to a supported
+        sample width.
     """
     if num_beams <= 0:
         return None
@@ -547,13 +3621,33 @@ def _decode_brb_intensity(payload, pos, num_beams, sensor_id):
     (applied_corrections,) = struct.unpack_from('>I', payload, pos); pos += 4
     pos += 16  # spare
 
+    sensor_fields = {}
     if sensor_id == _SUBRECORD_KMALL_SPECIFIC:
         pos += _decode_kmall_imagery_specific(payload, pos)
-    else:
-        return None
+    elif sensor_id in _SUBRECORD_EM3_IMAGERY_IDS:
+        sensor_fields, consumed = _decode_em3_imagery_specific(payload, pos)
+        pos += consumed
+    elif sensor_id in _SUBRECORD_EM4_IMAGERY_IDS:
+        sensor_fields, consumed = _decode_em4_imagery_specific(payload, pos)
+        pos += consumed
+    elif sensor_id in _SUBRECORD_RESON_SIZE_SPARE_IMAGERY_IDS:
+        sensor_fields, consumed = _decode_reson_size_spare_imagery_specific(payload, pos)
+        pos += consumed
+    elif sensor_id in _SUBRECORD_RESON_8100_IMAGERY_IDS:
+        sensor_fields, consumed = _decode_reson8100_imagery_specific(payload, pos)
+        pos += consumed
+    elif sensor_id == _SUBRECORD_KLEIN_5410_BSS_SPECIFIC:
+        sensor_fields, consumed = _decode_klein5410bss_imagery_specific(payload, pos)
+        pos += consumed
+    elif sensor_id in _SUBRECORD_R2SONIC_IMAGERY_IDS:
+        sensor_fields, consumed = _decode_r2sonic_imagery_specific(payload, pos)
+        pos += consumed
+    # else: no sensor-imagery preamble precedes the per-beam samples for
+    # this sensor_id (gsf_dec.c's switch default, sensor_size=0).
 
     bytes_per_sample = bits_per_sample // 8
     header = {'BitsPerSample': bits_per_sample, 'AppliedCorrections': applied_corrections}
+    header.update(sensor_fields)
 
     beam_rows = []
     for _beam in range(num_beams):
@@ -636,6 +3730,29 @@ def _decode_ping_array(payload, pos, size, num_beams, multiplier, offset, signed
     values = raw.astype(np.float64) / multiplier - offset
     if truncate_to_int:
         values = np.trunc(values).astype(np.int64)
+    return values
+
+
+def _decode_quality_flags_array(payload, pos, num_beams, subrecord_size):
+    """
+    Decode a GSF_SWATH_BATHY_SUBRECORD_QUALITY_FLAGS_ARRAY subrecord: one
+    2-bit quality flag per beam, four beams packed per byte (bits 7-6 =
+    first beam in the byte, down to bits 1-0 = fourth), MSB first. Ported
+    from gsf_dec.c's DecodeQualityFlagsArray(). Vectorized with numpy.
+
+    If subrecord_size is too small to cover every beam (gsf_dec.c reads
+    only sr_size * 4 beams in that case, leaving the rest at their
+    pre-allocated zero value), the remaining beams are returned as 0,
+    matching that behavior.
+
+    :return: numpy uint8 array of length num_beams, values 0-3.
+    """
+    count = min(subrecord_size * 4, num_beams)
+    raw = np.frombuffer(payload, dtype=np.uint8, count=(count + 3) // 4, offset=pos)
+    shifts = np.array([6, 4, 2, 0], dtype=np.uint8)
+    values = ((raw[:, None] >> shifts[None, :]) & 0x03).reshape(-1)[:count]
+    if count < num_beams:
+        values = np.concatenate([values, np.zeros(num_beams - count, dtype=np.uint8)])
     return values
 
 
@@ -723,6 +3840,10 @@ def _decode_swath_bathymetry_ping(payload, major_version, scale_factors, decode_
             else:
                 notes.append("BeamFlags (%d bytes) not decoded: unexpected size" % subrecord_size)
 
+        elif subrecord_id == _SUBRECORD_QUALITY_FLAGS_ARRAY:
+            beam_columns['QualityFlags'] = _decode_quality_flags_array(
+                payload, pos, number_beams, subrecord_size)
+
         elif subrecord_id in _PING_ARRAY_SUBRECORDS:
             _attr, label, signed = _PING_ARRAY_SUBRECORDS[subrecord_id]
             sf = scale_factors.get(subrecord_id)
@@ -768,13 +3889,30 @@ def _decode_swath_bathymetry_ping(payload, major_version, scale_factors, decode_
                 else:
                     if decoded is None:
                         notes.append(
-                            "IntensityTimeSeries (21, %d bytes) not decoded: unsupported sensor imagery "
-                            "format (sensor_id=%s)" % (subrecord_size, sensor_id))
+                            "IntensityTimeSeries (21, %d bytes) not decoded: no beams, or an "
+                            "unsupported bits-per-sample encoding (sensor_id=%s)" % (subrecord_size, sensor_id))
                     else:
                         _header, beam_rows, _consumed = decoded
                         series = pd.DataFrame(beam_rows)
                         series.index.name = 'Beam'
                         tables['IntensityTimeSeries'] = series
+
+        elif subrecord_id in _PING_SENSOR_SPECIFIC_CODECS:
+            sensor_id = subrecord_id
+            family_label, decode_fn, _encode_fn = _PING_SENSOR_SPECIFIC_CODECS[subrecord_id]
+            try:
+                fields, extra_tables, _consumed = decode_fn(payload, pos)
+            except (struct.error, IndexError) as exc:
+                notes.append("%s (%d, %d bytes) not decoded: %s" %
+                             (_SENSOR_SPECIFIC_SUBRECORD_NAMES.get(subrecord_id, str(subrecord_id)),
+                              subrecord_id, subrecord_size, exc))
+            else:
+                scalars.update({family_label + "." + k: v for k, v in fields.items()})
+                for table_name, rows in extra_tables.items():
+                    if rows:
+                        df = pd.DataFrame(rows)
+                        df.index.name = table_name
+                        tables[family_label + "." + table_name] = df
 
         elif subrecord_id in _SENSOR_SPECIFIC_SUBRECORD_NAMES:
             sensor_id = subrecord_id
@@ -796,9 +3934,20 @@ def _decode_swath_bathymetry_ping(payload, major_version, scale_factors, decode_
 
 def _decode_single_beam_ping(payload):
     """
-    Decode the fixed-format portion of a GSF_RECORD_SINGLE_BEAM_PING
-    payload. Ported from gsf_dec.c's gsfDecodeSinglebeam(); the
-    sensor-specific tail (echosounder-dependent) is not decoded.
+    Decode a GSF_RECORD_SINGLE_BEAM_PING payload: the fixed-format
+    scalars, plus its one sensor-specific tail subrecord (if any) via
+    _SINGLE_BEAM_SENSOR_SPECIFIC_CODECS. Ported from gsf_dec.c's
+    gsfDecodeSinglebeam(). Unlike the swath-ping sensor-specific subrecord
+    stream, a single-beam ping carries at most one such subrecord, so this
+    doesn't need a loop -- it reads the one 4-byte id+size word at offset
+    38 (if present) and dispatches once. gsfDecodeSinglebeam()'s obscure
+    "extract a trailing subrecord id when the declared size is exactly 0"
+    fallback (see gsf_dec.c) isn't replicated -- it only matters for a
+    subrecord that carries an id but no payload, which none of the
+    registered families do.
+
+    Untested against a verified GSF file: no sample data containing a
+    GSF_RECORD_SINGLE_BEAM_PING record is available.
     """
     scalars = {}
     (sec, nsec) = struct.unpack_from('>2I', payload, 0)
@@ -833,14 +3982,42 @@ def _decode_single_beam_ping(payload):
 
     remaining = len(payload) - 38
     notes = []
+    tables = {}
     if remaining > 4:
-        notes.append("sensor-specific data (%d bytes) not decoded" % remaining)
+        word, = struct.unpack_from('>I', payload, 38)
+        subrecord_id = (word >> 24) & 0xFF
+        subrecord_size = word & 0x00FFFFFF
+        if subrecord_id in _SINGLE_BEAM_SENSOR_SPECIFIC_CODECS:
+            family_label, decode_fn, _encode_fn = _SINGLE_BEAM_SENSOR_SPECIFIC_CODECS[subrecord_id]
+            try:
+                fields, extra_tables, _consumed = decode_fn(payload, 42)
+            except (struct.error, IndexError) as exc:
+                notes.append("%s (%d, %d bytes) not decoded: %s" %
+                             (_SINGLE_BEAM_SENSOR_SPECIFIC_NAMES.get(subrecord_id, str(subrecord_id)),
+                              subrecord_id, subrecord_size, exc))
+            else:
+                scalars.update({family_label + "." + k: v for k, v in fields.items()})
+                for table_name, rows in extra_tables.items():
+                    if rows:
+                        df = pd.DataFrame(rows)
+                        df.index.name = table_name
+                        tables[family_label + "." + table_name] = df
+        elif subrecord_id in _SINGLE_BEAM_SENSOR_SPECIFIC_NAMES:
+            notes.append("%s (%d, %d bytes) not decoded" %
+                         (_SINGLE_BEAM_SENSOR_SPECIFIC_NAMES[subrecord_id], subrecord_id, subrecord_size))
+        else:
+            notes.append("subrecord id %d (%d bytes) not decoded" % (subrecord_id, subrecord_size))
 
-    return scalars, {}, notes
+    return scalars, tables, notes
 
 
 def _decode_swath_bathy_summary(payload):
-    """ Ported from gsf_dec.c's gsfDecodeSwathBathySummary(). """
+    """
+    Ported from gsf_dec.c's gsfDecodeSwathBathySummary().
+
+    Untested against a verified GSF file: no sample data containing a
+    GSF_RECORD_SWATH_BATHY_SUMMARY record is available.
+    """
     scalars = {}
     (start_sec, start_nsec, end_sec, end_nsec) = struct.unpack_from('>4I', payload, 0)
     scalars['StartTime'] = _gsf_timestamp(start_sec, start_nsec).isoformat()
@@ -894,6 +4071,11 @@ def _decode_name_value_parameters(payload):
     parameter's counted size (as a C-string terminator baked into the
     file); that byte is stripped here rather than surfaced as a literal
     '\\x00' in the printed value.
+
+    Verified against real GSF files for GSF_RECORD_PROCESSING_PARAMETERS.
+    Untested against a verified GSF file for GSF_RECORD_SENSOR_PARAMETERS:
+    no sample data containing that record type is available, even though
+    it decodes with this same function.
     """
     scalars = {}
     (sec, nsec) = struct.unpack_from('>2I', payload, 0)
@@ -913,7 +4095,12 @@ def _decode_name_value_parameters(payload):
 
 
 def _decode_comment(payload):
-    """ Ported from gsf_dec.c's gsfDecodeComment(). """
+    """
+    Ported from gsf_dec.c's gsfDecodeComment().
+
+    Untested against a verified GSF file: no sample data containing a
+    GSF_RECORD_COMMENT record is available.
+    """
     scalars = {}
     (sec, nsec) = struct.unpack_from('>2I', payload, 0)
     scalars['CommentTime'] = _gsf_timestamp(sec, nsec).isoformat()
@@ -925,7 +4112,12 @@ def _decode_comment(payload):
 
 
 def _decode_history(payload):
-    """ Ported from gsf_dec.c's gsfDecodeHistory(). """
+    """
+    Ported from gsf_dec.c's gsfDecodeHistory().
+
+    Untested against a verified GSF file: no sample data containing a
+    GSF_RECORD_HISTORY record is available.
+    """
     scalars = {}
     (sec, nsec) = struct.unpack_from('>2I', payload, 0)
     scalars['HistoryTime'] = _gsf_timestamp(sec, nsec).isoformat()
@@ -941,7 +4133,12 @@ def _decode_history(payload):
 
 
 def _decode_navigation_error(payload):
-    """ Ported from gsf_dec.c's gsfDecodeNavigationError() (obsolete record). """
+    """
+    Ported from gsf_dec.c's gsfDecodeNavigationError() (obsolete record).
+
+    Untested against a verified GSF file: no sample data containing a
+    GSF_RECORD_NAVIGATION_ERROR record is available.
+    """
     scalars = {}
     (sec, nsec) = struct.unpack_from('>2I', payload, 0)
     scalars['NavErrorTime'] = _gsf_timestamp(sec, nsec).isoformat()
@@ -957,7 +4154,12 @@ def _decode_navigation_error(payload):
 
 
 def _decode_hv_navigation_error(payload):
-    """ Ported from gsf_dec.c's gsfDecodeHVNavigationError(). """
+    """
+    Ported from gsf_dec.c's gsfDecodeHVNavigationError().
+
+    Untested against a verified GSF file: no sample data containing a
+    GSF_RECORD_HV_NAVIGATION_ERROR record is available.
+    """
     scalars = {}
     (sec, nsec) = struct.unpack_from('>2I', payload, 0)
     scalars['NavErrorTime'] = _gsf_timestamp(sec, nsec).isoformat()
@@ -1288,6 +4490,159 @@ def _encode_attitude(attitude_time, pitch_deg, roll_deg, heave_m, heading_deg):
     return out
 
 
+def _encode_swath_bathy_summary(start_time, end_time,
+                                 min_latitude_deg, min_longitude_deg,
+                                 max_latitude_deg, max_longitude_deg,
+                                 min_depth_m, max_depth_m):
+    """
+    Encode a GSF_RECORD_SWATH_BATHY_SUMMARY payload. Ported from
+    gsf_enc.c's gsfEncodeSwathBathySummary().
+
+    Untested against a verified GSF file: no sample data containing a
+    GSF_RECORD_SWATH_BATHY_SUMMARY record is available.
+    """
+    start_sec, start_nsec = _gsf_epoch(start_time)
+    end_sec, end_nsec = _gsf_epoch(end_time)
+    out = struct.pack('>4I', start_sec, start_nsec, end_sec, end_nsec)
+    for value, scale in (
+        (min_latitude_deg, 1.0e7), (min_longitude_deg, 1.0e7),
+        (max_latitude_deg, 1.0e7), (max_longitude_deg, 1.0e7),
+        (min_depth_m, 100.0), (max_depth_m, 100.0),
+    ):
+        out += struct.pack('>i', _gsf_round(value * scale))
+    return out
+
+
+def _encode_comment(comment_time, comment):
+    """
+    Encode a GSF_RECORD_COMMENT payload. Ported from gsf_enc.c's
+    gsfEncodeComment().
+
+    Untested against a verified GSF file: no sample data containing a
+    GSF_RECORD_COMMENT record is available.
+    """
+    sec, nsec = _gsf_epoch(comment_time)
+    text = comment.encode('ascii')
+    return struct.pack('>3I', sec, nsec, len(text)) + text
+
+
+def _encode_history(history_time, host_name, operator_name, command_line, comment):
+    """
+    Encode a GSF_RECORD_HISTORY payload. Ported from gsf_enc.c's
+    gsfEncodeHistory(). host_name, operator_name, and command_line are
+    each written as a NUL-terminated string, with the 2-byte size field
+    counting that NUL byte -- comment is the odd one out, written with no
+    NUL terminator and a size field that's the plain string length. This
+    matches gsf_enc.c exactly; _decode_history() doesn't strip the
+    embedded NUL from the other three fields, so a round trip returns
+    host_name/operator_name/command_line with a trailing '\\x00'.
+
+    Untested against a verified GSF file: no sample data containing a
+    GSF_RECORD_HISTORY record is available.
+    """
+    sec, nsec = _gsf_epoch(history_time)
+    out = struct.pack('>2I', sec, nsec)
+    for value in (host_name, operator_name, command_line):
+        text = value.encode('ascii') + b'\x00'
+        out += struct.pack('>H', len(text)) + text
+    text = comment.encode('ascii')
+    out += struct.pack('>H', len(text)) + text
+    return out
+
+
+def _encode_navigation_error(nav_error_time, record_id, longitude_error_m, latitude_error_m):
+    """
+    Encode a GSF_RECORD_NAVIGATION_ERROR payload (obsolete record,
+    superseded by GSF_RECORD_HV_NAVIGATION_ERROR -- see
+    _encode_hv_navigation_error()). Ported from gsf_enc.c's
+    gsfEncodeNavigationError(), with one deliberate deviation: the
+    reference encoder rounds both fields with an unconditional `+ 0.501`
+    (no sign check), which for negative error values is a rounding bug --
+    e.g. a longitude_error of -1.29 m encodes (via the reference's own
+    formula, truncating toward zero after the scale+offset) to -12
+    (1/10 m units) instead of the correctly-rounded -13. This uses the
+    standard, sign-correct _gsf_round() convention used by every other
+    encoder in this module.
+
+    Untested against a verified GSF file: no sample data containing a
+    GSF_RECORD_NAVIGATION_ERROR record is available.
+    """
+    sec, nsec = _gsf_epoch(nav_error_time)
+    out = struct.pack('>3I', sec, nsec, record_id)
+    out += struct.pack('>i', _gsf_round(longitude_error_m * 10.0))
+    out += struct.pack('>i', _gsf_round(latitude_error_m * 10.0))
+    return out
+
+
+def _encode_hv_navigation_error(nav_error_time, record_id, horizontal_error_m,
+                                 vertical_error_m, sep_uncertainty_m, position_type=""):
+    """
+    Encode a GSF_RECORD_HV_NAVIGATION_ERROR payload. Ported from
+    gsf_enc.c's gsfEncodeHVNavigationError(). The reference encoder rounds
+    vertical_error with +/-0.5 rather than the +/-0.501 used everywhere
+    else (including horizontal_error here); functionally equivalent except
+    exactly on a 0.5 fractional boundary, so this uses the standard
+    _gsf_round() convention for both fields.
+
+    Untested against a verified GSF file: no sample data containing a
+    GSF_RECORD_HV_NAVIGATION_ERROR record is available.
+    """
+    sec, nsec = _gsf_epoch(nav_error_time)
+    out = struct.pack('>3I', sec, nsec, record_id)
+    out += struct.pack('>i', _gsf_round(horizontal_error_m * 1000.0))
+    out += struct.pack('>i', _gsf_round(vertical_error_m * 1000.0))
+    out += struct.pack('>H', _gsf_round(sep_uncertainty_m * 100.0))
+    out += b'\x00\x00'  # spare
+    text = position_type.encode('ascii')
+    out += struct.pack('>H', len(text)) + text
+    return out
+
+
+def _encode_single_beam_ping(ping_time, longitude_deg, latitude_deg, tide_corrector_m,
+                              depth_corrector_m, heading_deg, pitch_deg, roll_deg,
+                              heave_m, depth_m, sound_speed_correction_m,
+                              positioning_system_type=0, sensor_specific=None):
+    """
+    Encode a GSF_RECORD_SINGLE_BEAM_PING payload: the fixed-format
+    scalars, plus (if given) one sensor-specific tail subrecord via
+    _SINGLE_BEAM_SENSOR_SPECIFIC_CODECS. Ported from gsf_enc.c's
+    gsfEncodeSinglebeam(). The exact inverse of _decode_single_beam_ping().
+
+    :param sensor_specific: optional (subrecord_id, fields) or
+        (subrecord_id, fields, tables) tuple -- same shape as
+        _encode_swath_bathymetry_ping()'s `sensor_specific` parameter, but
+        looked up in _SINGLE_BEAM_SENSOR_SPECIFIC_CODECS instead.
+    :raises KeyError: `sensor_specific`'s subrecord_id has no encoder
+        registered in _SINGLE_BEAM_SENSOR_SPECIFIC_CODECS.
+
+    Untested against a verified GSF file: no sample data containing a
+    GSF_RECORD_SINGLE_BEAM_PING record is available.
+    """
+    sec, nsec = _gsf_epoch(ping_time)
+    out = struct.pack('>2I', sec, nsec)
+    out += struct.pack('>i', _gsf_round(longitude_deg * 1.0e7))
+    out += struct.pack('>i', _gsf_round(latitude_deg * 1.0e7))
+    out += struct.pack('>h', _gsf_round(tide_corrector_m * 100.0))
+    out += struct.pack('>i', _gsf_round(depth_corrector_m * 100.0))
+    out += struct.pack('>H', _gsf_round(heading_deg * 100.0))
+    out += struct.pack('>h', _gsf_round(pitch_deg * 100.0))
+    out += struct.pack('>h', _gsf_round(roll_deg * 100.0))
+    out += struct.pack('>h', _gsf_round(heave_m * 100.0))
+    out += struct.pack('>i', _gsf_round(depth_m * 100.0))
+    out += struct.pack('>h', _gsf_round(sound_speed_correction_m * 100.0))
+    out += struct.pack('>H', positioning_system_type)
+
+    if sensor_specific is not None:
+        subrecord_id, fields, *rest = sensor_specific
+        sensor_tables = rest[0] if rest else {}
+        if subrecord_id not in _SINGLE_BEAM_SENSOR_SPECIFIC_CODECS:
+            raise KeyError("no encoder registered for single-beam sensor-specific subrecord id %d" % subrecord_id)
+        _family_label, _decode_fn, encode_fn = _SINGLE_BEAM_SENSOR_SPECIFIC_CODECS[subrecord_id]
+        out += encode_fn(subrecord_id, fields, sensor_tables)
+
+    return out
+
+
 def _encode_scale_factors(scale_factors):
     """
     Encode a GSF_SWATH_BATHY_SUBRECORD_SCALE_FACTORS subrecord, including
@@ -1332,6 +4687,27 @@ def _encode_ping_array(subrecord_id, values, multiplier, offset, signed, width):
 
     body = raw.astype(_ENCODE_DTYPE[(width, signed)]).tobytes()
     header_word = ((subrecord_id & 0xFF) << 24) | len(body)
+    return struct.pack('>I', header_word) + body
+
+
+def _encode_quality_flags_array(values):
+    """
+    Encode a GSF_SWATH_BATHY_SUBRECORD_QUALITY_FLAGS_ARRAY subrecord,
+    including its own 4-byte subrecord id+size word: the inverse of
+    _decode_quality_flags_array(). Ported from gsf_enc.c's
+    EncodeQualityFlagsArray(). Vectorized with numpy.
+
+    :param values: array-like of per-beam quality flags, 0-3 (masked to
+        2 bits, matching the C source's implicit truncation).
+    """
+    values = np.asarray(values, dtype=np.uint8) & 0x03
+    pad = (-len(values)) % 4
+    if pad:
+        values = np.concatenate([values, np.zeros(pad, dtype=np.uint8)])
+    shifts = np.array([6, 4, 2, 0], dtype=np.uint8)
+    packed = (values.reshape(-1, 4) << shifts[None, :]).sum(axis=1, dtype=np.uint8)
+    body = packed.astype('>u1').tobytes()
+    header_word = (_SUBRECORD_QUALITY_FLAGS_ARRAY << 24) | len(body)
     return struct.pack('>I', header_word) + body
 
 
@@ -1532,6 +4908,8 @@ def _beam_array_subrecord_id(label):
     """ Resolve a beams dict column label to its ping subrecord id. """
     if label == 'BeamFlags':
         return _SUBRECORD_BEAM_FLAGS_ARRAY
+    if label == 'QualityFlags':
+        return _SUBRECORD_QUALITY_FLAGS_ARRAY
     if label in _LABEL_TO_SUBRECORD_ID:
         return _LABEL_TO_SUBRECORD_ID[label]
     raise KeyError("no known ping array subrecord for beams column %r" % label)
@@ -1579,7 +4957,7 @@ def new_swath_bathymetry_ping_scalars():
 
 
 def _encode_swath_bathymetry_ping(scalars, beams, kmall_specific=None, tx_sectors=None,
-                                   scale_factors=None, major_version=3):
+                                   scale_factors=None, major_version=3, sensor_specific=None):
     """
     Encode a GSF_RECORD_SWATH_BATHYMETRY_PING payload: the fixed-format
     scalar fields, a GSF_SWATH_BATHY_SUBRECORD_SCALE_FACTORS subrecord, one
@@ -1608,8 +4986,8 @@ def _encode_swath_bathymetry_ping(scalars, beams, kmall_specific=None, tx_sector
     :param beams: dict of {column label: array-like}, e.g. {'Depth_m': [...],
         'AcrossTrack_m': [...]}. Every array must have length NumberBeams.
         Only labels resolvable by _beam_array_subrecord_id() (i.e. present
-        in DEFAULT_PING_SCALE_FACTORS/`scale_factors`, or 'BeamFlags') can
-        be encoded.
+        in DEFAULT_PING_SCALE_FACTORS/`scale_factors`, or 'BeamFlags'/
+        'QualityFlags') can be encoded.
     :param kmall_specific: optional dict for the KMALL_SPECIFIC subrecord
         (see new_kmall_specific()/_decode_kmall_specific()'s return);
         `tx_sectors` is its matching list of per-sector dicts (see
@@ -1617,6 +4995,22 @@ def _encode_swath_bathymetry_ping(scalars, beams, kmall_specific=None, tx_sector
     :param scale_factors: optional override of DEFAULT_PING_SCALE_FACTORS;
         same shape (subrecordID -> (multiplier, offset, field_width_bytes,
         signed)).
+    :param sensor_specific: optional (subrecord_id, fields) or
+        (subrecord_id, fields, tables) tuple for any other vendor
+        sensor-specific subrecord registered in _PING_SENSOR_SPECIFIC_CODECS
+        (every one except KMALL_SPECIFIC, which uses
+        `kmall_specific`/`tx_sectors` above instead). `fields` is a flat
+        dict of that family's scalar field names (as returned, minus the
+        "<Family>." prefix, by _decode_swath_bathymetry_ping()); `tables`
+        is an optional dict of {table name: list[dict]} for any nested
+        per-element arrays that family's decoder produces (e.g. EM3's
+        per-head run-time-parameters array) -- omit it (or pass {}) for
+        families with no such arrays. Mutually exclusive with
+        `kmall_specific` only in the sense that subrecord_id must not be
+        156 -- pass both if you genuinely need two sensor-specific
+        subrecords in one ping (unusual, but not disallowed by gsflib).
+    :raises KeyError: `sensor_specific`'s subrecord_id has no encoder
+        registered in _PING_SENSOR_SPECIFIC_CODECS.
     :raises ValueError: PingTime, Longitude_deg, Latitude_deg, or
         NumberBeams is missing or None in `scalars`; or an encoded beam
         value doesn't fit its field width.
@@ -1671,6 +5065,10 @@ def _encode_swath_bathymetry_ping(scalars, beams, kmall_specific=None, tx_sector
             array_subrecords += struct.pack('>I', header_word) + body
             continue
 
+        if label == 'QualityFlags':
+            array_subrecords += _encode_quality_flags_array(values)
+            continue
+
         subrecord_id = _LABEL_TO_SUBRECORD_ID[label]
         multiplier, offset, width, signed = sf_table[subrecord_id]
         used_scale_factors[subrecord_id] = (float(multiplier), float(offset), width << 4)
@@ -1681,6 +5079,14 @@ def _encode_swath_bathymetry_ping(scalars, beams, kmall_specific=None, tx_sector
 
     if kmall_specific is not None:
         out += _encode_kmall_specific(kmall_specific, tx_sectors)
+
+    if sensor_specific is not None:
+        subrecord_id, fields, *rest = sensor_specific
+        sensor_tables = rest[0] if rest else {}
+        if subrecord_id not in _PING_SENSOR_SPECIFIC_CODECS:
+            raise KeyError("no encoder registered for sensor-specific subrecord id %d" % subrecord_id)
+        _family_label, _decode_fn, encode_fn = _PING_SENSOR_SPECIFIC_CODECS[subrecord_id]
+        out += encode_fn(subrecord_id, fields, sensor_tables)
 
     return out
 
@@ -2067,6 +5473,8 @@ class gsf():
                         elif rid == RecordType.GSF_RECORD_SOUND_VELOCITY_PROFILE:
                             decoded = _decode_sound_velocity_profile(payload)
                         elif rid in (RecordType.GSF_RECORD_PROCESSING_PARAMETERS, RecordType.GSF_RECORD_SENSOR_PARAMETERS):
+                            # GSF_RECORD_SENSOR_PARAMETERS: untested against a verified
+                            # GSF file -- no sample data containing that record type.
                             decoded = _decode_name_value_parameters(payload)
                         elif rid == RecordType.GSF_RECORD_COMMENT:
                             decoded = _decode_comment(payload)
@@ -2112,10 +5520,12 @@ class gsf():
         start-range sample index, then every raw sample value in that
         beam's time series.
 
-        Currently only the KMALL (Kongsberg SIS 5 / EM2040-and-newer)
-        sensor-imagery format is decoded; pings from other sensors, or that
-        carry no intensity series subrecord at all, are noted and skipped
-        rather than guessed at.
+        Decoded for every sensor gsflib defines an imagery-specific preamble
+        for (KMALL, EM3-series, EM4-series, Reson 7125/T-series/8100-family,
+        Klein 5410 BSS, R2Sonic) as well as every sensor that has no such
+        preamble at all; pings that carry no intensity series subrecord, or
+        whose bits-per-sample doesn't resolve to a supported sample width,
+        are noted and skipped rather than guessed at.
         """
         if self.FID is None:
             self.OpenFiletoRead()
@@ -2224,8 +5634,16 @@ class gsf():
             _encode_name_value_parameters(param_time, params))
 
     def write_sensor_parameters(self, params, param_time):
-        """ Write a GSF_RECORD_SENSOR_PARAMETERS record. See
-        _encode_name_value_parameters(). """
+        """
+        Write a GSF_RECORD_SENSOR_PARAMETERS record. See
+        _encode_name_value_parameters().
+
+        Untested against a verified GSF file: no sample data containing a
+        GSF_RECORD_SENSOR_PARAMETERS record is available, so the round-trip
+        test for this method (unlike write_processing_parameters(), whose
+        record type does appear in sample data) checks self-consistency
+        only.
+        """
         self.write_record(
             RecordType.GSF_RECORD_SENSOR_PARAMETERS,
             _encode_name_value_parameters(param_time, params))
@@ -2248,21 +5666,104 @@ class gsf():
             _encode_attitude(attitude_time, pitch_deg, roll_deg, heave_m, heading_deg))
 
     def write_swath_bathymetry_ping(self, scalars, beams, kmall_specific=None,
-                                     tx_sectors=None, scale_factors=None):
+                                     tx_sectors=None, scale_factors=None, sensor_specific=None):
         """
         Write a GSF_RECORD_SWATH_BATHYMETRY_PING record. See
         _encode_swath_bathymetry_ping() for the expected shape of
-        `scalars`/`beams`/`kmall_specific`/`tx_sectors`/`scale_factors`.
-        Uses self.gsfVersion (set by write_header(), which must be called
-        first) to decide whether to include the height/SEP/GPS-tide-
-        corrector fields (major_version > 2 -- true for every GSF_VERSION
-        this codebase writes).
+        `scalars`/`beams`/`kmall_specific`/`tx_sectors`/`scale_factors`/
+        `sensor_specific`. Uses self.gsfVersion (set by write_header(),
+        which must be called first) to decide whether to include the
+        height/SEP/GPS-tide-corrector fields (major_version > 2 -- true
+        for every GSF_VERSION this codebase writes).
         """
         major_version = _gsf_major_version(self.gsfVersion)
         self.write_record(
             RecordType.GSF_RECORD_SWATH_BATHYMETRY_PING,
             _encode_swath_bathymetry_ping(
-                scalars, beams, kmall_specific, tx_sectors, scale_factors, major_version))
+                scalars, beams, kmall_specific, tx_sectors, scale_factors, major_version, sensor_specific))
+
+    def write_swath_bathy_summary(self, start_time, end_time,
+                                   min_latitude_deg, min_longitude_deg,
+                                   max_latitude_deg, max_longitude_deg,
+                                   min_depth_m, max_depth_m):
+        """
+        Write a GSF_RECORD_SWATH_BATHY_SUMMARY record. See
+        _encode_swath_bathy_summary().
+
+        Untested against a verified GSF file: no sample data containing a
+        GSF_RECORD_SWATH_BATHY_SUMMARY record is available.
+        """
+        self.write_record(
+            RecordType.GSF_RECORD_SWATH_BATHY_SUMMARY,
+            _encode_swath_bathy_summary(
+                start_time, end_time, min_latitude_deg, min_longitude_deg,
+                max_latitude_deg, max_longitude_deg, min_depth_m, max_depth_m))
+
+    def write_comment(self, comment_time, comment):
+        """
+        Write a GSF_RECORD_COMMENT record. See _encode_comment().
+
+        Untested against a verified GSF file: no sample data containing a
+        GSF_RECORD_COMMENT record is available.
+        """
+        self.write_record(RecordType.GSF_RECORD_COMMENT, _encode_comment(comment_time, comment))
+
+    def write_history(self, history_time, host_name, operator_name, command_line, comment):
+        """
+        Write a GSF_RECORD_HISTORY record. See _encode_history().
+
+        Untested against a verified GSF file: no sample data containing a
+        GSF_RECORD_HISTORY record is available.
+        """
+        self.write_record(
+            RecordType.GSF_RECORD_HISTORY,
+            _encode_history(history_time, host_name, operator_name, command_line, comment))
+
+    def write_navigation_error(self, nav_error_time, record_id, longitude_error_m, latitude_error_m):
+        """
+        Write a GSF_RECORD_NAVIGATION_ERROR record (obsolete; prefer
+        write_hv_navigation_error()). See _encode_navigation_error().
+
+        Untested against a verified GSF file: no sample data containing a
+        GSF_RECORD_NAVIGATION_ERROR record is available.
+        """
+        self.write_record(
+            RecordType.GSF_RECORD_NAVIGATION_ERROR,
+            _encode_navigation_error(nav_error_time, record_id, longitude_error_m, latitude_error_m))
+
+    def write_hv_navigation_error(self, nav_error_time, record_id, horizontal_error_m,
+                                   vertical_error_m, sep_uncertainty_m, position_type=""):
+        """
+        Write a GSF_RECORD_HV_NAVIGATION_ERROR record. See
+        _encode_hv_navigation_error().
+
+        Untested against a verified GSF file: no sample data containing a
+        GSF_RECORD_HV_NAVIGATION_ERROR record is available.
+        """
+        self.write_record(
+            RecordType.GSF_RECORD_HV_NAVIGATION_ERROR,
+            _encode_hv_navigation_error(
+                nav_error_time, record_id, horizontal_error_m, vertical_error_m,
+                sep_uncertainty_m, position_type))
+
+    def write_single_beam_ping(self, ping_time, longitude_deg, latitude_deg, tide_corrector_m,
+                                depth_corrector_m, heading_deg, pitch_deg, roll_deg, heave_m,
+                                depth_m, sound_speed_correction_m, positioning_system_type=0,
+                                sensor_specific=None):
+        """
+        Write a GSF_RECORD_SINGLE_BEAM_PING record. See
+        _encode_single_beam_ping() for the fixed fields and the
+        `sensor_specific` tail-subrecord parameter.
+
+        Untested against a verified GSF file: no sample data containing a
+        GSF_RECORD_SINGLE_BEAM_PING record is available.
+        """
+        self.write_record(
+            RecordType.GSF_RECORD_SINGLE_BEAM_PING,
+            _encode_single_beam_ping(
+                ping_time, longitude_deg, latitude_deg, tide_corrector_m, depth_corrector_m,
+                heading_deg, pitch_deg, roll_deg, heave_m, depth_m,
+                sound_speed_correction_m, positioning_system_type, sensor_specific))
 
 
 ###########################################################
@@ -2308,8 +5809,9 @@ def main(args=None):
                          default=False,
                          help="Print each swath bathymetry ping's per-beam backscatter "
                               "time series (the intensity series subrecord) to stdout as "
-                              "CSV, one row per beam. Currently decoded only for the KMALL "
-                              "(Kongsberg SIS 5) sensor-imagery format.")
+                              "CSV, one row per beam. Decoded for KMALL, EM3-series, "
+                              "EM4-series, Reson 7125/T-series/8100-family, Klein 5410 BSS, "
+                              "R2Sonic, and any other sensor with no imagery-specific preamble.")
     parser.add_argument('-v', action='count', dest='verbose', default=0,
                          help="Increasingly verbose output (e.g. -v -vv), for debugging use -vv")
     parsed = parser.parse_args(args)

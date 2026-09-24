@@ -25,8 +25,10 @@ a Kongsberg `.kmall` → `.gsf` converter built on the write API.
                        record type, e.g. -p COMMENT or -p GSF_RECORD_COMMENT.
       -I               Print each swath bathymetry ping's per-beam backscatter
                        time series (the intensity series subrecord) to stdout as
-                       CSV, one row per beam. Currently decoded only for the KMALL
-                       (Kongsberg SIS 5) sensor-imagery format.
+                       CSV, one row per beam. Decoded for KMALL, EM3-series,
+                       EM4-series, Reson 7125/T-series/8100-family, Klein 5410
+                       BSS, R2Sonic, and any other sensor with no imagery-specific
+                       preamble.
       -v               Increasingly verbose output (e.g. -v -vv), for debugging
                        use -vv
 
@@ -138,12 +140,15 @@ Beam
 ```
 
 Every `GSF_RECORD_*` type has a decoder. Within a ping's subrecord stream,
-the KMALL vendor-specific subrecord (id 156, shown as `KMALL.*` scalars and
-the `TxSectors` table above) is fully field-decoded; every *other* vendor
-sensor-specific subrecord (`EM710_SPECIFIC`, `RESON_8101_SPECIFIC`, ... ~29
-of gsf.h's `GSF_SWATH_BATHY_SUBRECORD_*_SPECIFIC` ids) is at least
-identified by its proper name, but not decoded. gsflib's own optional RLE
-array compression and the 2-bit packed quality-flags array are likewise
+every one of gsf.h's 55 `GSF_SWATH_BATHY_SUBRECORD_*_SPECIFIC` vendor
+sensor-specific subrecord ids (`EM710_SPECIFIC`, `RESON_8101_SPECIFIC`,
+KMALL, EM3-series, Reson 7100/T-series/8100-family, SeaBat, SeaBeam, Klein,
+GeoSwath, DeltaT, R2Sonic, and every other historical format, including the
+obsolete SASS/TypeIII-SeaBeam pair) is fully field-decoded, shown as
+`<Family>.*` scalars (e.g. `KMALL.*`, `EM4.*`) plus any per-element table a
+family produces (e.g. `TxSectors`, `EM4.TxSectors`, `EM3.RunTime`). The
+per-beam quality-flags array (2-bit packed) is likewise fully decoded.
+gsflib's own optional RLE array compression is the one remaining gap, still
 noted rather than decoded. Any record a decoder can't make sense of (corrupt
 data, an unexpected size) falls back to the same raw ASCII rendering
 (non-printable bytes as `.`) used before decoders existed, with a note
@@ -172,8 +177,11 @@ $ gsfu.py -f data/GSF/0268_20240826_052757_EM712.gsf -I
 
 Each row is `Beam,SampleCount,DetectSample,StartRangeSamples,` followed by
 that beam's raw samples -- rows are naturally ragged since sample count
-varies per beam. As with the ping table, only the KMALL sensor-imagery
-format is currently decoded; other sensors are noted and skipped.
+varies per beam. Decoded for every sensor family gsflib defines an
+imagery-specific preamble for (KMALL, EM3-series, EM4-series, Reson
+7125/T-series/8100-family, Klein 5410 BSS, R2Sonic) as well as every sensor
+that has no such preamble at all; only a ping with no intensity series
+subrecord, or an unsupported bits-per-sample encoding, is noted and skipped.
 
 ## Capabilities
 
@@ -197,22 +205,28 @@ decoder, so every one of them can be fully decoded, not just indexed:
 | `GSF_RECORD_HISTORY` | History record. | Yes |
 | `GSF_RECORD_NAVIGATION_ERROR` | Navigation error record. (Obsolete; replaced by `GSF_RECORD_HV_NAVIGATION_ERROR`.) | Yes |
 | `GSF_RECORD_SWATH_BATHY_SUMMARY` | Swath bathymetry summary record. | Yes |
-| `GSF_RECORD_SINGLE_BEAM_PING` | Single beam ping record. | Yes, fixed fields only -- the sensor-specific tail is noted, not decoded |
+| `GSF_RECORD_SINGLE_BEAM_PING` | Single beam ping record. | Yes, including its sensor-specific tail (Echotrac/Bathy2000, MGD77, BDB, NOSHDB) |
 | `GSF_RECORD_HV_NAVIGATION_ERROR` | Horizontal/Vertical navigation error record. | Yes |
 | `GSF_RECORD_ATTITUDE` | Attitude record: one or more time-tagged pitch/roll/heave/heading measurements. | Yes |
 
 \* Within a `SWATH_BATHYMETRY_PING`'s subrecord stream: the standard
 scale-factor-encoded beam arrays (depth, across/along track, travel time,
-beam angle, amplitude, errors, etc.) are decoded and vectorized with numpy;
-the KMALL vendor-specific subrecord (id 156 -- Kongsberg SIS 5 /
-EM2040-and-newer) is fully field-decoded; every *other* vendor
-sensor-specific subrecord (~29 of gsf.h's `GSF_SWATH_BATHY_SUBRECORD_*_SPECIFIC`
-ids -- Reson, SeaBat, EM3-series, Klein, R2Sonic, etc.) is identified by name
-but not decoded; and gsflib's optional RLE array compression, the 2-bit
-packed quality-flags array, and the per-beam backscatter time series
-(decoded separately, and only for KMALL, via `-I`/`print_intensity_series()`)
-are noted rather than decoded. Anything a decoder can't make sense of falls
-back to raw ASCII rendering with a note explaining why.
+beam angle, amplitude, errors, etc.), the beam-flags array, and the 2-bit
+packed quality-flags array are decoded and vectorized with numpy; every one
+of gsf.h's 55 vendor sensor-specific subrecord ids -- KMALL (its own
+bespoke path, shown as `KMALL.*` plus a `TxSectors` table), and every other
+id (EM3-series, EM4-series, Reson 7100/T-series/8100-family, SeaBat,
+SeaBeam, Klein, GeoSwath, DeltaT, R2Sonic, etc., shown as `<Family>.*`
+scalars plus any per-element table, e.g. `EM4.TxSectors`, `EM3.RunTime`) --
+is fully field-decoded. gsflib's own optional RLE array compression is the
+one remaining gap, noted rather than decoded. The per-beam backscatter time
+series (decoded separately via `-I`/`print_intensity_series()`) is decoded
+for KMALL, EM3-series, EM4-series, Reson 7125/T-series/8100-family, Klein
+5410 BSS, R2Sonic, and every other sensor (its imagery-specific preamble,
+if any, is a smaller, distinct block from -- and decoded independently of
+-- the ping-level sensor-specific subrecord noted above). Anything a
+decoder can't make sense of falls back to raw ASCII rendering with a note
+explaining why.
 
 **Writing / encoding** (`gsf.write_*`): the write side is the inverse of the
 decoders above, ported from `gsf_enc.c` (not merely assumed to be decode's
@@ -224,15 +238,25 @@ source):
 |---|---|
 | `gsf.write_header(version=...)` | `GSF_RECORD_HEADER` |
 | `gsf.write_processing_parameters(params, param_time=...)` | `GSF_RECORD_PROCESSING_PARAMETERS` |
-| `gsf.write_sensor_parameters(params, param_time=...)` | `GSF_RECORD_SENSOR_PARAMETERS` |
+| `gsf.write_sensor_parameters(params, param_time=...)` | `GSF_RECORD_SENSOR_PARAMETERS`* |
 | `gsf.write_sound_velocity_profile(...)` | `GSF_RECORD_SOUND_VELOCITY_PROFILE` |
 | `gsf.write_attitude(...)` | `GSF_RECORD_ATTITUDE` |
-| `gsf.write_swath_bathymetry_ping(scalars, beams, kmall_specific=..., tx_sectors=...)` | `GSF_RECORD_SWATH_BATHYMETRY_PING`, including scale factors, the standard beam arrays, and the `KMALL_SPECIFIC` sensor-specific subrecord + its TX sector array |
+| `gsf.write_swath_bathymetry_ping(scalars, beams, kmall_specific=..., tx_sectors=..., sensor_specific=...)` | `GSF_RECORD_SWATH_BATHYMETRY_PING`, including scale factors, the standard beam arrays, the beam-flags and quality-flags arrays, the `KMALL_SPECIFIC` sensor-specific subrecord + its TX sector array (`kmall_specific`/`tx_sectors`), and every other vendor sensor-specific subrecord (`sensor_specific=(subrecord_id, fields[, tables])`, dispatched through `_PING_SENSOR_SPECIFIC_CODECS` -- the same 55-id coverage as decode) |
+| `gsf.write_swath_bathy_summary(...)` | `GSF_RECORD_SWATH_BATHY_SUMMARY`* |
+| `gsf.write_comment(comment_time, comment)` | `GSF_RECORD_COMMENT`* |
+| `gsf.write_history(history_time, host_name, operator_name, command_line, comment)` | `GSF_RECORD_HISTORY`* |
+| `gsf.write_navigation_error(...)` | `GSF_RECORD_NAVIGATION_ERROR`* (obsolete; prefer `write_hv_navigation_error()`) |
+| `gsf.write_hv_navigation_error(...)` | `GSF_RECORD_HV_NAVIGATION_ERROR`* |
+| `gsf.write_single_beam_ping(..., sensor_specific=...)` | `GSF_RECORD_SINGLE_BEAM_PING`*, including its sensor-specific tail (`sensor_specific=(subrecord_id, fields[, tables])`, dispatched through `_SINGLE_BEAM_SENSOR_SPECIFIC_CODECS`) |
 
-`COMMENT`, `HISTORY`, `SWATH_BATHY_SUMMARY`, `SINGLE_BEAM_PING`,
-`NAVIGATION_ERROR`/`HV_NAVIGATION_ERROR`, the per-beam intensity time series
-(subrecord id 21), and every non-KMALL sensor-specific subrecord have no
-encoder yet. The `scalars`/`beams` dict shapes accepted by `write_*` match
+\* Untested against a verified GSF file: none of the sample data checked
+into this repo carries this record type (or, for the non-KMALL
+`sensor_specific` subrecords above, this particular vendor's sensor-specific
+subrecord), so these encoders are only verified by round-tripping through
+this library's own decoders -- see each method's docstring.
+
+The per-beam intensity time series (subrecord id 21) has no encoder yet
+(only decode). The `scalars`/`beams` dict shapes accepted by `write_*` match
 what the corresponding `_decode_*` function returns, so a record decoded
 with `-p` can be re-encoded with only the field names already familiar from
 that output. Rather than writing `scalars`/`kmall_specific`/a `tx_sectors`
@@ -274,8 +298,9 @@ Known simplifications (see the module docstring for the full list and
 reasoning): `TideCorrector_m`/`DepthCorrector_m` and `Course_deg`/`Speed_kn`
 are always written as `0.0` (MRZ carries none of these), `CenterBeam` is
 approximated as `NumberBeams // 2` (MRZ has no explicit center-beam field),
-and the per-beam backscatter time series and `BEAM_FLAGS_ARRAY` are not
-written (no encoder for either yet).
+and the per-beam backscatter time series is not written (no encoder yet --
+`BEAM_FLAGS_ARRAY`/`QUALITY_FLAGS_ARRAY` do have encoders, but `kmall2gsf.py`
+doesn't populate either, since `#MRZ` carries no per-beam flag equivalent).
 
 ## Testing
 
