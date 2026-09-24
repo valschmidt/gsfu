@@ -344,6 +344,56 @@ surface). With `auto_scale=True`:
    reprocessing -- until a ping's data eventually falls outside that range,
    at which point the whole process repeats.
 
+### Bugs found in the reference gsflib C library
+
+Porting `gsf_dec.c`/`gsf_enc.c` field-by-field surfaced a handful of real defects
+in the reference library itself (checked against the GSF v3.11 source, not
+assumed). This codebase does not replicate them; each is called out in the
+relevant function's docstring, and summarized here:
+
+- **`gsfEncodeNavigationError()` has a rounding bug for negative values.** It
+  rounds both fields with an unconditional `+ 0.501` and no sign check, instead
+  of the sign-aware `+/-0.501` convention used everywhere else in `gsf_enc.c`.
+  For a negative error value this systematically rounds toward zero instead of
+  to the nearest representable value -- e.g. a longitude error of -1.29m
+  encodes, via the reference's own formula, to -12 (in 1/10m units) rather than
+  the correctly-rounded -13. `_encode_navigation_error()` uses this module's
+  standard sign-correct `_gsf_round()` instead.
+- **`DecodeReson7100Specific()` (the Reson 7125 decoder) misreads
+  `tx_pulse_reserved`.** It reads that field from a stale `stemp` -- a leftover
+  2-byte local variable from an earlier field -- instead of the 4-byte `ltemp`
+  it had just loaded for this field. Byte-position tracking is unaffected (the
+  pointer still advances the correct 4 bytes), only the decoded *value* for
+  this one field is wrong. Low real-world impact, since the field is documented
+  as reserved/unused, but `_decode_reson7125_specific()` decodes the actual
+  wire bytes rather than replicating the misread.
+- **`gsfEncodeEM3Specific()` can never write a second (EM3000D dual-head)
+  run-time block.** It hardcodes `run_time_id = 1` unconditionally; the code
+  path that would set bit 1 to include a second head's run-time parameters is
+  present in the source but entirely commented out -- dead code, a real
+  limitation of gsflib as currently shipped, not a deliberate design choice
+  (the wire format and `DecodeEM3Specific()` both fully support it).
+  `_encode_em3_specific()` writes whatever the caller actually supplies (zero,
+  one, or two heads).
+
+Separately, a number of C encoder functions (`EncodeSeaBat8101Specific`,
+`EncodeReson7100Specific`, `EncodeResonTSeriesSpecific`,
+`EncodeGeoSwathPlusSpecific`, `EncodeR2SonicSpecific`, and the run-time/PU-status
+field writes shared by `EncodeEM4Specific`/`EncodeEM3RawSpecific`/
+`EncodeEM3Specific`) round some fields with a plain truncating cast -- no
+rounding offset at all, unlike every other scaled field in the same function,
+which do round. This introduces a small, one-directional bias (always toward
+zero) rather than rounding to the nearest representable value. It's minor
+enough that it's unlikely to matter in practice (the affected fields are all
+non-negative in normal use, and the bias is at most a fraction of one
+quantization step) -- but rather than replicate it field-by-field, every
+encoder in this module rounds every scaled field with the same, consistent,
+correctly-rounding `_gsf_round()`. `gsfEncodeHVNavigationError()` similarly
+rounds `vertical_error` with a plain `+/- 0.5` instead of the `+/- 0.501` used
+for `horizontal_error` right next to it in the same function -- functionally
+identical to `_gsf_round()` except exactly on a 0.5 fractional boundary, so
+treated the same way for consistency.
+
 ## `.kmall` → `.gsf` conversion (`kmall2gsf.py`)
 
 `GSFU/kmall2gsf.py` converts a Kongsberg `.kmall` file to `.gsf`, reading the
