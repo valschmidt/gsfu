@@ -132,6 +132,9 @@ from GSFU.gsfu import (
     _encode_swath_bathymetry_ping,
     _gsf_epoch,
     _gsf_round,
+    _pick_ping_scale_factor,
+    _scale_factor_fits,
+    _solve_scale_factor,
     gsf,
     gsf_checksum,
     new_kmall_specific,
@@ -615,6 +618,137 @@ class TestEncodePingArray:
         word, = struct.unpack_from('>I', payload, 0)
         assert (word >> 24) & 0xFF == 7
         assert word & 0xFFFFFF == 3  # 3 beams * 1 byte
+
+
+# ---------------------------------------------------------------------------
+# _scale_factor_fits / _solve_scale_factor / _pick_ping_scale_factor
+# (the auto_scale=True beam-array scale-factor picker)
+# ---------------------------------------------------------------------------
+
+class TestScaleFactorFits:
+    def test_fits_within_range(self):
+        assert _scale_factor_fits(0.0, 10.0, multiplier=100.0, offset=0.0, width=2, signed=False)
+
+    def test_rejects_overflow(self):
+        # 1-byte unsigned field: max representable is 255.
+        assert not _scale_factor_fits(0.0, 300.0, multiplier=1.0, offset=0.0, width=1, signed=False)
+
+    def test_rejects_negative_min_on_unsigned_with_zero_offset(self):
+        assert not _scale_factor_fits(-1.0, 10.0, multiplier=100.0, offset=0.0, width=2, signed=False)
+
+    def test_accepts_negative_min_once_offset_compensates(self):
+        assert _scale_factor_fits(-1.0, 10.0, multiplier=100.0, offset=2.0, width=2, signed=False)
+
+
+class TestSolveScaleFactor:
+    def test_easy_case_matches_target_multiplier_and_zero_offset(self):
+        # A small, non-negative range comfortably fits a 4-byte unsigned
+        # field at the target precision, so no shrinking or shifting is
+        # needed -- this should reproduce today's static-default shape
+        # (target multiplier, offset=0.0).
+        multiplier, offset = _solve_scale_factor(
+            min_v=0.0, max_v=45.2, width=4, signed=False, target_multiplier=1000.0)
+        assert multiplier == 1000.0
+        assert offset == 0.0
+
+    def test_shrinks_multiplier_when_span_does_not_fit_target_precision(self):
+        # 1-byte unsigned field (0..255) can't hold a 0..100 range at
+        # 100x (that would need up to 10000). The solved multiplier must
+        # still cover the (unpadded) input range.
+        multiplier, offset = _solve_scale_factor(
+            min_v=0.0, max_v=100.0, width=1, signed=False, target_multiplier=100.0)
+        assert _scale_factor_fits(0.0, 100.0, multiplier, offset, width=1, signed=False)
+        assert multiplier < 100.0
+
+    def test_negative_value_shifts_offset_worked_example(self):
+        # The depth-near-the-surface example from the design discussion:
+        # a few beams read slightly negative near the surface, most of
+        # the ping is a normal positive depth. offset should shift just
+        # enough (given the padding) to keep the padded minimum
+        # non-negative once scaled, and full target precision should be
+        # retained since a 4-byte unsigned field has ample headroom.
+        multiplier, offset = _solve_scale_factor(
+            min_v=-0.03, max_v=45.2, width=4, signed=False, target_multiplier=1000.0, pad=11.3075)
+        assert multiplier == 1000.0
+        assert offset == 12.0
+        assert _scale_factor_fits(-0.03, 45.2, multiplier, offset, width=4, signed=False)
+
+    def test_multiplier_and_offset_are_always_whole_numbers(self):
+        # Regression guard for the rounding-mismatch trap: _encode_ping_array
+        # scales beam values with the exact multiplier/offset it's given,
+        # while _encode_scale_factors independently rounds multiplier/offset
+        # to whole numbers when writing the on-disk SCALE_FACTORS
+        # subrecord. If this function ever returned a fractional
+        # multiplier or offset, the beam values and the on-disk scale
+        # table a reader uses to undo them would silently disagree.
+        multiplier, offset = _solve_scale_factor(
+            min_v=-3.7, max_v=123.456, width=2, signed=False, target_multiplier=137.0)
+        assert multiplier == int(multiplier)
+        assert offset == int(offset)
+
+    def test_constant_array_does_not_crash(self):
+        multiplier, offset = _solve_scale_factor(
+            min_v=5.0, max_v=5.0, width=2, signed=False, target_multiplier=100.0)
+        assert _scale_factor_fits(5.0, 5.0, multiplier, offset, width=2, signed=False)
+
+
+class TestPickPingScaleFactor:
+    def test_first_call_with_no_current_solves_fresh(self):
+        multiplier, offset = _pick_ping_scale_factor(
+            [10.0, 20.0, 30.0], current=None, width=4, signed=False, target_multiplier=1000.0)
+        assert (multiplier, offset) == (1000.0, 0.0)
+
+    def test_unchanged_when_current_still_fits(self):
+        current = (1000.0, 0.0)
+        result = _pick_ping_scale_factor(
+            [10.0, 20.0, 30.0], current=current, width=4, signed=False, target_multiplier=1000.0)
+        # Returned exactly as given, not merely equal -- confirms the
+        # fast path was taken and no solve happened.
+        assert result is current
+
+    def test_recomputes_when_current_no_longer_fits(self):
+        # current=(2.0, 0.0) on a 2-byte unsigned field (max raw 65535,
+        # so max engineering value 32767.5) can't represent a ping
+        # ranging up to 40000 at that multiplier; a fresh solve should
+        # shrink the multiplier to cover it.
+        current = (2.0, 0.0)
+        multiplier, offset = _pick_ping_scale_factor(
+            [0.0, 40000.0], current=current, width=2, signed=False, target_multiplier=2.0)
+        assert (multiplier, offset) != current
+        assert _scale_factor_fits(0.0, 40000.0, multiplier, offset, width=2, signed=False)
+
+    def test_genuinely_unrepresentable_data_defers_to_encode_ping_arrays_own_check(self):
+        # A span of 300 engineering units can never fit a 1-byte field
+        # (256 representable raw values), since GSF's multiplier must be
+        # a whole number >= 1 -- there is no offset that fixes this. In
+        # that situation this function is not expected to succeed; it's
+        # expected to fail *safely*, by returning something
+        # _encode_ping_array()'s own out-of-range check will catch and
+        # reject, rather than silently truncating/corrupting the data.
+        multiplier, offset = _pick_ping_scale_factor(
+            [0.0, 300.0], current=(1.0, 0.0), width=1, signed=False, target_multiplier=1.0)
+        with pytest.raises(ValueError):
+            _encode_ping_array(1, [0.0, 300.0], multiplier=multiplier, offset=offset, signed=False, width=1)
+
+    def test_padding_overshoot_falls_back_to_unpadded_exact_fit(self):
+        # Near-capacity 1-byte unsigned field: the actual data (0..250)
+        # fits at multiplier=1/offset=0, but padding by 25%/20 steps
+        # would push the padded solve past 255 -- must fall back to an
+        # exact fit rather than fail.
+        multiplier, offset = _pick_ping_scale_factor(
+            [0.0, 250.0], current=None, width=1, signed=False, target_multiplier=1.0)
+        assert _scale_factor_fits(0.0, 250.0, multiplier, offset, width=1, signed=False)
+
+    def test_all_nonfinite_values_falls_back_to_current(self):
+        current = (1000.0, 0.0)
+        result = _pick_ping_scale_factor(
+            [float('nan'), float('inf')], current=current, width=4, signed=False, target_multiplier=1000.0)
+        assert result == current
+
+    def test_all_nonfinite_values_with_no_current_falls_back_to_target(self):
+        result = _pick_ping_scale_factor(
+            [float('nan')], current=None, width=4, signed=False, target_multiplier=1000.0)
+        assert result == (1000.0, 0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -2293,3 +2427,153 @@ class TestGsfWriteMethods:
         assert "test comment" in captured.out
         assert "test history" in captured.out
 
+
+# ---------------------------------------------------------------------------
+# write_swath_bathymetry_ping(auto_scale=True)
+# ---------------------------------------------------------------------------
+
+class TestAutoScaleWriteSwathBathymetryPing:
+    """
+    Integration tests for the auto_scale=True path of
+    write_swath_bathymetry_ping(), which resolves each beam array's scale
+    factor via _pick_ping_scale_factor() instead of the static
+    DEFAULT_PING_SCALE_FACTORS table. These exercise the feature through a
+    real gsf instance writing to a real temp file, since the hysteresis
+    behavior (a scale factor staying stable across multiple pings) is a
+    property of state carried on the gsf instance across calls, not
+    something the pure _encode_swath_bathymetry_ping()/_pick_ping_scale_factor()
+    unit tests above can observe on their own.
+    """
+
+    @staticmethod
+    def _scale_factors_subrecord_at(G, ping_index=0):
+        """
+        Re-open `G`'s file fresh, seek to the ping_index'th
+        SWATH_BATHYMETRY_PING record, and return its decoded
+        SCALE_FACTORS table ({subrecordID: (multiplier, offset,
+        compressionFlag)}). _decode_swath_bathymetry_ping() populates the
+        `scale_factors` dict it's given in place (clear() then update()),
+        so passing a fresh {} and reading it back out afterwards is the
+        way to recover the table it decoded.
+        """
+        G2 = gsf(G.filename)
+        G2.index_file()
+        ping_offsets = G2.Index.loc[
+            G2.Index['RecordType'] == 'GSF_RECORD_SWATH_BATHYMETRY_PING', 'ByteOffset']
+        offset = int(ping_offsets.iloc[ping_index])
+        G2.FID.seek(offset)
+        dataSize, _readSize, _data_id = G2.read_record_header()
+        payload = G2.FID.read(dataSize)
+        table = {}
+        _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors=table)
+        return table
+
+    def test_auto_scale_off_by_default_matches_static_behavior(self, tmp_path):
+        path = tmp_path / "out.gsf"
+        G = gsf(str(path))
+        G.write_header()
+        G.write_swath_bathymetry_ping(
+            {'PingTime': 1700000000.0, 'Longitude_deg': 0.0, 'Latitude_deg': 0.0, 'NumberBeams': 2},
+            {'Depth_m': [10.0, 10.5]})
+        G.closeFile()
+
+        table = self._scale_factors_subrecord_at(G)
+        assert table[1][:2] == DEFAULT_PING_SCALE_FACTORS[1][:2]  # (multiplier, offset)
+
+    def test_auto_scale_reuses_scale_factor_across_pings_when_it_still_fits(self, tmp_path):
+        path = tmp_path / "out.gsf"
+        G = gsf(str(path), auto_scale=True)
+        G.write_header()
+        for depths in ([10.0, 10.5], [10.1, 10.4], [9.9, 10.6]):
+            G.write_swath_bathymetry_ping(
+                {'PingTime': 1700000000.0, 'Longitude_deg': 0.0, 'Latitude_deg': 0.0,
+                 'NumberBeams': len(depths)},
+                {'Depth_m': depths})
+        G.closeFile()
+
+        tables = [self._scale_factors_subrecord_at(G, i) for i in range(3)]
+        multipliers_and_offsets = [t[1][:2] for t in tables]
+        assert multipliers_and_offsets[0] == multipliers_and_offsets[1] == multipliers_and_offsets[2]
+
+    def test_auto_scale_changes_then_holds(self, tmp_path):
+        path = tmp_path / "out.gsf"
+        G = gsf(str(path), auto_scale=True)
+        G.write_header()
+        # ping1: a shallow, narrow range.
+        G.write_swath_bathymetry_ping(
+            {'PingTime': 1700000000.0, 'Longitude_deg': 0.0, 'Latitude_deg': 0.0, 'NumberBeams': 2},
+            {'Depth_m': [10.0, 10.5]})
+        # ping2: a much deeper range that forces a rescale (a positive
+        # offset that only made sense for the shallow ping no longer
+        # applies at these depths -- and even without an offset
+        # involved, DEFAULT_PING_SCALE_FACTORS's 1mm/4-byte depth
+        # settings have enough headroom that a genuinely forced rescale
+        # needs an intentionally awkward range like this one).
+        G.write_swath_bathymetry_ping(
+            {'PingTime': 1700000000.0, 'Longitude_deg': 0.0, 'Latitude_deg': 0.0, 'NumberBeams': 2},
+            {'Depth_m': [-2.0, 500.0]})
+        # ping3: similar to ping2, should reuse ping2's scale factor.
+        G.write_swath_bathymetry_ping(
+            {'PingTime': 1700000000.0, 'Longitude_deg': 0.0, 'Latitude_deg': 0.0, 'NumberBeams': 2},
+            {'Depth_m': [-1.5, 495.0]})
+        G.closeFile()
+
+        tables = [self._scale_factors_subrecord_at(G, i) for i in range(3)]
+        mo = [t[1][:2] for t in tables]
+        assert mo[0] != mo[1]
+        assert mo[1] == mo[2]
+
+    def test_auto_scale_round_trips_values_correctly(self, tmp_path):
+        path = tmp_path / "out.gsf"
+        G = gsf(str(path), auto_scale=True)
+        G.write_header()
+        depths = [-0.03, 10.0, 45.2]
+        G.write_swath_bathymetry_ping(
+            {'PingTime': 1700000000.0, 'Longitude_deg': 0.0, 'Latitude_deg': 0.0, 'NumberBeams': len(depths)},
+            {'Depth_m': depths})
+        G.closeFile()
+
+        G2 = gsf(str(path))
+        G2.index_file()
+        offset = int(G2.Index.loc[G2.Index['RecordType'] == 'GSF_RECORD_SWATH_BATHYMETRY_PING', 'ByteOffset'].iloc[0])
+        G2.FID.seek(offset)
+        dataSize, _readSize, _data_id = G2.read_record_header()
+        payload = G2.FID.read(dataSize)
+        _scalars, tables, _notes = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
+        assert list(tables['Beams']['Depth_m']) == pytest.approx(depths, abs=0.001)
+
+    def test_auto_scale_and_explicit_scale_factors_mutually_exclusive(self, tmp_path):
+        path = tmp_path / "out.gsf"
+        G = gsf(str(path), auto_scale=True)
+        G.write_header()
+        with pytest.raises(ValueError):
+            G.write_swath_bathymetry_ping(
+                {'PingTime': 1700000000.0, 'Longitude_deg': 0.0, 'Latitude_deg': 0.0, 'NumberBeams': 1},
+                {'Depth_m': [10.0]},
+                scale_factors={1: (1000.0, 0.0, 4, False)})
+
+    def test_auto_scale_per_call_override(self, tmp_path):
+        # auto_scale=False on this instance; a single call opts in via
+        # the per-call override without changing the instance default.
+        path = tmp_path / "out.gsf"
+        G = gsf(str(path))
+        assert G.auto_scale is False
+        G.write_header()
+        G.write_swath_bathymetry_ping(
+            {'PingTime': 1700000000.0, 'Longitude_deg': 0.0, 'Latitude_deg': 0.0, 'NumberBeams': 1},
+            {'Depth_m': [10.0]}, auto_scale=True)
+        G.closeFile()
+        assert 1 in G._auto_scale_factors
+
+    def test_auto_scale_state_is_per_subrecord_independent(self, tmp_path):
+        path = tmp_path / "out.gsf"
+        G = gsf(str(path), auto_scale=True)
+        G.write_header()
+        G.write_swath_bathymetry_ping(
+            {'PingTime': 1700000000.0, 'Longitude_deg': 0.0, 'Latitude_deg': 0.0, 'NumberBeams': 2},
+            {'Depth_m': [10.0, 10.5], 'AcrossTrack_m': [-5.0, 5.0]})
+        G.closeFile()
+
+        assert 1 in G._auto_scale_factors      # Depth_m
+        assert 2 in G._auto_scale_factors      # AcrossTrack_m
+        assert G._auto_scale_factors[1] != G._auto_scale_factors[2]

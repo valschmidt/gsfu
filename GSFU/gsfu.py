@@ -4338,6 +4338,15 @@ _ENCODE_DTYPE_RANGE = {
 #: kmall2gsf design discussion); the remaining, rarer arrays use the
 #: unconditional (non-field-size-switchable) width gsf_dec.c's decode
 #: switch requires for that subrecord, with multiplier=1, offset=0.
+#:
+#: This table has a second role when a gsf instance is writing with
+#: auto_scale=True (see write_swath_bathymetry_ping()/
+#: _pick_ping_scale_factor()): its multiplier for a given subrecordID is
+#: then read as a *ceiling* -- the finest precision to use if the ping's
+#: actual data fits, not the precision that will always be used. The
+#: offset and field width columns keep their usual meaning either way;
+#: only offset=0.0 here is ever overridden (auto_scale computes its own
+#: offset from the ping's actual min/max instead).
 DEFAULT_PING_SCALE_FACTORS = {
     1: (1000.0, 0.0, 4, False),      # Depth_m
     14: (1000.0, 0.0, 4, False),     # NominalDepth_m
@@ -4688,6 +4697,227 @@ def _encode_ping_array(subrecord_id, values, multiplier, offset, signed, width):
     body = raw.astype(_ENCODE_DTYPE[(width, signed)]).tobytes()
     header_word = ((subrecord_id & 0xFF) << 24) | len(body)
     return struct.pack('>I', header_word) + body
+
+
+#: Auto-scale hysteresis constants used by _pick_ping_scale_factor() below.
+#: When a ping's data no longer fits the currently active scale factor and
+#: a new one has to be solved for, the target value range is padded
+#: outward before solving, so that a slightly different next ping is
+#: unlikely to immediately force yet another change. The padding is
+#: whichever is larger of: a fraction of the observed value range for
+#: this ping (_AUTO_SCALE_MARGIN_FRACTION), or a fixed number of steps at
+#: the field's target precision (_AUTO_SCALE_MIN_MARGIN_STEPS) -- the
+#: latter matters when the observed range is tiny or zero (e.g. a dead
+#: flat seafloor, or calm heave), where a fraction of it would pad by
+#: almost nothing and every ping's ordinary noise would trigger a new
+#: solve.
+_AUTO_SCALE_MARGIN_FRACTION = 0.25
+_AUTO_SCALE_MIN_MARGIN_STEPS = 20.0
+
+
+def _scale_factor_fits(min_v, max_v, multiplier, offset, width, signed):
+    """
+    Report whether a given (multiplier, offset) pair would let
+    _encode_ping_array() represent both min_v and max_v -- the smallest
+    and largest values in some beam array -- within the integer range of
+    a field of the given width (in bytes) and signedness, without
+    raising its own out-of-range ValueError.
+
+    This reuses _gsf_round(), the exact rounding convention
+    _encode_ping_array() itself applies to every scaled value, so a
+    "yes" from this function is guaranteed to agree with what the real
+    encoder would actually do -- there is no separate, approximate copy
+    of the rounding rule here that could drift out of sync with it.
+
+    :param min_v, max_v: the smallest and largest engineering-unit
+        values that need to be representable.
+    :param multiplier, offset: the candidate scale factor being tested;
+        the same values _encode_ping_array() would use to compute
+        raw = round((value + offset) * multiplier) for every beam.
+    :param width: field width in bytes (1, 2, or 4).
+    :param signed: whether the on-disk integer field is signed.
+    :return: True if both min_v and max_v round to a value inside the
+        field's representable integer range, False otherwise.
+    """
+    lo, hi = _ENCODE_DTYPE_RANGE[(width, signed)]
+    return lo <= _gsf_round((min_v + offset) * multiplier) <= hi and \
+        lo <= _gsf_round((max_v + offset) * multiplier) <= hi
+
+
+def _solve_scale_factor(min_v, max_v, width, signed, target_multiplier, pad=0.0):
+    """
+    Compute a single (multiplier, offset) pair that represents the range
+    [min_v - pad, max_v + pad] as precisely as possible within a field
+    of the given width and signedness, preferring target_multiplier
+    (the ideal/ceiling precision for this field, e.g. 1000.0 for 1mm
+    depth resolution) and preferring offset=0.0 whenever the data
+    doesn't actually require a shift.
+
+    Both multiplier and offset are always returned as whole numbers
+    (just represented as Python floats). This matters for a reason
+    that isn't obvious from the arithmetic alone: _encode_ping_array()
+    scales beam values using the *exact* multiplier/offset it is given,
+    but _encode_scale_factors() -- which writes the on-disk
+    SCALE_FACTORS subrecord a reader will use to undo that scaling --
+    separately rounds multiplier/offset to whole numbers before writing
+    them. If this function ever handed back a non-whole-number multiplier
+    or offset, the beam values written to the file and the scale factor
+    a reader later divides by would silently disagree. Rounding to whole
+    numbers here, up front, is what keeps the two in agreement.
+
+    :param min_v, max_v: the value range (already padded by the caller
+        if any hysteresis headroom is wanted; this function does not
+        apply any padding of its own beyond the `pad` argument).
+    :param width: field width in bytes (1, 2, or 4).
+    :param signed: whether the on-disk integer field is signed.
+    :param target_multiplier: the ideal/ceiling precision to use if the
+        padded range fits at that precision.
+    :param pad: an amount to subtract from min_v and add to max_v before
+        solving, giving the result some headroom beyond the exact
+        [min_v, max_v] range. Pass 0.0 for an exact, unpadded fit.
+    :return: (multiplier, offset), both whole numbers, guaranteed (by
+        construction, not merely by luck) to satisfy
+        _scale_factor_fits(min_v, max_v, multiplier, offset, width, signed)
+        for the padded range -- see the step-by-step comments below for
+        why that guarantee holds.
+    """
+    lo, hi = _ENCODE_DTYPE_RANGE[(width, signed)]
+    pmin, pmax = min_v - pad, max_v + pad
+    pspan = pmax - pmin
+
+    # Step 1: choose the multiplier. Start from the ideal/target
+    # precision and only reduce it if the padded value range would not
+    # fit the field at that precision -- i.e. shrink precision only as
+    # far as forced to, never further. (hi - lo) / pspan is the largest
+    # multiplier that would make the padded span exactly reach from lo
+    # to hi; capping target_multiplier at that value guarantees the
+    # padded range fits. floor to a whole number via int() -- safe to
+    # use plain truncation here (rather than a true floor function)
+    # because multiplier is always positive at this point, so truncating
+    # toward zero and flooring are the same operation. Clamp at 1, the
+    # coarsest a GSF multiplier can ever be.
+    if pspan <= 0:
+        multiplier = target_multiplier
+    else:
+        multiplier = min(target_multiplier, (hi - lo) / pspan)
+    multiplier = float(max(1, int(multiplier)))
+
+    # Step 2: with that multiplier fixed, work out which offsets would
+    # keep both padded endpoints inside [lo, hi]. off_lo is the smallest
+    # offset that keeps pmin from rounding below lo; off_hi is the
+    # largest offset that keeps pmax from rounding above hi. Because
+    # multiplier was capped in step 1 specifically so that the padded
+    # span fits inside (hi - lo), this interval [off_lo, off_hi] is
+    # mathematically guaranteed to be non-empty (off_lo <= off_hi) --
+    # there is always at least one valid offset to choose from.
+    off_lo = lo / multiplier - pmin
+    off_hi = hi / multiplier - pmax
+
+    # Step 3: pick a whole-number offset from [off_lo, off_hi]. Prefer
+    # 0.0 when it's already inside that interval -- this is what makes
+    # the common case (data doesn't need any DC shift at all) come out
+    # identical to today's static defaults, which always use offset=0.
+    # Otherwise, take whichever end of the interval is closest to zero,
+    # rounded *away from* the interval (ceiling the low end, flooring
+    # the high end) rather than toward it, so the chosen whole number is
+    # guaranteed to still land inside [off_lo, off_hi] and not just
+    # near it.
+    if off_lo <= 0.0 <= off_hi:
+        offset = 0.0
+    elif off_lo > 0.0:
+        offset = float(np.ceil(off_lo))
+    else:
+        offset = float(np.floor(off_hi))
+    return multiplier, offset
+
+
+def _pick_ping_scale_factor(values, current, width, signed, target_multiplier,
+                             margin_fraction=_AUTO_SCALE_MARGIN_FRACTION,
+                             min_margin_steps=_AUTO_SCALE_MIN_MARGIN_STEPS):
+    """
+    Choose the (multiplier, offset) to use for one ping's beam array,
+    reusing the scale factor already active for this subrecordID
+    whenever it still works, and only solving for a new one when it
+    doesn't. This is the entry point write_swath_bathymetry_ping() calls
+    once per beam-array label when writing with auto_scale=True.
+
+    The design goal is that this function is cheap to call on every
+    single ping: it does exactly one vectorized pass over `values` (a
+    numpy min/max reduction) to find this ping's value range, then does
+    a handful of scalar comparisons -- there is no per-beam Python loop,
+    and in the common case (the currently active scale factor already
+    covers this ping) no further arithmetic happens at all.
+
+    :param values: this ping's beam array, in engineering units (e.g.
+        depth in meters). Non-finite values (NaN/Inf) are ignored when
+        finding the value range, since GSF has no on-disk representation
+        for "not a number" in a beam array; if every value is
+        non-finite, the currently active scale factor (or, failing
+        that, (target_multiplier, 0.0)) is returned unchanged, since
+        there is nothing to fit.
+    :param current: the (multiplier, offset) currently active for this
+        subrecordID, as previously returned by this function, or None
+        if this is the first ping this subrecordID has been seen in for
+        this file.
+    :param width: field width in bytes (1, 2, or 4).
+    :param signed: whether the on-disk integer field is signed.
+    :param target_multiplier: the ideal/ceiling precision for this
+        field (see DEFAULT_PING_SCALE_FACTORS's docstring note on its
+        dual role in auto_scale mode).
+    :param margin_fraction, min_margin_steps: see the module-level
+        _AUTO_SCALE_MARGIN_FRACTION/_AUTO_SCALE_MIN_MARGIN_STEPS
+        constants' docstring for what these control.
+    :return: (multiplier, offset) to use for this ping -- either `current`
+        unchanged, or a freshly solved pair.
+    """
+    # Step 1: find this ping's actual value range. This is the only pass
+    # over the per-beam data; everything below is scalar arithmetic on
+    # just these two numbers, however many beams the ping has.
+    values = np.asarray(values, dtype=np.float64)
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        return current if current is not None else (target_multiplier, 0.0)
+    min_v, max_v = float(values.min()), float(values.max())
+
+    # Step 2 -- the fast path, and the common case in practice: if the
+    # scale factor already active for this subrecordID still covers
+    # this ping's range, keep using it, unchanged. No new SCALE_FACTORS
+    # values get computed, and (from the caller's side) nothing about
+    # this subrecordID's on-disk scale factor changes between pings.
+    # This is what "the scale factors don't need to change with every
+    # ping" means in practice.
+    if current is not None and _scale_factor_fits(min_v, max_v, current[0], current[1], width, signed):
+        return current
+
+    # Step 3: the current scale factor -- or the lack of one, on the
+    # first ping this subrecordID has been seen in -- doesn't cover this
+    # ping's range. A new one is genuinely needed. Rather than solving
+    # for the tightest possible fit to just this ping's exact range
+    # (which the very next, slightly different ping might again exceed,
+    # forcing another change immediately), pad the target range outward
+    # first and solve for that. This padding is the hysteresis: it
+    # trades a small amount of precision headroom for scale-factor
+    # stability across pings, the same trade gsflib's own depth-offset
+    # auto function makes with its 100m "layers," but computed directly
+    # from the observed data instead of a fixed, depth-specific size.
+    span = max_v - min_v
+    pad = max(margin_fraction * span, min_margin_steps / target_multiplier)
+    multiplier, offset = _solve_scale_factor(min_v, max_v, width, signed, target_multiplier, pad)
+
+    # Step 4: the padding above is a nice-to-have for stability, never
+    # allowed to make representable data unrepresentable. In the rare
+    # case where a field is already near its capacity, padding outward
+    # can push the solve past what the field can hold even though the
+    # ping's actual (unpadded) data would fit fine -- so if that
+    # happens, retry with an exact, unpadded fit. If even that doesn't
+    # fit, this field genuinely cannot represent this ping's data at
+    # its declared width; rather than trying to paper over that here,
+    # return the best attempt and let _encode_ping_array()'s own
+    # ValueError be the one place that error is ever raised, exactly as
+    # it already is today for the static, non-auto-scaled path.
+    if not _scale_factor_fits(min_v, max_v, multiplier, offset, width, signed):
+        multiplier, offset = _solve_scale_factor(min_v, max_v, width, signed, target_multiplier, pad=0.0)
+    return multiplier, offset
 
 
 def _encode_quality_flags_array(values):
@@ -5139,7 +5369,27 @@ class gsf():
     built on Python's ``struct`` module, plus a pandas-based file index.
     """
 
-    def __init__(self, filename=None):
+    def __init__(self, filename=None, auto_scale=False):
+        """
+        Create a gsf object bound to `filename`, but don't open it yet --
+        open_read()/OpenFiletoRead() or the various write_* methods do
+        that on first use.
+
+        :param filename: path to the GSF file this object will read from
+            or write to.
+        :param auto_scale: default value of the `auto_scale` parameter on
+            write_swath_bathymetry_ping() for every call made through
+            this instance, unless a given call overrides it explicitly.
+            When True, write_swath_bathymetry_ping() picks each beam
+            array's scale factor (multiplier, offset) automatically from
+            that ping's actual data, reusing the previous ping's scale
+            factor whenever it still fits rather than recomputing it
+            every time -- see _pick_ping_scale_factor()'s docstring for
+            the full algorithm, and the README's "Scale factors" section
+            for a worked example. Defaults to False, i.e. writing keeps
+            using DEFAULT_PING_SCALE_FACTORS statically unless a caller
+            opts in.
+        """
         self.verbose = 0
         self.filename = filename
         self.FID = None
@@ -5149,6 +5399,17 @@ class gsf():
         #: GSF version string read from the file's GSF_RECORD_HEADER record
         #: (e.g. "GSF-v03.09"), set by index_file().
         self.gsfVersion = None
+
+        #: Default for write_swath_bathymetry_ping()'s auto_scale parameter.
+        self.auto_scale = auto_scale
+        #: subrecordID -> the (multiplier, offset) currently active for
+        #: that beam array, as chosen by _pick_ping_scale_factor(). Only
+        #: populated/consulted when writing with auto_scale=True; carries
+        #: forward from one write_swath_bathymetry_ping() call to the
+        #: next on this same instance, which is what lets a scale factor
+        #: stay stable across pings instead of being recomputed for each
+        #: one.
+        self._auto_scale_factors = {}
 
     ###########################################################
     # File open/close utilities (mirrors kmall.py's OpenFiletoRead/closeFile)
@@ -5666,7 +5927,8 @@ class gsf():
             _encode_attitude(attitude_time, pitch_deg, roll_deg, heave_m, heading_deg))
 
     def write_swath_bathymetry_ping(self, scalars, beams, kmall_specific=None,
-                                     tx_sectors=None, scale_factors=None, sensor_specific=None):
+                                     tx_sectors=None, scale_factors=None, sensor_specific=None,
+                                     auto_scale=None):
         """
         Write a GSF_RECORD_SWATH_BATHYMETRY_PING record. See
         _encode_swath_bathymetry_ping() for the expected shape of
@@ -5675,7 +5937,51 @@ class gsf():
         which must be called first) to decide whether to include the
         height/SEP/GPS-tide-corrector fields (major_version > 2 -- true
         for every GSF_VERSION this codebase writes).
+
+        :param auto_scale: if True (or left as None with self.auto_scale
+            True), `scale_factors` is computed automatically for every
+            beam array in `beams`, instead of falling back to
+            DEFAULT_PING_SCALE_FACTORS: each array's (multiplier, offset)
+            is chosen by _pick_ping_scale_factor() from that array's
+            actual values in this ping, reusing whatever scale factor was
+            already active for that subrecordID on this gsf instance
+            (self._auto_scale_factors) whenever it still fits, so a
+            file's scale factors only change when the data actually
+            requires it, not on every ping. See the README's "Scale
+            factors" section for a worked example of when and why this
+            differs from the static defaults, and _pick_ping_scale_factor()'s
+            docstring for the full algorithm. Passing an explicit
+            `scale_factors` together with `auto_scale=True` is not
+            supported, since the two are two different answers to the
+            same question ("what scale factors should this ping use").
+        :raises ValueError: `auto_scale` resolves to True while
+            `scale_factors` is also given explicitly.
         """
+        if auto_scale is None:
+            auto_scale = self.auto_scale
+        if auto_scale and scale_factors is not None:
+            raise ValueError(
+                "auto_scale=True and an explicit scale_factors= override are mutually exclusive")
+
+        if auto_scale:
+            # Resolve one (multiplier, offset, width, signed) scale
+            # factor per beam array actually present in this ping,
+            # building the same shape of dict write_swath_bathymetry_ping()
+            # would otherwise accept as an explicit scale_factors=
+            # override -- BeamFlags/QualityFlags are excluded since they
+            # aren't scaled at all (see _beam_array_subrecord_id()).
+            scale_factors = {}
+            for label in beams:
+                if label in ('BeamFlags', 'QualityFlags'):
+                    continue
+                subrecord_id = _beam_array_subrecord_id(label)
+                target_multiplier, _default_offset, width, signed = DEFAULT_PING_SCALE_FACTORS[subrecord_id]
+                current = self._auto_scale_factors.get(subrecord_id)
+                multiplier, offset = _pick_ping_scale_factor(
+                    beams[label], current, width, signed, target_multiplier)
+                self._auto_scale_factors[subrecord_id] = (multiplier, offset)
+                scale_factors[subrecord_id] = (multiplier, offset, width, signed)
+
         major_version = _gsf_major_version(self.gsfVersion)
         self.write_record(
             RecordType.GSF_RECORD_SWATH_BATHYMETRY_PING,

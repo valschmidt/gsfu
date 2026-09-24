@@ -241,7 +241,7 @@ source):
 | `gsf.write_sensor_parameters(params, param_time=...)` | `GSF_RECORD_SENSOR_PARAMETERS`* |
 | `gsf.write_sound_velocity_profile(...)` | `GSF_RECORD_SOUND_VELOCITY_PROFILE` |
 | `gsf.write_attitude(...)` | `GSF_RECORD_ATTITUDE` |
-| `gsf.write_swath_bathymetry_ping(scalars, beams, kmall_specific=..., tx_sectors=..., sensor_specific=...)` | `GSF_RECORD_SWATH_BATHYMETRY_PING`, including scale factors, the standard beam arrays, the beam-flags and quality-flags arrays, the `KMALL_SPECIFIC` sensor-specific subrecord + its TX sector array (`kmall_specific`/`tx_sectors`), and every other vendor sensor-specific subrecord (`sensor_specific=(subrecord_id, fields[, tables])`, dispatched through `_PING_SENSOR_SPECIFIC_CODECS` -- the same 55-id coverage as decode) |
+| `gsf.write_swath_bathymetry_ping(scalars, beams, kmall_specific=..., tx_sectors=..., sensor_specific=..., scale_factors=..., auto_scale=...)` | `GSF_RECORD_SWATH_BATHYMETRY_PING`, including scale factors (static by default, or computed automatically per ping with `auto_scale=True` -- see "Scale factors" below), the standard beam arrays, the beam-flags and quality-flags arrays, the `KMALL_SPECIFIC` sensor-specific subrecord + its TX sector array (`kmall_specific`/`tx_sectors`), and every other vendor sensor-specific subrecord (`sensor_specific=(subrecord_id, fields[, tables])`, dispatched through `_PING_SENSOR_SPECIFIC_CODECS` -- the same 55-id coverage as decode) |
 | `gsf.write_swath_bathy_summary(...)` | `GSF_RECORD_SWATH_BATHY_SUMMARY`* |
 | `gsf.write_comment(comment_time, comment)` | `GSF_RECORD_COMMENT`* |
 | `gsf.write_history(history_time, host_name, operator_name, command_line, comment)` | `GSF_RECORD_HISTORY`* |
@@ -266,6 +266,83 @@ every valid key already present -- required fields as `None`, optional
 fields pre-set to their `GSF_NULL_*` "not available" sentinel -- ready to
 populate and pass straight to `write_swath_bathymetry_ping()`. See
 [`convert.md`](convert.md) for a worked example.
+
+### Scale factors
+
+Every per-beam array inside a `SWATH_BATHYMETRY_PING` (depth, across/along-track,
+travel time, beam angle, amplitudes, and about twenty others) is stored on disk
+as a scaled integer rather than a float, to keep files small: a
+`GSF_SWATH_BATHY_SUBRECORD_SCALE_FACTORS` subrecord at the start of the ping's
+subrecord stream declares, per array, a `multiplier` and an `offset`, and each
+value is written as
+
+    raw_int = round((value + offset) * multiplier)
+
+and read back as `value = raw_int / multiplier - offset`. A finer multiplier
+means more decimal precision; a nonzero offset lets an otherwise-unsigned field
+(depth, for instance, which is unsigned so a given field width covers twice the
+positive range) hold values that dip slightly negative, by shifting them into
+the field's representable range before scaling.
+
+**Static scale factors (the default).** `write_swath_bathymetry_ping()` picks
+each array's multiplier/offset/field-width from `DEFAULT_PING_SCALE_FACTORS`
+unless told otherwise -- e.g. depth defaults to a 4-byte unsigned field at
+1000.0 (1mm precision), offset 0.0. This is simple and predictable, but a fixed
+offset of 0.0 on an unsigned field means any negative value (a beam reading a
+few centimeters above the transducer near the surface, for example) raises
+`ValueError` rather than being written at all, since there's no headroom to
+represent it.
+
+**Automatic scale factors (`auto_scale=True`).** Passing `auto_scale=True` to
+`gsf(path, auto_scale=True)` (for every ping written through that instance) or
+to an individual `write_swath_bathymetry_ping(..., auto_scale=True)` call makes
+each beam array's multiplier and offset get computed from that ping's actual
+data instead: `DEFAULT_PING_SCALE_FACTORS`'s multiplier becomes a *ceiling* --
+the finest precision to use if the data fits -- rather than the value always
+used, and the offset is derived directly from the ping's minimum and maximum
+values instead of always being 0.0. This is implemented by
+`_pick_ping_scale_factor()` in `gsfu.py`, and works the same way for every
+array, not just depth -- so a field like `BeamAngleForward_deg`, which also
+happens to be unsigned and already needs a hand-picked nonzero offset in
+`DEFAULT_PING_SCALE_FACTORS` (`90.0`, to accommodate angles that swing negative
+after roll correction), would have that same offset derived automatically
+instead of needing someone to notice and hard-code it.
+
+Because this runs on every ping written, it's built to be fast and to avoid
+unnecessary work: it's vectorized (a single numpy min/max reduction per beam
+array, no per-beam Python loop), and it keeps a per-subrecord "currently
+active" scale factor on the `gsf` instance across calls, only recomputing one
+when the newest ping's data no longer fits it -- most pings need no
+recomputation at all. When a recompute *is* needed, the newly solved range is
+padded outward first (by 25% of the ping's observed value span, or by 20 steps
+at the target precision, whichever is larger) so that a slightly different
+next ping doesn't immediately force another recompute -- this is the same
+kind of hysteresis gsflib's own (depth-only, offset-only) auto-scale function
+uses, generalized here to solve for both multiplier and offset together, for
+any array, directly from the data rather than from an indirect proxy like a
+tide corrector.
+
+**Worked example.** The first ping written for the `Depth_m` array has values
+ranging from -0.03m to 45.2m (a few beams read slightly negative near the
+surface). With `auto_scale=True`:
+
+1. The observed span is 45.23m. The hysteresis padding is
+   `max(25% × 45.23, 20 steps ÷ 1000.0) ≈ 11.31m`, giving a padded target
+   range of about -11.34m to 56.51m.
+   
+2. That padded range comfortably fits a 4-byte unsigned field even at the full
+   1mm target precision, so the multiplier stays at 1000.0 -- no precision is
+   sacrificed.
+
+3. An offset of 0.0 isn't enough to keep the padded minimum non-negative once
+   scaled, so the smallest whole-number offset that works is chosen: `12.0`.
+
+4. The scale factor `(1000.0, 12.0)` is written for this ping, and every
+   subsequent ping whose depths keep falling within roughly -12m to
+   4,294,955m (the 4-byte unsigned field's full range at this multiplier and
+   offset) reuses it unchanged -- no new `SCALE_FACTORS` values, no
+   reprocessing -- until a ping's data eventually falls outside that range,
+   at which point the whole process repeats.
 
 ## `.kmall` → `.gsf` conversion (`kmall2gsf.py`)
 
