@@ -9,8 +9,8 @@ same four steps `kmall2gsf.py` (in this repo) uses to convert Kongsberg
 populate it with real values, and hand it to a `write_*` method to encode.
 
 If you just want to convert a `.kmall` file, skip to
-[`kmall2gsf.py`](README.md#kmall--gsf-conversion-kmall2gsfpy) in the README
--- this document is about the lower-level `write_*` API it's built on.
+[`kmall2gsf.py`](README.md#converting-other-sonar-formats-to-gsf) in the
+README -- this document is about the lower-level `write_*` API it's built on.
 
 ## Reference frame conventions
 
