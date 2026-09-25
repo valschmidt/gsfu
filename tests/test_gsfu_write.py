@@ -463,17 +463,16 @@ class TestEncodeSingleBeamPing:
 class TestEncodeEchotracSpecific:
     def test_round_trip(self):
         fields = {'NavigationError': -5, 'MppSource': 1, 'TideSource': 2}
-        payload = _encode_echotrac_specific(201, fields)
+        payload = _encode_echotrac_specific(fields)
 
-        decoded, tables, consumed = _decode_echotrac_specific(payload, 4)
+        decoded, consumed = _decode_echotrac_specific(payload, 4)
 
         assert decoded == fields
-        assert tables == {}
         assert consumed == len(payload) - 4
 
     def test_subrecord_header_word_uses_given_id(self):
         # Same codec is registered for both 201 (Echotrac) and 202 (Bathy2000).
-        payload = _encode_echotrac_specific(202, {})
+        payload = _encode_echotrac_specific({'SubrecordID': 202, **{}})
         word, = struct.unpack_from('>I', payload, 0)
         assert (word >> 24) & 0xFF == 202
         assert word & 0xFFFFFF == len(payload) - 4
@@ -489,18 +488,17 @@ class TestEncodeMgd77Specific:
             'TimeZoneCorr': 5, 'PositionTypeCode': 1, 'CorrectionCode': 2,
             'BathyTypeCode': 3, 'QualityCode': 4, 'TravelTime_sec': 12.3456,
         }
-        payload = _encode_mgd77_specific(203, fields)
+        payload = _encode_mgd77_specific(fields)
 
-        decoded, tables, consumed = _decode_mgd77_specific(payload, 4)
+        decoded, consumed = _decode_mgd77_specific(payload, 4)
 
         assert decoded['TimeZoneCorr'] == 5
         assert decoded['QualityCode'] == 4
         assert decoded['TravelTime_sec'] == pytest.approx(12.3456)
-        assert tables == {}
         assert consumed == len(payload) - 4
 
     def test_subrecord_header_word_correct(self):
-        payload = _encode_mgd77_specific(203, {})
+        payload = _encode_mgd77_specific({})
         word, = struct.unpack_from('>I', payload, 0)
         assert (word >> 24) & 0xFF == 203
         assert word & 0xFFFFFF == len(payload) - 4
@@ -516,21 +514,20 @@ class TestEncodeBdbSpecific:
             'DocNo': 12345, 'Eval': '1', 'Classification': 'U', 'TrackAdjFlag': 'Y',
             'SourceFlag': 'S', 'PtOrTrackLn': 'D', 'DatumFlag': 'W',
         }
-        payload = _encode_bdb_specific(204, fields)
+        payload = _encode_bdb_specific(fields)
 
-        decoded, tables, consumed = _decode_bdb_specific(payload, 4)
+        decoded, consumed = _decode_bdb_specific(payload, 4)
 
         assert decoded == fields
-        assert tables == {}
         assert consumed == len(payload) - 4
 
     def test_missing_flags_default_to_nul(self):
-        payload = _encode_bdb_specific(204, {'DocNo': 1})
-        decoded, _tables, _consumed = _decode_bdb_specific(payload, 4)
+        payload = _encode_bdb_specific({'DocNo': 1})
+        decoded, _consumed = _decode_bdb_specific(payload, 4)
         assert decoded['Eval'] == '\x00'
 
     def test_subrecord_header_word_correct(self):
-        payload = _encode_bdb_specific(204, {})
+        payload = _encode_bdb_specific({})
         word, = struct.unpack_from('>I', payload, 0)
         assert (word >> 24) & 0xFF == 204
         assert word & 0xFFFFFF == len(payload) - 4
@@ -543,16 +540,15 @@ class TestEncodeBdbSpecific:
 class TestEncodeNoshdbSpecific:
     def test_round_trip(self):
         fields = {'TypeCode': 7, 'CartoCode': 9}
-        payload = _encode_noshdb_specific(205, fields)
+        payload = _encode_noshdb_specific(fields)
 
-        decoded, tables, consumed = _decode_noshdb_specific(payload, 4)
+        decoded, consumed = _decode_noshdb_specific(payload, 4)
 
         assert decoded == fields
-        assert tables == {}
         assert consumed == len(payload) - 4
 
     def test_subrecord_header_word_correct(self):
-        payload = _encode_noshdb_specific(205, {})
+        payload = _encode_noshdb_specific({})
         word, = struct.unpack_from('>I', payload, 0)
         assert (word >> 24) & 0xFF == 205
         assert word & 0xFFFFFF == len(payload) - 4
@@ -790,23 +786,22 @@ class TestEncodeElacMkIISpecific:
         fields = {'Mode': 5, 'PingNumber': 42, 'SoundVelocity_mps': 1500,
                   'PulseLength_hundredth_ms': 200, 'ReceiverGainStbd_dB': 10,
                   'ReceiverGainPort_dB': 12, 'Reserved': 0}
-        payload = _encode_elac_mkii_specific(117, fields)
+        payload = _encode_elac_mkii_specific(fields)
 
-        decoded, tables, consumed = _decode_elac_mkii_specific(payload, 4)
+        decoded, consumed = _decode_elac_mkii_specific(payload, 4)
 
         assert decoded == fields
-        assert tables == {}
         assert consumed == len(payload) - 4
 
     def test_subrecord_header_word_correct(self):
-        payload = _encode_elac_mkii_specific(117, {})
+        payload = _encode_elac_mkii_specific({})
         word, = struct.unpack_from('>I', payload, 0)
         assert (word >> 24) & 0xFF == 117
         assert word & 0xFFFFFF == len(payload) - 4
 
     def test_missing_fields_default_to_zero(self):
-        payload = _encode_elac_mkii_specific(117, {})
-        decoded, _tables, _consumed = _decode_elac_mkii_specific(payload, 4)
+        payload = _encode_elac_mkii_specific({})
+        decoded, _consumed = _decode_elac_mkii_specific(payload, 4)
         assert decoded['Mode'] == 0
         assert decoded['PingNumber'] == 0
 
@@ -818,16 +813,15 @@ class TestEncodeElacMkIISpecific:
 class TestEncodeSeabeamSpecific:
     def test_round_trip(self):
         fields = {'EclipseTime_tenths_s': 1234}
-        payload = _encode_seabeam_specific(102, fields)
+        payload = _encode_seabeam_specific(fields)
 
-        decoded, tables, consumed = _decode_seabeam_specific(payload, 4)
+        decoded, consumed = _decode_seabeam_specific(payload, 4)
 
         assert decoded == fields
-        assert tables == {}
         assert consumed == len(payload) - 4
 
     def test_subrecord_header_word_correct(self):
-        payload = _encode_seabeam_specific(102, {})
+        payload = _encode_seabeam_specific({})
         word, = struct.unpack_from('>I', payload, 0)
         assert (word >> 24) & 0xFF == 102
         assert word & 0xFFFFFF == len(payload) - 4
@@ -841,27 +835,26 @@ class TestEncodeEM12Specific:
     def test_round_trip(self):
         fields = {'PingNumber': 100, 'Resolution': 1, 'PingQuality': 50,
                   'SoundVelocity_mps': 1500.3, 'Mode': 2}
-        payload = _encode_em12_specific(103, fields)
+        payload = _encode_em12_specific(fields)
 
-        decoded, tables, consumed = _decode_em12_specific(payload, 4)
+        decoded, consumed = _decode_em12_specific(payload, 4)
 
         assert decoded['PingNumber'] == 100
         assert decoded['Resolution'] == 1
         assert decoded['PingQuality'] == 50
         assert decoded['SoundVelocity_mps'] == pytest.approx(1500.3)
         assert decoded['Mode'] == 2
-        assert tables == {}
         assert consumed == len(payload) - 4
 
     def test_subrecord_header_word_correct(self):
-        payload = _encode_em12_specific(103, {})
+        payload = _encode_em12_specific({})
         word, = struct.unpack_from('>I', payload, 0)
         assert (word >> 24) & 0xFF == 103
         assert word & 0xFFFFFF == len(payload) - 4
 
     def test_missing_fields_default_to_zero(self):
-        payload = _encode_em12_specific(103, {})
-        decoded, _tables, _consumed = _decode_em12_specific(payload, 4)
+        payload = _encode_em12_specific({})
+        decoded, _consumed = _decode_em12_specific(payload, 4)
         assert decoded['PingNumber'] == 0
         assert decoded['SoundVelocity_mps'] == pytest.approx(0.0)
 
@@ -874,9 +867,9 @@ class TestEncodeEM100Specific:
     def test_round_trip(self):
         fields = {'ShipPitch_deg': -1.23, 'TransducerPitch_deg': 0.45, 'Mode': 1,
                   'Power': 2, 'Attenuation': 3, 'TVG': 4, 'PulseLength': 5, 'Counter': 999}
-        payload = _encode_em100_specific(104, fields)
+        payload = _encode_em100_specific(fields)
 
-        decoded, tables, consumed = _decode_em100_specific(payload, 4)
+        decoded, consumed = _decode_em100_specific(payload, 4)
 
         assert decoded['ShipPitch_deg'] == pytest.approx(-1.23)
         assert decoded['TransducerPitch_deg'] == pytest.approx(0.45)
@@ -886,11 +879,10 @@ class TestEncodeEM100Specific:
         assert decoded['TVG'] == 4
         assert decoded['PulseLength'] == 5
         assert decoded['Counter'] == 999
-        assert tables == {}
         assert consumed == len(payload) - 4
 
     def test_subrecord_header_word_correct(self):
-        payload = _encode_em100_specific(104, {})
+        payload = _encode_em100_specific({})
         word, = struct.unpack_from('>I', payload, 0)
         assert (word >> 24) & 0xFF == 104
         assert word & 0xFFFFFF == len(payload) - 4
@@ -903,17 +895,16 @@ class TestEncodeEM100Specific:
 class TestEncodeCmpSassSpecific:
     def test_round_trip(self):
         fields = {'SurfaceSoundVelocity_ftps': 4900.5, 'Heave_ftps': 2.5}
-        payload = _encode_cmp_sass_specific(121, fields)
+        payload = _encode_cmp_sass_specific(fields)
 
-        decoded, tables, consumed = _decode_cmp_sass_specific(payload, 4)
+        decoded, consumed = _decode_cmp_sass_specific(payload, 4)
 
         assert decoded['SurfaceSoundVelocity_ftps'] == pytest.approx(4900.5)
         assert decoded['Heave_ftps'] == pytest.approx(2.5)
-        assert tables == {}
         assert consumed == len(payload) - 4
 
     def test_subrecord_header_word_correct(self):
-        payload = _encode_cmp_sass_specific(121, {})
+        payload = _encode_cmp_sass_specific({})
         word, = struct.unpack_from('>I', payload, 0)
         assert (word >> 24) & 0xFF == 121
         assert word & 0xFFFFFF == len(payload) - 4
@@ -927,12 +918,11 @@ class TestEncodeEm950Specific:
     def test_round_trip(self):
         fields = {'PingNumber': 42, 'Mode': 3, 'PingQuality': -5,
                   'ShipPitch_deg': -1.1, 'TransducerPitch_deg': 2.2, 'SurfaceVelocity_mps': 1500.5}
-        payload = _encode_em950_specific(105, fields)
+        payload = _encode_em950_specific(fields)
 
-        decoded, tables, consumed = _decode_em950_specific(payload, 4)
+        decoded, consumed = _decode_em950_specific(payload, 4)
 
         assert decoded == fields
-        assert tables == {}
         assert consumed == len(payload) - 4
 
     def test_same_codec_registered_for_em950_and_em1000(self):
@@ -940,7 +930,7 @@ class TestEncodeEm950Specific:
         assert _PING_SENSOR_SPECIFIC_CODECS[105][2] is _PING_SENSOR_SPECIFIC_CODECS[111][2]
 
     def test_subrecord_header_word_uses_given_id(self):
-        payload = _encode_em950_specific(111, {})
+        payload = _encode_em950_specific({'SubrecordID': 111, **{}})
         word, = struct.unpack_from('>I', payload, 0)
         assert (word >> 24) & 0xFF == 111
         assert word & 0xFFFFFF == len(payload) - 4
@@ -955,12 +945,11 @@ class TestEncodeEm121aSpecific:
         fields = {'PingNumber': 7, 'Mode': 1, 'ValidBeams': 32, 'PulseLength': 3,
                   'BeamWidth': 2, 'TxPower': 8, 'TxStatus': 0, 'RxStatus': 0,
                   'SurfaceVelocity_mps': 1500.5}
-        payload = _encode_em121a_specific(106, fields)
+        payload = _encode_em121a_specific(fields)
 
-        decoded, tables, consumed = _decode_em121a_specific(payload, 4)
+        decoded, consumed = _decode_em121a_specific(payload, 4)
 
         assert decoded == fields
-        assert tables == {}
         assert consumed == len(payload) - 4
 
     def test_same_codec_registered_for_em121a_and_em121(self):
@@ -968,7 +957,7 @@ class TestEncodeEm121aSpecific:
         assert _PING_SENSOR_SPECIFIC_CODECS[106][2] is _PING_SENSOR_SPECIFIC_CODECS[107][2]
 
     def test_subrecord_header_word_uses_given_id(self):
-        payload = _encode_em121a_specific(107, {})
+        payload = _encode_em121a_specific({'SubrecordID': 107, **{}})
         word, = struct.unpack_from('>I', payload, 0)
         assert (word >> 24) & 0xFF == 107
         assert word & 0xFFFFFF == len(payload) - 4
@@ -986,17 +975,16 @@ class TestEncodeSeamapSpecific:
             'PortPulseLength': 1.6, 'StbdPulseLength': 1.7, 'PressureDepth': 1.8,
             'Altitude': 1.9, 'Temperature': 2.0,
         }
-        payload = _encode_seamap_specific(109, fields)
+        payload = _encode_seamap_specific(fields)
 
-        decoded, tables, consumed = _decode_seamap_specific(payload, 4)
+        decoded, consumed = _decode_seamap_specific(payload, 4)
 
         for key, value in fields.items():
             assert decoded[key] == pytest.approx(value)
-        assert tables == {}
         assert consumed == len(payload) - 4
 
     def test_subrecord_header_word_correct(self):
-        payload = _encode_seamap_specific(109, {})
+        payload = _encode_seamap_specific({})
         word, = struct.unpack_from('>I', payload, 0)
         assert (word >> 24) & 0xFF == 109
         assert word & 0xFFFFFF == len(payload) - 4
@@ -1010,16 +998,15 @@ class TestEncodeSeabatSpecific:
     def test_round_trip(self):
         fields = {'PingNumber': 42, 'SurfaceVelocity_mps': 1500.5, 'Mode': 3,
                   'SonarRange_m': 100, 'TransmitPower': 5, 'ReceiveGain': 6}
-        payload = _encode_seabat_specific(110, fields)
+        payload = _encode_seabat_specific(fields)
 
-        decoded, tables, consumed = _decode_seabat_specific(payload, 4)
+        decoded, consumed = _decode_seabat_specific(payload, 4)
 
         assert decoded == fields
-        assert tables == {}
         assert consumed == len(payload) - 4
 
     def test_subrecord_header_word_correct(self):
-        payload = _encode_seabat_specific(110, {})
+        payload = _encode_seabat_specific({})
         word, = struct.unpack_from('>I', payload, 0)
         assert (word >> 24) & 0xFF == 110
         assert word & 0xFFFFFF == len(payload) - 4
@@ -1033,16 +1020,15 @@ class TestEncodeSBAmpSpecific:
     def test_round_trip(self):
         fields = {'Hour': 12, 'Minute': 30, 'Second': 15, 'Hundredths': 50,
                   'BlockNumber': 123456, 'AvgGateDepth': -100}
-        payload = _encode_sb_amp_specific(113, fields)
+        payload = _encode_sb_amp_specific(fields)
 
-        decoded, tables, consumed = _decode_sb_amp_specific(payload, 4)
+        decoded, consumed = _decode_sb_amp_specific(payload, 4)
 
         assert decoded == fields
-        assert tables == {}
         assert consumed == len(payload) - 4
 
     def test_subrecord_header_word_correct(self):
-        payload = _encode_sb_amp_specific(113, {})
+        payload = _encode_sb_amp_specific({})
         word, = struct.unpack_from('>I', payload, 0)
         assert (word >> 24) & 0xFF == 113
         assert word & 0xFFFFFF == len(payload) - 4
@@ -1059,16 +1045,15 @@ class TestEncodeSeabatIISpecific:
             'SonarRange_m': 200, 'TransmitPower': 10, 'ReceiveGain': 20,
             'ForeAftBW_deg': 1.5, 'AthwartBW_deg': 2.5,
         }
-        payload = _encode_seabat_ii_specific(114, fields)
+        payload = _encode_seabat_ii_specific(fields)
 
-        decoded, tables, consumed = _decode_seabat_ii_specific(payload, 4)
+        decoded, consumed = _decode_seabat_ii_specific(payload, 4)
 
         assert decoded == fields
-        assert tables == {}
         assert consumed == len(payload) - 4
 
     def test_subrecord_header_word_correct(self):
-        payload = _encode_seabat_ii_specific(114, {})
+        payload = _encode_seabat_ii_specific({})
         word, = struct.unpack_from('>I', payload, 0)
         assert (word >> 24) & 0xFF == 114
         assert word & 0xFFFFFF == len(payload) - 4
@@ -1085,22 +1070,21 @@ class TestEncodeSeabeam2112Specific:
             'PingGain_dB': 10, 'PulseWidth_ms': 3, 'TransmitterAttenuation_dB': 2,
             'NumberAlgorithms': 2, 'AlgorithmOrder': "WMTB",
         }
-        payload = _encode_seabeam_2112_specific(116, fields)
+        payload = _encode_seabeam_2112_specific(fields)
 
-        decoded, tables, consumed = _decode_seabeam_2112_specific(payload, 4)
+        decoded, consumed = _decode_seabeam_2112_specific(payload, 4)
 
         assert decoded == fields
-        assert tables == {}
         assert consumed == len(payload) - 4
 
     def test_algorithm_order_shorter_string_round_trips(self):
         fields = {'AlgorithmOrder': "B"}
-        payload = _encode_seabeam_2112_specific(116, fields)
-        decoded, _tables, _consumed = _decode_seabeam_2112_specific(payload, 4)
+        payload = _encode_seabeam_2112_specific(fields)
+        decoded, _consumed = _decode_seabeam_2112_specific(payload, 4)
         assert decoded['AlgorithmOrder'] == "B"
 
     def test_subrecord_header_word_correct(self):
-        payload = _encode_seabeam_2112_specific(116, {})
+        payload = _encode_seabeam_2112_specific({})
         word, = struct.unpack_from('>I', payload, 0)
         assert (word >> 24) & 0xFF == 116
         assert word & 0xFFFFFF == len(payload) - 4
@@ -1119,16 +1103,15 @@ class TestEncodeSeabat8101Specific:
             'RangeFiltMin': 0, 'RangeFiltMax': 0, 'DepthFiltMin': 0, 'DepthFiltMax': 0,
             'Projector': 7,
         }
-        payload = _encode_seabat8101_specific(115, fields)
+        payload = _encode_seabat8101_specific(fields)
 
-        decoded, tables, consumed = _decode_seabat8101_specific(payload, 4)
+        decoded, consumed = _decode_seabat8101_specific(payload, 4)
 
         assert decoded == pytest.approx(fields)
-        assert tables == {}
         assert consumed == len(payload) - 4
 
     def test_subrecord_header_word_correct(self):
-        payload = _encode_seabat8101_specific(115, {})
+        payload = _encode_seabat8101_specific({})
         word, = struct.unpack_from('>I', payload, 0)
         assert (word >> 24) & 0xFF == 115
         assert word & 0xFFFFFF == len(payload) - 4
@@ -1150,12 +1133,11 @@ class TestEncodeReson8100Specific:
             'DepthFiltMin': 0, 'DepthFiltMax': 0, 'FiltersActive': 1,
             'Temperature_tenth_degC': 250, 'BeamSpacing_deg': 0.25,
         }
-        payload = _encode_reson8100_specific(122, fields)
+        payload = _encode_reson8100_specific(fields)
 
-        decoded, tables, consumed = _decode_reson8100_specific(payload, 4)
+        decoded, consumed = _decode_reson8100_specific(payload, 4)
 
         assert decoded == pytest.approx(fields)
-        assert tables == {}
         assert consumed == len(payload) - 4
 
     def test_registered_under_every_reson8100_id(self):
@@ -1166,7 +1148,7 @@ class TestEncodeReson8100Specific:
             assert encode_fn is _encode_reson8100_specific
 
     def test_subrecord_header_word_uses_given_id(self):
-        payload = _encode_reson8100_specific(127, {})
+        payload = _encode_reson8100_specific({'SubrecordID': 127, **{}})
         word, = struct.unpack_from('>I', payload, 0)
         assert (word >> 24) & 0xFF == 127
         assert word & 0xFFFFFF == len(payload) - 4
@@ -1188,16 +1170,15 @@ class TestEncodeGeoswathPlusSpecific:
             'SidescanGainChannel': 2, 'Stabilization': 1, 'GpsQuality': 3,
             'RangeUncertainty_m': 0.123, 'AngleUncertainty_deg': 1.25,
         }
-        payload = _encode_geoswath_plus_specific(136, fields)
+        payload = _encode_geoswath_plus_specific(fields)
 
-        decoded, tables, consumed = _decode_geoswath_plus_specific(payload, 4)
+        decoded, consumed = _decode_geoswath_plus_specific(payload, 4)
 
         assert decoded == pytest.approx(fields)
-        assert tables == {}
         assert consumed == len(payload) - 4
 
     def test_subrecord_header_word_correct(self):
-        payload = _encode_geoswath_plus_specific(136, {})
+        payload = _encode_geoswath_plus_specific({})
         word, = struct.unpack_from('>I', payload, 0)
         assert (word >> 24) & 0xFF == 136
         assert word & 0xFFFFFF == len(payload) - 4
@@ -1217,12 +1198,11 @@ class TestEncodeKlein5410bssSpecific:
             'FishAltitude_m': 25.0, 'SoundSpeed_mps': 1500.123,
             'TxWaveform': 1, 'Altimeter': 0, 'RawDataConfig': 7,
         }
-        payload = _encode_klein5410bss_specific(137, fields)
+        payload = _encode_klein5410bss_specific(fields)
 
-        decoded, tables, consumed = _decode_klein5410bss_specific(payload, 4)
+        decoded, consumed = _decode_klein5410bss_specific(payload, 4)
 
         assert decoded == pytest.approx(fields)
-        assert tables == {}
         assert consumed == len(payload) - 4
 
     def test_negative_fish_depth_raises(self):
@@ -1230,10 +1210,10 @@ class TestEncodeKlein5410bssSpecific:
         # SoundSpeed_mps as unsigned, so a negative value can't be
         # represented -- see _decode_klein5410bss_specific()'s docstring.
         with pytest.raises(struct.error):
-            _encode_klein5410bss_specific(137, {'FishDepth_V': -1.0})
+            _encode_klein5410bss_specific({'FishDepth_V': -1.0})
 
     def test_subrecord_header_word_correct(self):
-        payload = _encode_klein5410bss_specific(137, {})
+        payload = _encode_klein5410bss_specific({})
         word, = struct.unpack_from('>I', payload, 0)
         assert (word >> 24) & 0xFF == 137
         assert word & 0xFFFFFF == len(payload) - 4
@@ -1249,12 +1229,11 @@ class TestEncodeSassSpecific:
             'LeftmostBeam': 1, 'RightmostBeam': 60, 'TotalBeams': 61,
             'NavMode': 2, 'PingNumber': 100, 'MissionNumber': 5,
         }
-        payload = _encode_sass_specific(108, fields)
+        payload = _encode_sass_specific(fields)
 
-        decoded, tables, consumed = _decode_sass_specific(payload, 4)
+        decoded, consumed = _decode_sass_specific(payload, 4)
 
         assert decoded == fields
-        assert tables == {}
         assert consumed == len(payload) - 4
 
     def test_shared_by_both_ids(self):
@@ -1262,14 +1241,14 @@ class TestEncodeSassSpecific:
         assert _PING_SENSOR_SPECIFIC_CODECS[108][1] is _PING_SENSOR_SPECIFIC_CODECS[112][1]
         assert _PING_SENSOR_SPECIFIC_CODECS[108][2] is _PING_SENSOR_SPECIFIC_CODECS[112][2]
 
-        payload = _encode_sass_specific(112, {'PingNumber': 42})
+        payload = _encode_sass_specific({'SubrecordID': 112, **{'PingNumber': 42}})
         word, = struct.unpack_from('>I', payload, 0)
         assert (word >> 24) & 0xFF == 112
-        decoded, _tables, _consumed = _decode_sass_specific(payload, 4)
+        decoded, _consumed = _decode_sass_specific(payload, 4)
         assert decoded['PingNumber'] == 42
 
     def test_subrecord_header_word_correct(self):
-        payload = _encode_sass_specific(108, {})
+        payload = _encode_sass_specific({})
         word, = struct.unpack_from('>I', payload, 0)
         assert (word >> 24) & 0xFF == 108
         assert word & 0xFFFFFF == len(payload) - 4
@@ -1293,30 +1272,29 @@ class TestEncodeDeltaTSpecific:
             'Altitude_m': 12.34, 'ExternalSensorFlags': 9, 'PulseLength_s': 0.0001,
             'ForeAftBeamwidth_deg': 2.5, 'AthwartshipsBeamwidth_deg': 1.5,
         }
-        payload = _encode_delta_t_specific(150, fields)
+        payload = _encode_delta_t_specific(fields)
 
-        decoded, tables, consumed = _decode_delta_t_specific(payload, 4)
+        decoded, consumed = _decode_delta_t_specific(payload, 4)
 
         for key, value in fields.items():
             if key == 'InterrogationTime':
                 continue
             assert decoded[key] == pytest.approx(value), key
-        assert tables == {}
         assert consumed == len(payload) - 4
 
     def test_interrogation_time_round_trips(self):
-        payload = _encode_delta_t_specific(150, {'InterrogationTime': 1700000000.5})
-        decoded, _tables, _consumed = _decode_delta_t_specific(payload, 4)
+        payload = _encode_delta_t_specific({'InterrogationTime': 1700000000.5})
+        decoded, _consumed = _decode_delta_t_specific(payload, 4)
         assert decoded['InterrogationTime'].timestamp() == pytest.approx(1700000000.5, abs=1e-3)
 
     def test_missing_fields_default_to_zero(self):
-        payload = _encode_delta_t_specific(150, {})
-        decoded, _tables, _consumed = _decode_delta_t_specific(payload, 4)
+        payload = _encode_delta_t_specific({})
+        decoded, _consumed = _decode_delta_t_specific(payload, 4)
         assert decoded['PingNumber'] == 0
         assert decoded['SoundVelocity_mps'] == pytest.approx(0.0)
 
     def test_subrecord_header_word_correct(self):
-        payload = _encode_delta_t_specific(150, {})
+        payload = _encode_delta_t_specific({})
         word, = struct.unpack_from('>I', payload, 0)
         assert (word >> 24) & 0xFF == 150
         assert word & 0xFFFFFF == len(payload) - 4
@@ -1346,9 +1324,9 @@ class TestEncodeR2SonicSpecific:
             'A2MoreInfo': [0.5, 0.0, 0.0, 0.0, 0.0, -1.0],
             'G0DepthGateMin_s': 0.1, 'G0DepthGateMax_s': 2.0, 'G0DepthGateSlope_deg': -0.3,
         }
-        payload = _encode_r2sonic_specific(153, fields)
+        payload = _encode_r2sonic_specific({'SubrecordID': 153, **fields})
 
-        decoded, tables, consumed = _decode_r2sonic_specific(payload, 4)
+        decoded, consumed = _decode_r2sonic_specific(payload, 4)
 
         assert decoded['ModelNumber'] == "2024"
         assert decoded['SerialNumber'] == "100017"
@@ -1377,7 +1355,6 @@ class TestEncodeR2SonicSpecific:
         assert decoded['G0DepthGateMin_s'] == pytest.approx(0.1)
         assert decoded['G0DepthGateMax_s'] == pytest.approx(2.0)
         assert decoded['G0DepthGateSlope_deg'] == pytest.approx(-0.3)
-        assert tables == {}
         assert consumed == len(payload) - 4
 
     def test_registered_under_every_r2sonic_id(self):
@@ -1388,14 +1365,14 @@ class TestEncodeR2SonicSpecific:
             assert encode_fn is _encode_r2sonic_specific
 
     def test_subrecord_header_word_uses_given_id(self):
-        payload = _encode_r2sonic_specific(151, {})
+        payload = _encode_r2sonic_specific({})
         word, = struct.unpack_from('>I', payload, 0)
         assert (word >> 24) & 0xFF == 151
         assert word & 0xFFFFFF == len(payload) - 4
 
     def test_missing_fields_default_to_zero(self):
-        payload = _encode_r2sonic_specific(153, {})
-        decoded, _tables, _consumed = _decode_r2sonic_specific(payload, 4)
+        payload = _encode_r2sonic_specific({'SubrecordID': 153, **{}})
+        decoded, _consumed = _decode_r2sonic_specific(payload, 4)
         assert decoded['ModelNumber'] == ""
         assert decoded['PingNumber'] == 0
         assert decoded['A0MoreInfo'] == pytest.approx([0.0] * 6)
@@ -1425,23 +1402,22 @@ class TestEncodeReson7125Specific:
     }
 
     def test_round_trip(self):
-        payload = _encode_reson7125_specific(138, self._FIELDS)
+        payload = _encode_reson7125_specific(self._FIELDS)
 
-        decoded, tables, consumed = _decode_reson7125_specific(payload, 4)
+        decoded, consumed = _decode_reson7125_specific(payload, 4)
 
         assert decoded == pytest.approx(self._FIELDS)
-        assert tables == {}
         assert consumed == len(payload) - 4 == 186
 
     def test_subrecord_header_word_correct(self):
-        payload = _encode_reson7125_specific(138, {})
+        payload = _encode_reson7125_specific({})
         word, = struct.unpack_from('>I', payload, 0)
         assert (word >> 24) & 0xFF == 138
         assert word & 0xFFFFFF == len(payload) - 4
 
     def test_missing_fields_default_to_zero(self):
-        payload = _encode_reson7125_specific(138, {})
-        decoded, _tables, _consumed = _decode_reson7125_specific(payload, 4)
+        payload = _encode_reson7125_specific({})
+        decoded, _consumed = _decode_reson7125_specific(payload, 4)
         assert decoded['DeviceID'] == 0
         assert decoded['Gain_dB'] == pytest.approx(0.0)
 
@@ -1477,27 +1453,26 @@ class TestEncodeResonTSeriesSpecific:
     }
 
     def test_round_trip(self):
-        payload = _encode_reson_tseries_specific(155, self._FIELDS)
+        payload = _encode_reson_tseries_specific(self._FIELDS)
 
-        decoded, tables, consumed = _decode_reson_tseries_specific(payload, 4)
+        decoded, consumed = _decode_reson_tseries_specific(payload, 4)
 
         for key, value in self._FIELDS.items():
             if isinstance(value, float):
                 assert decoded[key] == pytest.approx(value), key
             else:
                 assert decoded[key] == value, key
-        assert tables == {}
         assert consumed == len(payload) - 4 == 715
 
     def test_subrecord_header_word_correct(self):
-        payload = _encode_reson_tseries_specific(155, {})
+        payload = _encode_reson_tseries_specific({})
         word, = struct.unpack_from('>I', payload, 0)
         assert (word >> 24) & 0xFF == 155
         assert word & 0xFFFFFF == len(payload) - 4
 
     def test_missing_fields_default_to_zero(self):
-        payload = _encode_reson_tseries_specific(155, {})
-        decoded, _tables, _consumed = _decode_reson_tseries_specific(payload, 4)
+        payload = _encode_reson_tseries_specific({})
+        decoded, _consumed = _decode_reson_tseries_specific(payload, 4)
         assert decoded['DeviceID'] == 0
         assert decoded['Gain_dB'] == pytest.approx(0.0)
         assert decoded['DeviceDescription'] == ""
@@ -1575,9 +1550,9 @@ class TestEncodeEm4Specific:
              'TransmitDelay_sec': 0.001, 'CenterFrequency_Hz': 72000.0, 'MeanAbsorption_dBkm': 41.0,
              'WaveformID': 0, 'SectorNumber': 1, 'SignalBandwidth_Hz': 15000.0},
         ])
-        payload = _encode_em4_specific(133, fields, {'TxSectors': sectors})
+        payload = _encode_em4_specific({**fields, 'SubrecordID': 133, 'TxSectors': sectors})
 
-        decoded, tables, consumed = _decode_em4_specific(payload, 4)
+        decoded, consumed = _decode_em4_specific(payload, 4)
 
         assert decoded['ModelNumber'] == 710
         assert decoded['SurfaceVelocity_mps'] == pytest.approx(1500.0)
@@ -1588,9 +1563,9 @@ class TestEncodeEm4Specific:
         assert decoded['RunTime.MinDepth_m'] == pytest.approx(10.0)
         assert decoded['PuStatus.SensorStatus'] == 63
         assert decoded['PuStatus.YawStabilization_deg'] == pytest.approx(-1.5)
-        assert len(tables['TxSectors']) == 2
-        assert tables['TxSectors'].iloc[0]['CenterFrequency_Hz'] == pytest.approx(71000.0)
-        assert tables['TxSectors'].iloc[1]['TiltAngle_deg'] == pytest.approx(-1.5)
+        assert len(decoded['TxSectors']) == 2
+        assert decoded['TxSectors'].iloc[0]['CenterFrequency_Hz'] == pytest.approx(71000.0)
+        assert decoded['TxSectors'].iloc[1]['TiltAngle_deg'] == pytest.approx(-1.5)
         assert consumed == len(payload) - 4
 
     def test_registered_under_every_em4_id(self):
@@ -1601,13 +1576,13 @@ class TestEncodeEm4Specific:
             assert encode_fn is _encode_em4_specific
 
     def test_subrecord_header_word_and_zero_sectors(self):
-        payload = _encode_em4_specific(157, {})
+        payload = _encode_em4_specific({'SubrecordID': 157})
         word, = struct.unpack_from('>I', payload, 0)
         assert (word >> 24) & 0xFF == 157
         assert word & 0xFFFFFF == len(payload) - 4
 
-        _decoded, tables, consumed = _decode_em4_specific(payload, 4)
-        assert len(tables['TxSectors']) == 0
+        decoded, consumed = _decode_em4_specific(payload, 4)
+        assert 'TxSectors' not in decoded
         assert consumed == len(payload) - 4
 
 
@@ -1681,20 +1656,21 @@ class TestEncodeEm3Specific:
     }
 
     def test_round_trip_no_run_time_blocks(self):
-        payload = _encode_em3_specific(118, self._FIELDS)
-        decoded, tables, consumed = _decode_em3_specific(payload, 4)
+        payload = _encode_em3_specific(self._FIELDS)
+        decoded, consumed = _decode_em3_specific(payload, 4)
 
         assert decoded == self._FIELDS
-        assert len(tables['RunTime']) == 0
+        assert 'RunTime' not in decoded
         assert consumed == len(payload) - 4
 
     def test_round_trip_head0_only(self):
-        payload = _encode_em3_specific(118, self._FIELDS, {'RunTime': pd.DataFrame([self._HEAD0])})
-        _decoded, tables, consumed = _decode_em3_specific(payload, 4)
+        record = {**self._FIELDS, 'RunTime': pd.DataFrame([self._HEAD0])}
+        payload = _encode_em3_specific(record)
+        _decoded, consumed = _decode_em3_specific(payload, 4)
 
-        assert len(tables['RunTime']) == 1
-        assert tables['RunTime'].iloc[0]['Head'] == 0
-        assert tables['RunTime'].iloc[0]['ModelNumber'] == 3000
+        assert len(_decoded['RunTime']) == 1
+        assert _decoded['RunTime'].iloc[0]['Head'] == 0
+        assert _decoded['RunTime'].iloc[0]['ModelNumber'] == 3000
         assert consumed == len(payload) - 4
 
     def test_round_trip_both_heads(self):
@@ -1702,26 +1678,27 @@ class TestEncodeEm3Specific:
         # shipped can only ever write head 0 -- confirms this encoder can
         # write both heads of an EM3000D dual-head system.
         head1 = dict(self._HEAD0, Head=1, SerialNumber=101)
-        payload = _encode_em3_specific(130, self._FIELDS, {'RunTime': pd.DataFrame([self._HEAD0, head1])})
-        _decoded, tables, consumed = _decode_em3_specific(payload, 4)
+        record = {**self._FIELDS, 'SubrecordID': 130, 'RunTime': pd.DataFrame([self._HEAD0, head1])}
+        payload = _encode_em3_specific(record)
+        _decoded, consumed = _decode_em3_specific(payload, 4)
 
-        assert len(tables['RunTime']) == 2
-        assert tables['RunTime'].iloc[0]['Head'] == 0
-        assert tables['RunTime'].iloc[1]['Head'] == 1
-        assert tables['RunTime'].iloc[1]['SerialNumber'] == 101
+        assert len(_decoded['RunTime']) == 2
+        assert _decoded['RunTime'].iloc[0]['Head'] == 0
+        assert _decoded['RunTime'].iloc[1]['Head'] == 1
+        assert _decoded['RunTime'].iloc[1]['SerialNumber'] == 101
         assert consumed == len(payload) - 4
 
     def test_head1_without_head0_raises(self):
         with pytest.raises(ValueError):
-            _encode_em3_specific(118, self._FIELDS, {'RunTime': pd.DataFrame([dict(self._HEAD0, Head=1)])})
+            _encode_em3_specific({**self._FIELDS, 'RunTime': pd.DataFrame([dict(self._HEAD0, Head=1)])})
 
     def test_duplicate_head_raises(self):
         with pytest.raises(ValueError):
-            _encode_em3_specific(118, self._FIELDS, {'RunTime': pd.DataFrame([self._HEAD0, dict(self._HEAD0)])})
+            _encode_em3_specific({**self._FIELDS, 'RunTime': pd.DataFrame([self._HEAD0, dict(self._HEAD0)])})
 
     def test_invalid_head_value_raises(self):
         with pytest.raises(ValueError):
-            _encode_em3_specific(118, self._FIELDS, {'RunTime': pd.DataFrame([dict(self._HEAD0, Head=2)])})
+            _encode_em3_specific({**self._FIELDS, 'RunTime': pd.DataFrame([dict(self._HEAD0, Head=2)])})
 
     def test_registered_under_every_em3_id(self):
         for subrecord_id in (118, 119, 120, 128, 129, 130, 131, 132, 139):
@@ -1731,7 +1708,7 @@ class TestEncodeEm3Specific:
             assert encode_fn is _encode_em3_specific
 
     def test_subrecord_header_word(self):
-        payload = _encode_em3_specific(139, self._FIELDS)
+        payload = _encode_em3_specific({**self._FIELDS, 'SubrecordID': 139})
         word, = struct.unpack_from('>I', payload, 0)
         assert (word >> 24) & 0xFF == 139
         assert word & 0xFFFFFF == len(payload) - 4
@@ -1755,9 +1732,9 @@ class TestEncodeEm3RawSpecific:
              'TransmitDelay_sec': 0.001, 'CenterFrequency_Hz': 72000.0,
              'WaveformID': 0, 'SectorNumber': 1, 'SignalBandwidth_Hz': 15000.0},
         ])
-        payload = _encode_em3raw_specific(140, fields, {'TxSectors': sectors})
+        payload = _encode_em3raw_specific({**fields, 'SubrecordID': 140, 'TxSectors': sectors})
 
-        decoded, tables, consumed = _decode_em3raw_specific(payload, 4)
+        decoded, consumed = _decode_em3raw_specific(payload, 4)
 
         assert decoded['ModelNumber'] == 300
         assert decoded['SurfaceVelocity_mps'] == pytest.approx(1500.0)
@@ -1770,10 +1747,10 @@ class TestEncodeEm3RawSpecific:
         assert decoded['RunTime.MinDepth_m'] == pytest.approx(10.0)
         assert decoded['PuStatus.SensorStatus'] == 63
         assert decoded['PuStatus.YawStabilization_deg'] == pytest.approx(-1.5)
-        assert len(tables['TxSectors']) == 2
-        assert tables['TxSectors'].iloc[0]['CenterFrequency_Hz'] == pytest.approx(71000.0)
-        assert 'MeanAbsorption_dBkm' not in tables['TxSectors'].columns
-        assert tables['TxSectors'].iloc[1]['TiltAngle_deg'] == pytest.approx(-1.5)
+        assert len(decoded['TxSectors']) == 2
+        assert decoded['TxSectors'].iloc[0]['CenterFrequency_Hz'] == pytest.approx(71000.0)
+        assert 'MeanAbsorption_dBkm' not in decoded['TxSectors'].columns
+        assert decoded['TxSectors'].iloc[1]['TiltAngle_deg'] == pytest.approx(-1.5)
         assert consumed == len(payload) - 4
 
     def test_registered_under_every_em3raw_id(self):
@@ -1784,13 +1761,13 @@ class TestEncodeEm3RawSpecific:
             assert encode_fn is _encode_em3raw_specific
 
     def test_subrecord_header_word_and_zero_sectors(self):
-        payload = _encode_em3raw_specific(148, {})
+        payload = _encode_em3raw_specific({'SubrecordID': 148})
         word, = struct.unpack_from('>I', payload, 0)
         assert (word >> 24) & 0xFF == 148
         assert word & 0xFFFFFF == len(payload) - 4
 
-        _decoded, tables, consumed = _decode_em3raw_specific(payload, 4)
-        assert len(tables['TxSectors']) == 0
+        decoded, consumed = _decode_em3raw_specific(payload, 4)
+        assert 'TxSectors' not in decoded
         assert consumed == len(payload) - 4
 
 
@@ -1800,27 +1777,27 @@ class TestEncodeKmallSpecific:
              'PingRate_Hz': 40.0, 'FreqRangeLowLim_Hz': 49000.0, 'Latitude_deg': 43.1}
         payload = _encode_kmall_specific(s)
 
-        decoded, sector_rows, class_rows, consumed = _decode_kmall_specific(payload, 4)
+        decoded, consumed = _decode_kmall_specific(payload, 4)
 
         assert decoded['EchoSounderID'] == 712
         assert decoded['DgmType'] == 1
         assert decoded['PingRate_Hz'] == pytest.approx(40.0)
         assert decoded['FreqRangeLowLim_Hz'] == pytest.approx(49000.0)
         assert decoded['Latitude_deg'] == pytest.approx(43.1)
-        assert len(sector_rows) == 0
-        assert len(class_rows) == 0
+        assert 'TxSectors' not in decoded
+        assert 'ExtraDetectionClasses' not in decoded
         assert consumed == len(payload) - 4
 
     def test_gsf_kmall_version_always_zero(self):
         # Ported quirk: gsf_enc.c's EncodeKMALLSpecific() always writes 0
         # for gsfKMALLVersion, ignoring any caller value.
         payload = _encode_kmall_specific({'GSFKMALLVersion': 99})
-        decoded, _sectors, _classes, _consumed = _decode_kmall_specific(payload, 4)
+        decoded, _consumed = _decode_kmall_specific(payload, 4)
         assert decoded['GSFKMALLVersion'] == 0
 
     def test_missing_fields_default_to_zero(self):
         payload = _encode_kmall_specific({})
-        decoded, _sectors, _classes, _consumed = _decode_kmall_specific(payload, 4)
+        decoded, _consumed = _decode_kmall_specific(payload, 4)
         assert decoded['EchoSounderID'] == 0
         assert decoded['NumTxSectors'] == 0
 
@@ -1831,28 +1808,29 @@ class TestEncodeKmallSpecific:
         ])
         # Deliberately wrong NumTxSectors in `s` -- must be ignored in favor
         # of len(sectors).
-        payload = _encode_kmall_specific({'NumTxSectors': 99}, sector_rows=sectors)
+        payload = _encode_kmall_specific({'NumTxSectors': 99, 'TxSectors': sectors})
 
-        decoded, decoded_sectors, _classes, _consumed = _decode_kmall_specific(payload, 4)
+        decoded, _consumed = _decode_kmall_specific(payload, 4)
 
         assert decoded['NumTxSectors'] == 2
-        assert len(decoded_sectors) == 2
-        assert decoded_sectors.iloc[0]['CentreFreq_Hz'] == pytest.approx(49000.0)
-        assert decoded_sectors.iloc[1]['TiltAngleReTx_deg'] == pytest.approx(-3.2)
+        assert len(decoded['TxSectors']) == 2
+        assert decoded['TxSectors'].iloc[0]['CentreFreq_Hz'] == pytest.approx(49000.0)
+        assert decoded['TxSectors'].iloc[1]['TiltAngleReTx_deg'] == pytest.approx(-3.2)
 
     def test_extra_detection_classes_round_trip(self):
         classes = pd.DataFrame([{'NumExtraDetInClass': 5, 'AlarmFlag': 1}])
-        payload = _encode_kmall_specific({}, class_rows=classes)
+        payload = _encode_kmall_specific({'ExtraDetectionClasses': classes})
 
-        decoded, _sectors, decoded_classes, _consumed = _decode_kmall_specific(payload, 4)
+        decoded, _consumed = _decode_kmall_specific(payload, 4)
 
         assert decoded['NumExtraDetectionClasses'] == 1
-        assert len(decoded_classes) == 1
-        assert decoded_classes.iloc[0]['NumExtraDetInClass'] == 5
-        assert decoded_classes.iloc[0]['AlarmFlag'] == 1
+        assert len(decoded['ExtraDetectionClasses']) == 1
+        assert decoded['ExtraDetectionClasses'].iloc[0]['NumExtraDetInClass'] == 5
+        assert decoded['ExtraDetectionClasses'].iloc[0]['AlarmFlag'] == 1
 
     def test_byte_length_matches_header_word(self):
-        payload = _encode_kmall_specific({}, sector_rows=pd.DataFrame([{}]), class_rows=pd.DataFrame([{}]))
+        payload = _encode_kmall_specific(
+            {'TxSectors': pd.DataFrame([{}]), 'ExtraDetectionClasses': pd.DataFrame([{}])})
         word, = struct.unpack_from('>I', payload, 0)
         assert (word >> 24) & 0xFF == 156
         assert word & 0xFFFFFF == len(payload) - 4
@@ -2265,7 +2243,7 @@ class TestTemplateHelpers:
     def test_kmall_specific_template_round_trips_and_covers_every_encoded_key(self):
         s = new_kmall_specific()
         payload = _encode_kmall_specific(s)
-        decoded, _sectors, _classes, _consumed = _decode_kmall_specific(payload, 4)
+        decoded, _consumed = _decode_kmall_specific(payload, 4)
 
         # Every non-derived, non-forced key in the template must survive
         # a round trip unchanged (within float rounding).
@@ -2275,13 +2253,13 @@ class TestTemplateHelpers:
     def test_kmall_tx_sector_template_round_trips(self):
         row = new_kmall_tx_sector()
         row.update(TxSectorNumb=2, CentreFreq_Hz=71000.0)
-        payload = _encode_kmall_specific({}, sector_rows=pd.DataFrame([row]))
-        _decoded, sectors, _classes, _consumed = _decode_kmall_specific(payload, 4)
+        payload = _encode_kmall_specific({'TxSectors': pd.DataFrame([row])})
+        decoded, _consumed = _decode_kmall_specific(payload, 4)
 
-        assert len(sectors) == 1
-        assert sectors.iloc[0]['TxSectorNumb'] == 2
-        assert sectors.iloc[0]['CentreFreq_Hz'] == pytest.approx(71000.0)
-        assert sectors.iloc[0]['TxArrNumber'] == 0
+        assert len(decoded['TxSectors']) == 1
+        assert decoded['TxSectors'].iloc[0]['TxSectorNumb'] == 2
+        assert decoded['TxSectors'].iloc[0]['CentreFreq_Hz'] == pytest.approx(71000.0)
+        assert decoded['TxSectors'].iloc[0]['TxArrNumber'] == 0
 
 
 # ---------------------------------------------------------------------------

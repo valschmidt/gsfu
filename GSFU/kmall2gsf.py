@@ -64,10 +64,16 @@ from GSFU.gsfu import (
 
 def _kmall_class():
     """
-    Lazily import the `kmall` class from the `KMALL` package
-    (https://github.com/valschmidt/kmall, importable name is `KMALL`,
-    uppercase) so that importing GSFU.kmall2gsf -- or any other part of
-    GSFU -- never requires it to be installed.
+    Import and return the `kmall` class from the `KMALL` package
+    (https://github.com/valschmidt/kmall). The import happens inside this
+    function, rather than at the top of this module, so that importing
+    GSFU.kmall2gsf, or any other part of GSFU, never requires the `kmall`
+    package to be installed; only code that actually converts a file
+    needs it.
+
+    :return: the `kmall` class, ready to be instantiated with a file path.
+
+    :raises ImportError: the `kmall` package is not installed.
     """
     try:
         from KMALL.kmall import kmall as KmallReader
@@ -86,19 +92,22 @@ def _kmall_class():
 
 def index_kmall_file(K):
     """
-    Walk an open .kmall file and record (offset, datagram_type, num_bytes)
-    for every datagram, reading only each datagram's 8-byte framing header
-    (4-byte total length + 4-byte type, e.g. b'#MRZ') and seeking past its
-    payload -- no datagram payload is read here, however large (a #MWC
-    water-column datagram, say). KMALL's on-disk integers are little-
-    endian, unlike GSF's big-endian ("network byte order") convention.
+    Walk an open .kmall file and record the offset, type, and size of
+    every datagram it contains, without reading any datagram's payload.
+    This reads only each datagram's eight-byte framing header (a
+    four-byte total length followed by a four-byte type code, for example
+    b'#MRZ') and then seeks past its payload, however large that payload
+    is (for example, a #MWC water-column datagram). Note that KMALL
+    stores its on-disk integers in little-endian byte order, the opposite
+    of GSF's big-endian convention.
 
-    :param K: a kmall.kmall instance already open for reading
-        (K.OpenFiletoRead() already called).
-    :return: list of (offset, datagram_type, num_bytes) in file order.
-        num_bytes is the datagram's total length, including its own
-        leading 4-byte length field (so offset + num_bytes is the next
-        datagram's offset).
+    :param K: a kmall.kmall instance already open for reading, meaning
+        K.OpenFiletoRead() has already been called on it.
+
+    :return: a list of (offset, datagram_type, num_bytes) tuples, in file
+        order. num_bytes is the datagram's total length, including its
+        own leading four-byte length field, so offset plus num_bytes is
+        the offset of the next datagram.
     """
     K.FID.seek(0, 2)
     file_size = K.FID.tell()
@@ -130,19 +139,38 @@ def index_kmall_file(K):
 ###########################################################
 
 def _circular_lerp(a, b, frac):
-    """ Linearly interpolate an angle in degrees from `a` to `b` (0-360),
-    taking the shorter way around the 0/360 boundary. """
+    """
+    Linearly interpolate an angle, in degrees, from a to b, where both
+    angles are on a 0 to 360 degree circle, taking the shorter way around
+    the 0/360 degree boundary rather than always increasing.
+
+    :param a: the starting angle, in degrees.
+    :param b: the ending angle, in degrees.
+    :param frac: how far to interpolate between a and b, from 0.0
+        (returns a) to 1.0 (returns b).
+
+    :return: the interpolated angle, in degrees, normalized to the range
+        0 to 360.
+    """
     diff = ((b - a + 180.0) % 360.0) - 180.0
     return (a + diff * frac) % 360.0
 
 
 def interpolate_attitude(attitude_samples, t):
     """
-    Linearly interpolate pitch/roll/heave/heading at time `t` from a
-    sorted list of (time, pitch_deg, roll_deg, heave_m, heading_deg)
-    samples. Clamps to the first/last sample when `t` is outside the
-    buffered range (rather than extrapolating), and interpolates heading
-    the short way around the 0/360 wraparound.
+    Linearly interpolate pitch, roll, heave, and heading at time t from a
+    sorted list of attitude samples. When t falls outside the range of
+    buffered samples, this returns the first or last sample unchanged,
+    rather than extrapolating beyond it. Heading is interpolated the
+    short way around the 0/360 degree wraparound, using _circular_lerp().
+
+    :param attitude_samples: a list of (time, pitch_deg, roll_deg,
+        heave_m, heading_deg) tuples, sorted by time.
+    :param t: the time to interpolate at, in the same units as the times
+        in attitude_samples.
+
+    :return: a tuple of (pitch_deg, roll_deg, heave_m, heading_deg), the
+        interpolated attitude at time t.
 
     :raises ValueError: attitude_samples is empty.
     """
@@ -176,13 +204,20 @@ def interpolate_attitude(attitude_samples, t):
 
 def mrz_to_kmall_specific(mrz):
     """
-    Build the KMALL_SPECIFIC scalar dict and TX sector list gsfu.py's
-    write_swath_bathymetry_ping() expects, directly from an MRZ datagram
-    (as returned by kmall.kmall.read_EMdgmMRZ()) -- the field-for-field
-    inverse of GSFU.gsfu._decode_kmall_specific()'s key names, just
-    sourced from kmall.py's own field names instead of GSF wire bytes.
+    Build the KMALL_SPECIFIC scalar field dictionary and the list of
+    per-transmit-sector dictionaries that a GSF ping's sensor-specific
+    subrecord needs, directly from one MRZ datagram (as returned by
+    kmall.kmall.read_EMdgmMRZ()). The field names this returns match the
+    key names GSFU.gsfu._decode_kmall_specific() decodes from a GSF file,
+    just read here from kmall.py's own field names instead of from GSF
+    wire bytes.
 
-    :return: (kmall_specific: dict, tx_sectors: list[dict])
+    :param mrz: one decoded #MRZ datagram, as returned by
+        kmall.kmall.read_EMdgmMRZ().
+
+    :return: a tuple of (kmall_specific, tx_sectors). kmall_specific is a
+        dictionary of scalar KMALL_SPECIFIC fields. tx_sectors is a list
+        of dictionaries, one per transmit sector.
     """
     header = mrz['header']
     cmn = mrz['cmnPart']
@@ -281,9 +316,21 @@ def mrz_to_kmall_specific(mrz):
 
 
 def _listofdicts(dict_of_lists):
-    """ kmall.py stores repeated substructures (sectors, soundings) as a
-    dict of equal-length lists; convert back to a list of per-item dicts
-    for the sector loop above. """
+    """
+    Convert a dictionary of equal-length lists into a list of per-item
+    dictionaries. The `kmall` package stores repeated substructures, such
+    as transmit sectors or soundings, as a dictionary whose values are
+    lists (one list per field, all the same length); this converts that
+    representation into the more convenient one dictionary per item, used
+    by the transmit-sector loop in mrz_to_kmall_specific().
+
+    :param dict_of_lists: a dictionary mapping field name to a list of
+        that field's values, one entry per item, all lists the same
+        length. An empty or falsy value is treated as zero items.
+
+    :return: a list of dictionaries, one per item, each mapping the same
+        field names to that item's single value.
+    """
     if not dict_of_lists:
         return []
     keys = list(dict_of_lists.keys())
@@ -293,11 +340,20 @@ def _listofdicts(dict_of_lists):
 
 def mrz_to_beams(mrz):
     """
-    Build the beams dict write_swath_bathymetry_ping() expects from an
-    MRZ datagram's soundings (a dict of equal-length lists, one entry per
-    beam). Only the subset of GSF beam array subrecords with a reasonably
-    direct MRZ equivalent is populated -- see the module docstring's
-    "Known simplifications" for what's deliberately omitted.
+    Build the dictionary of per-beam arrays a GSF ping's 'Beams' entry
+    needs, from one MRZ datagram's soundings (which kmall.py stores as a
+    dictionary of equal-length lists, one entry per beam). Only the
+    subset of GSF beam array subrecords with a reasonably direct MRZ
+    equivalent is populated; see this module's own docstring, under
+    "Known simplifications", for exactly which ones are deliberately left
+    out and why.
+
+    :param mrz: one decoded #MRZ datagram, as returned by
+        kmall.kmall.read_EMdgmMRZ().
+
+    :return: a dictionary mapping each populated GSF beam array's column
+        label (for example 'Depth_m') to a numpy array of that array's
+        per-beam values.
     """
     soundings = mrz['sounding']
     twtt = np.asarray(soundings['twoWayTravelTime_sec'], dtype=np.float64) \
@@ -320,10 +376,29 @@ def mrz_to_beams(mrz):
 
 def mrz_to_ping_scalars(mrz, pitch_deg, roll_deg, heave_m):
     """
-    Build the ping scalars dict write_swath_bathymetry_ping() expects.
-    Position and heading come directly from MRZ's own pingInfo (the
-    values SIS itself used for this ping); pitch/roll/heave are the
-    caller's already-interpolated attitude (see interpolate_attitude()).
+    Build the dictionary of fixed scalar ping fields that
+    gsf.write_swath_bathymetry_ping() expects, from one MRZ datagram.
+    Position and heading are read directly from the MRZ datagram's own
+    pingInfo structure, the same values the sonar's own positioning
+    system used for this ping. Pitch, roll, and heave are not read from
+    MRZ directly; the caller supplies its own already-interpolated
+    attitude values instead, typically produced by
+    interpolate_attitude(). Fields that MRZ does not carry, such as tide
+    and draft correction or course and speed over ground, are written as
+    their GSF_NULL_* "not available" sentinel value rather than as zero,
+    since zero would otherwise be indistinguishable from a genuine,
+    corrected value of zero; see this project's convert.md, under
+    "Marking a field as not available", for why this distinction matters.
+
+    :param mrz: one decoded #MRZ datagram, as returned by
+        kmall.kmall.read_EMdgmMRZ().
+    :param pitch_deg: this ping's interpolated pitch, in degrees.
+    :param roll_deg: this ping's interpolated roll, in degrees.
+    :param heave_m: this ping's interpolated heave, in meters.
+
+    :return: a dictionary of the fixed scalar ping fields, in the same
+        shape gsf.write_swath_bathymetry_ping() expects as part of its
+        `record` argument.
     """
     header = mrz['header']
     info = mrz['pingInfo']
@@ -361,14 +436,25 @@ def mrz_to_ping_scalars(mrz, pitch_deg, roll_deg, heave_m):
 
 def _lenient_parse_kv_text(text):
     """
-    Parse a "key=value" text blob (KMALL install/runtime parameter text,
-    entries separated by some mix of ','/';'/newlines depending on
-    datagram type) into a dict, silently skipping any entry that doesn't
-    contain '=' -- unlike kmall.py's own translate_installation_
-    parameters_todict()/translate_runtime_parameters_todict(), which
-    assume every entry is well-formed and raise on the first one that
-    isn't. Used as a fallback when those raise (see convert()) so one
-    malformed entry doesn't abort the whole conversion.
+    Parse a "key=value" text blob into a dictionary, silently skipping
+    any entry that does not contain an "=" character. This is the text
+    format KMALL install and runtime parameter datagrams carry, with
+    entries separated by some mix of commas, semicolons, and newlines
+    depending on the datagram type.
+
+    The `kmall` package has its own parsers for this same text, in its
+    translate_installation_parameters_todict() and
+    translate_runtime_parameters_todict() functions, but those assume
+    every entry is well formed and raise an exception on the first one
+    that is not; this has been observed to happen with real KMALL sample
+    files. This function is used as a fallback when those functions raise
+    (see convert()), so that one malformed entry does not abort an entire
+    conversion.
+
+    :param text: the raw key/value parameter text to parse.
+
+    :return: a dictionary of the successfully parsed key/value pairs.
+        Malformed entries are silently omitted, not raised as an error.
     """
     params = {}
     for chunk in text.replace('\n', ',').replace(';', ',').split(','):
@@ -385,13 +471,21 @@ def _lenient_parse_kv_text(text):
 
 def convert(kmall_path, gsf_path, attitude_source=1, verbose=False):
     """
-    Convert one .kmall file to a .gsf file.
+    Convert one .kmall file to a .gsf file, writing PROCESSING_PARAMETERS,
+    SOUND_VELOCITY_PROFILE, SWATH_BATHYMETRY_PING, and ATTITUDE records.
+    See this module's own docstring for the full list of GSF record types
+    written and the known simplifications this conversion makes.
 
-    :param attitude_source: which #SKM sensorSystem stream (1-indexed, as
-        numbered in K-Controller's ATTI_1/ATTI_2/... installation
-        parameters) supplies interpolated ping attitude and the
-        GSF_RECORD_ATTITUDE records written to the file.
-    :raises ValueError: no #SKM datagram in the file matches
+    :param kmall_path: the path to the source .kmall file to read.
+    :param gsf_path: the path to the .gsf file to write.
+    :param attitude_source: which #SKM sensorSystem stream supplies this
+        file's interpolated ping attitude and its GSF_RECORD_ATTITUDE
+        records. This is one-indexed, matching how K-Controller numbers
+        its ATTI_1/ATTI_2/... installation parameters.
+    :param verbose: if True, print progress messages while converting.
+
+    :raises ImportError: the `kmall` package is not installed.
+    :raises ValueError: no #SKM datagram in the source file matches
         attitude_source.
     """
     KmallReader = _kmall_class()
@@ -527,7 +621,18 @@ def convert(kmall_path, gsf_path, attitude_source=1, verbose=False):
 ###########################################################
 
 def main(args=None):
-    """ Command line script entry point. """
+    """
+    Command line entry point for the kmall2gsf.py script. Parses
+    command-line arguments and calls convert() to perform the actual
+    conversion, printing a message and returning a nonzero exit code
+    instead of raising if the `kmall` package is not installed or if
+    conversion fails.
+
+    :param args: the command-line arguments to parse, not including the
+        program name. If left as None, sys.argv[1:] is used.
+
+    :return: the process exit code: 0 on success, 1 if conversion failed.
+    """
     if args is None:
         args = sys.argv[1:]
 
