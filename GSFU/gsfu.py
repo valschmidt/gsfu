@@ -231,9 +231,11 @@ class gsfDataID:
 # of gsfDecodeSinglebeam.
 #
 # Every per-sensor ping-level "_SPECIFIC" subrecord (all 55 of gsf.h's
-# GSF_SWATH_BATHY_SUBRECORD_*_SPECIFIC ids) is decoded -- KMALL_SPECIFIC
-# via its own bespoke path (_decode_kmall_specific()), every other id via
-# the _PING_SENSOR_SPECIFIC_CODECS registry. Likewise every single-beam
+# GSF_SWATH_BATHY_SUBRECORD_*_SPECIFIC ids) is decoded via the
+# _PING_SENSOR_SPECIFIC_CODECS registry (KMALL_SPECIFIC, id 156, through a
+# thin adapter over its own standalone _decode_kmall_specific()/
+# _encode_kmall_specific() -- see the registry's docstring below).
+# Likewise every single-beam
 # sensor-specific tail (_SINGLE_BEAM_SENSOR_SPECIFIC_CODECS) and the
 # per-beam intensity-series imagery preamble (_decode_brb_intensity() and
 # its per-family _decode_*_imagery_specific() helpers) are fully decoded.
@@ -317,10 +319,10 @@ _SUBRECORD_KMALL_SPECIFIC = 156
 _SUBRECORD_INTENSITY_SERIES_ARRAY = 21
 
 #: Every vendor sensor-specific ("_SPECIFIC") ping subrecord id and name,
-#: from gsf.h's GSF_SWATH_BATHY_SUBRECORD_* defines. Used to label subrecords
-#: that have no field-level decoder here (only GSF_SWATH_BATHY_SUBRECORD_KMALL_SPECIFIC,
-#: id 156, is decoded -- see _decode_kmall_specific()) with their proper
-#: name instead of a bare numeric id.
+#: from gsf.h's GSF_SWATH_BATHY_SUBRECORD_* defines. Used to resolve a
+#: decoded ping's SensorSpecificID to a human-readable family name (e.g.
+#: for print_records()), and to label subrecords not present in
+#: _PING_SENSOR_SPECIFIC_CODECS (id 154 is unused/reserved in gsf.h).
 _SENSOR_SPECIFIC_SUBRECORD_NAMES = {
     102: "SEABEAM_SPECIFIC",
     103: "EM12_SPECIFIC",
@@ -386,15 +388,22 @@ _SENSOR_SPECIFIC_SUBRECORD_NAMES = {
 #: _decode_em3_specific()/_encode_em3_specific() -- covers EM3000, EM1002,
 #: EM300, EM120, EM3002, EM3000D, EM3002D, EM121A_SIS, and EM2000).
 #:
-#: decode_fn(payload, pos) -> (fields: dict, tables: dict[str, list[dict]],
-#: bytes_consumed). encode_fn(subrecord_id, fields, tables=None) -> bytes,
-#: including its own 4-byte subrecord id+size word (subrecord_id is passed
-#: through since one encode_fn may need to stamp any of several ids).
+#: decode_fn(payload, pos) -> (fields: dict, tables: dict[str,
+#: pandas.DataFrame], bytes_consumed). encode_fn(subrecord_id, fields,
+#: tables=None) -> bytes, including its own 4-byte subrecord id+size word
+#: (subrecord_id is passed through since one encode_fn may need to stamp
+#: any of several ids). Table values are pandas.DataFrames on both sides --
+#: a decode_fn's returned DataFrame can be handed straight to the matching
+#: encode_fn's `tables` with no conversion. Almost every family always
+#: returns an empty `tables` dict; only EM4, EM3Raw, EM3, and KMALL ever
+#: populate one.
 #:
-#: KMALL_SPECIFIC (id 156) is NOT in this registry -- it predates this
-#: mechanism and keeps its own bespoke handling (_decode_kmall_specific(),
-#: _encode_kmall_specific(), and the write_swath_bathymetry_ping()
-#: kmall_specific/tx_sectors parameters) rather than being retrofitted.
+#: KMALL_SPECIFIC (id 156) is registered via a thin adapter pair
+#: (_decode_kmall_specific_adapter()/_encode_kmall_specific_adapter(), just
+#: below _encode_kmall_specific()) that repackages its own standalone
+#: _decode_kmall_specific()/_encode_kmall_specific() functions -- which
+#: predate this registry and keep their own two-named-table signature --
+#: into this registry's generic contract.
 _PING_SENSOR_SPECIFIC_CODECS = {}
 
 
@@ -2431,7 +2440,7 @@ def _decode_em4_specific(payload, pos):
     :return: (fields: dict -- the 9 top-level scalars plus every
         _decode_em_run_time()/_decode_em_pu_status() field merged in with
         a 'RunTime.'/'PuStatus.' prefix; tables: {'TxSectors':
-        list[dict]}; bytes_consumed).
+        pandas.DataFrame}; bytes_consumed).
     """
     start = pos
     (model_number,) = struct.unpack_from('>H', payload, pos); pos += 2
@@ -2493,7 +2502,9 @@ def _decode_em4_specific(payload, pos):
     fields.update({'RunTime.' + k: v for k, v in run_time_fields.items()})
     fields.update({'PuStatus.' + k: v for k, v in pu_status_fields.items()})
 
-    return fields, {'TxSectors': sector_rows}, pos - start
+    sectors = pd.DataFrame(sector_rows)
+    sectors.index.name = 'TxSectors'
+    return fields, {'TxSectors': sectors}, pos - start
 
 
 def _encode_em4_specific(subrecord_id, fields, tables=None):
@@ -2502,12 +2513,16 @@ def _encode_em4_specific(subrecord_id, fields, tables=None):
     its own 4-byte subrecord id+size word: the inverse of
     _decode_em4_specific(). Ported from gsf_enc.c's EncodeEM4Specific().
 
-    :param tables: optional {'TxSectors': list[dict]}; transmit_sectors on
-        the wire is len() of that list.
+    :param tables: optional {'TxSectors': pandas.DataFrame}; transmit_sectors
+        on the wire is len() of that table -- the exact DataFrame
+        _decode_em4_specific() returns can be passed straight back in, no
+        conversion required.
     """
     g = fields.get
     tables = tables or {}
-    sectors = tables.get('TxSectors', [])
+    sectors = tables.get('TxSectors')
+    if sectors is None:
+        sectors = pd.DataFrame()
 
     body = struct.pack('>H', int(g('ModelNumber', 0)))
     body += struct.pack('>H', int(g('PingCounter', 0)))
@@ -2527,7 +2542,7 @@ def _encode_em4_specific(subrecord_id, fields, tables=None):
     body += b'\x00' * 16  # spare_1
 
     body += struct.pack('>H', len(sectors))
-    for row in sectors:
+    for _, row in sectors.iterrows():
         r = row.get
         body += struct.pack('>h', _gsf_round(r('TiltAngle_deg', 0.0) * 100.0))
         body += struct.pack('>H', _gsf_round(r('FocusRange_m', 0.0) * 10.0))
@@ -2584,7 +2599,7 @@ def _decode_em3raw_specific(payload, pos):
     :return: (fields: dict -- the 10 top-level scalars plus every
         _decode_em_run_time()/_decode_em_pu_status() field merged in with
         a 'RunTime.'/'PuStatus.' prefix; tables: {'TxSectors':
-        list[dict]}; bytes_consumed).
+        pandas.DataFrame}; bytes_consumed).
     """
     start = pos
     (model_number,) = struct.unpack_from('>H', payload, pos); pos += 2
@@ -2646,7 +2661,9 @@ def _decode_em3raw_specific(payload, pos):
     fields.update({'RunTime.' + k: v for k, v in run_time_fields.items()})
     fields.update({'PuStatus.' + k: v for k, v in pu_status_fields.items()})
 
-    return fields, {'TxSectors': sector_rows}, pos - start
+    sectors = pd.DataFrame(sector_rows)
+    sectors.index.name = 'TxSectors'
+    return fields, {'TxSectors': sectors}, pos - start
 
 
 def _encode_em3raw_specific(subrecord_id, fields, tables=None):
@@ -2656,12 +2673,16 @@ def _encode_em3raw_specific(subrecord_id, fields, tables=None):
     _decode_em3raw_specific(). Ported from gsf_enc.c's
     EncodeEM3RawSpecific().
 
-    :param tables: optional {'TxSectors': list[dict]}; transmit_sectors on
-        the wire is len() of that list.
+    :param tables: optional {'TxSectors': pandas.DataFrame}; transmit_sectors
+        on the wire is len() of that table -- the exact DataFrame
+        _decode_em3raw_specific() returns can be passed straight back in, no
+        conversion required.
     """
     g = fields.get
     tables = tables or {}
-    sectors = tables.get('TxSectors', [])
+    sectors = tables.get('TxSectors')
+    if sectors is None:
+        sectors = pd.DataFrame()
 
     body = struct.pack('>H', int(g('ModelNumber', 0)))
     body += struct.pack('>H', int(g('PingCounter', 0)))
@@ -2682,7 +2703,7 @@ def _encode_em3raw_specific(subrecord_id, fields, tables=None):
     body += b'\x00' * 16  # spare_1
 
     body += struct.pack('>H', len(sectors))
-    for row in sectors:
+    for _, row in sectors.iterrows():
         r = row.get
         body += struct.pack('>h', _gsf_round(r('TiltAngle_deg', 0.0) * 100.0))
         body += struct.pack('>H', _gsf_round(r('FocusRange_m', 0.0) * 10.0))
@@ -2873,13 +2894,13 @@ def _decode_em3_specific(payload, pos):
     set; a file with bit 1 set but bit 0 clear has no run-time blocks at
     all on the wire (there is nothing there to read a head-1 block from).
     Each present block is decoded by _decode_em3_run_time() and returned
-    as a row (with a 'Head' key, 0 or 1) in tables['RunTime'] -- an empty
-    list if bit 0 is clear.
+    as a row (with a 'Head' column, 0 or 1) in tables['RunTime'] -- an
+    empty DataFrame if bit 0 is clear.
 
     Untested against a verified GSF file: no sample data containing an
     EM3_SPECIFIC subrecord is available.
 
-    :return: (fields: dict, tables: {'RunTime': list[dict]}, bytes_consumed).
+    :return: (fields: dict, tables: {'RunTime': pandas.DataFrame}, bytes_consumed).
     """
     start = pos
     (model_number,) = struct.unpack_from('>H', payload, pos); pos += 2
@@ -2916,7 +2937,9 @@ def _decode_em3_specific(payload, pos):
             pos += consumed
             run_time_rows.append({'Head': 1, **head1_fields})
 
-    return fields, {'RunTime': run_time_rows}, pos - start
+    run_time = pd.DataFrame(run_time_rows)
+    run_time.index.name = 'RunTime'
+    return fields, {'RunTime': run_time}, pos - start
 
 
 def _encode_em3_specific(subrecord_id, fields, tables=None):
@@ -2933,24 +2956,29 @@ def _encode_em3_specific(subrecord_id, fields, tables=None):
     encoder writes exactly the blocks the caller supplies via
     tables['RunTime'] instead of always forcing exactly one.
 
-    :param tables: optional {'RunTime': list[dict]}; each row needs a
-        'Head' key (0 or 1) selecting which position it's written at.
-        Bit 0 of the on-disk run_time_id is set iff a Head==0 row is
-        present, bit 1 iff a Head==1 row is present. A Head==1 row with
-        no matching Head==0 row is rejected (see below) -- matching
-        DecodeEM3Specific()'s nesting (bit 1 only means anything, and a
-        head-1 block is only ever written, alongside a head-0 block; an
-        unpaired head-1-only row could not be read back by this
-        decoder, or by real gsflib). An empty/absent list writes
-        run_time_id = 0 (no run-time blocks at all).
+    :param tables: optional {'RunTime': pandas.DataFrame}; each row needs a
+        'Head' column (0 or 1) selecting which position it's written at --
+        the exact DataFrame _decode_em3_specific() returns can be passed
+        straight back in, no conversion required. Bit 0 of the on-disk
+        run_time_id is set iff a Head==0 row is present, bit 1 iff a
+        Head==1 row is present. A Head==1 row with no matching Head==0 row
+        is rejected (see below) -- matching DecodeEM3Specific()'s nesting
+        (bit 1 only means anything, and a head-1 block is only ever
+        written, alongside a head-0 block; an unpaired head-1-only row
+        could not be read back by this decoder, or by real gsflib). An
+        empty/absent table writes run_time_id = 0 (no run-time blocks at
+        all).
     :raises ValueError: a row's 'Head' isn't 0 or 1; the same Head
         appears more than once; or a Head==1 row is present without a
         matching Head==0 row.
     """
     g = fields.get
     tables = tables or {}
+    run_time_df = tables.get('RunTime')
+    if run_time_df is None:
+        run_time_df = pd.DataFrame()
     rows_by_head = {}
-    for row in tables.get('RunTime', []):
+    for _, row in run_time_df.iterrows():
         head = row.get('Head')
         if head not in (0, 1):
             raise ValueError("EM3 RunTime row 'Head' must be 0 or 1, got %r" % (head,))
@@ -3458,8 +3486,8 @@ def _decode_kmall_specific(payload, pos):
     per-transmit-sector and per-extra-detection-class arrays. Ported from
     gsf_dec.c's DecodeKMALLSpecific().
 
-    :return: (scalars: dict, sector_rows: list[dict], class_rows: list[dict],
-        bytes_consumed: int)
+    :return: (scalars: dict, sector_rows: pandas.DataFrame, class_rows:
+        pandas.DataFrame, bytes_consumed: int)
     """
     start = pos
     s = {}
@@ -3585,7 +3613,11 @@ def _decode_kmall_specific(payload, pos):
 
     pos += 32  # spare5
 
-    return s, sector_rows, class_rows, pos - start
+    sectors = pd.DataFrame(sector_rows)
+    sectors.index.name = 'TxSectors'
+    classes = pd.DataFrame(class_rows)
+    classes.index.name = 'ExtraDetectionClasses'
+    return s, sectors, classes, pos - start
 
 
 def _decode_brb_intensity(payload, pos, num_beams, sensor_id):
@@ -3770,56 +3802,69 @@ def _decode_swath_bathymetry_ping(payload, major_version, scale_factors, decode_
         factors, and are expected to reuse whatever this file last decoded.
     :param decode_intensity: if True, fully decode the per-beam
         GSF_SWATH_BATHY_SUBRECORD_INTENSITY_SERIES_ARRAY subrecord (the
-        backscatter time series) into tables['IntensityTimeSeries'] --
+        backscatter time series) into record['IntensityTimeSeries'] --
         this can be tens of thousands of samples per ping, so it's opt-in
         and normally left False (used by gsf.print_intensity_series(), not
         the default gsf.print_records() path).
-    :return: (scalars: dict, tables: dict[str, pandas.DataFrame], notes: list[str])
+    :return: record: dict -- the fixed ping scalars (e.g. 'PingTime',
+        'Longitude_deg') stay flat/unprefixed at the top level, plus
+        'Beams' (pandas.DataFrame, if any beam arrays were decoded),
+        'IntensityTimeSeries' (pandas.DataFrame, if decode_intensity and
+        one was present), 'SensorSpecificID' (int)/'SensorSpecific' (dict:
+        that one family's own fields merged with its own tables, as
+        pandas.DataFrames) if a vendor sensor-specific subrecord was
+        present (at most one per ping -- see gsf.h's union
+        gsfSensorSpecific; the family name is derivable on demand via
+        _SENSOR_SPECIFIC_SUBRECORD_NAMES[SensorSpecificID]), and 'Notes'
+        (list[str], always present, diagnostic messages for anything not
+        decoded).
     """
-    scalars = {}
+    record = {}
     notes = []
 
     (sec, nsec) = struct.unpack_from('>2I', payload, 0)
-    scalars['PingTime'] = _gsf_timestamp(sec, nsec).isoformat()
+    record['PingTime'] = _gsf_timestamp(sec, nsec).isoformat()
 
     (lon_raw, lat_raw) = struct.unpack_from('>2i', payload, 8)
-    scalars['Longitude_deg'] = lon_raw / 1.0e7
-    scalars['Latitude_deg'] = lat_raw / 1.0e7
+    record['Longitude_deg'] = lon_raw / 1.0e7
+    record['Latitude_deg'] = lat_raw / 1.0e7
 
     (number_beams, center_beam, ping_flags, reserved) = struct.unpack_from('>4H', payload, 16)
-    scalars['NumberBeams'] = number_beams
-    scalars['CenterBeam'] = center_beam
-    scalars['PingFlags'] = ping_flags
+    record['NumberBeams'] = number_beams
+    record['CenterBeam'] = center_beam
+    record['PingFlags'] = ping_flags
 
     (tide_raw,) = struct.unpack_from('>h', payload, 24)
-    scalars['TideCorrector_m'] = tide_raw / 100.0
+    record['TideCorrector_m'] = tide_raw / 100.0
 
     (depth_corr_raw,) = struct.unpack_from('>i', payload, 26)
-    scalars['DepthCorrector_m'] = depth_corr_raw / 100.0
+    record['DepthCorrector_m'] = depth_corr_raw / 100.0
 
     (heading_raw,) = struct.unpack_from('>H', payload, 30)
-    scalars['Heading_deg'] = heading_raw / 100.0
+    record['Heading_deg'] = heading_raw / 100.0
 
     (pitch_raw, roll_raw, heave_raw) = struct.unpack_from('>3h', payload, 32)
-    scalars['Pitch_deg'] = pitch_raw / 100.0
-    scalars['Roll_deg'] = roll_raw / 100.0
-    scalars['Heave_m'] = heave_raw / 100.0
+    record['Pitch_deg'] = pitch_raw / 100.0
+    record['Roll_deg'] = roll_raw / 100.0
+    record['Heave_m'] = heave_raw / 100.0
 
     (course_raw, speed_raw) = struct.unpack_from('>2H', payload, 38)
-    scalars['Course_deg'] = course_raw / 100.0
-    scalars['Speed_kn'] = speed_raw / 100.0
+    record['Course_deg'] = course_raw / 100.0
+    record['Speed_kn'] = speed_raw / 100.0
 
     pos = 42
     if major_version > 2:
         (height_raw, sep_raw, gps_tide_raw) = struct.unpack_from('>3i', payload, pos)
-        scalars['Height_m'] = height_raw / 1000.0
-        scalars['SEP_m'] = sep_raw / 1000.0
-        scalars['GPSTideCorrector_m'] = gps_tide_raw / 1000.0
+        record['Height_m'] = height_raw / 1000.0
+        record['SEP_m'] = sep_raw / 1000.0
+        record['GPSTideCorrector_m'] = gps_tide_raw / 1000.0
         pos += 14  # 3 x 4-byte fields, plus 2 spare bytes
 
     beam_columns = {}
-    tables = {}
     sensor_id = None
+    sensor_specific_id = None
+    sensor_specific_fields = None
+    sensor_specific_tables = None
 
     while len(payload) - pos > 4:
         word, = struct.unpack_from('>I', payload, pos)
@@ -3859,23 +3904,6 @@ def _decode_swath_bathymetry_ping(payload, major_version, scale_factors, decode_
                 else:
                     beam_columns[label] = values
 
-        elif subrecord_id == _SUBRECORD_KMALL_SPECIFIC:
-            sensor_id = subrecord_id
-            try:
-                kmall_scalars, sector_rows, class_rows, _consumed = _decode_kmall_specific(payload, pos)
-            except (struct.error, IndexError) as exc:
-                notes.append("KMALL_SPECIFIC (156, %d bytes) not decoded: %s" % (subrecord_size, exc))
-            else:
-                scalars.update({"KMALL." + k: v for k, v in kmall_scalars.items()})
-                if sector_rows:
-                    sectors = pd.DataFrame(sector_rows)
-                    sectors.index.name = 'Sector'
-                    tables['TxSectors'] = sectors
-                if class_rows:
-                    classes = pd.DataFrame(class_rows)
-                    classes.index.name = 'ExtraDetectionClass'
-                    tables['ExtraDetectionClasses'] = classes
-
         elif subrecord_id == _SUBRECORD_INTENSITY_SERIES_ARRAY:
             if not decode_intensity:
                 notes.append(
@@ -3895,7 +3923,7 @@ def _decode_swath_bathymetry_ping(payload, major_version, scale_factors, decode_
                         _header, beam_rows, _consumed = decoded
                         series = pd.DataFrame(beam_rows)
                         series.index.name = 'Beam'
-                        tables['IntensityTimeSeries'] = series
+                        record['IntensityTimeSeries'] = series
 
         elif subrecord_id in _PING_SENSOR_SPECIFIC_CODECS:
             sensor_id = subrecord_id
@@ -3907,12 +3935,9 @@ def _decode_swath_bathymetry_ping(payload, major_version, scale_factors, decode_
                              (_SENSOR_SPECIFIC_SUBRECORD_NAMES.get(subrecord_id, str(subrecord_id)),
                               subrecord_id, subrecord_size, exc))
             else:
-                scalars.update({family_label + "." + k: v for k, v in fields.items()})
-                for table_name, rows in extra_tables.items():
-                    if rows:
-                        df = pd.DataFrame(rows)
-                        df.index.name = table_name
-                        tables[family_label + "." + table_name] = df
+                sensor_specific_id = subrecord_id
+                sensor_specific_fields = fields
+                sensor_specific_tables = extra_tables
 
         elif subrecord_id in _SENSOR_SPECIFIC_SUBRECORD_NAMES:
             sensor_id = subrecord_id
@@ -3927,9 +3952,18 @@ def _decode_swath_bathymetry_ping(payload, major_version, scale_factors, decode_
     if beam_columns:
         beams = pd.DataFrame(beam_columns)
         beams.index.name = 'Beam'
-        tables['Beams'] = beams
+        record['Beams'] = beams
 
-    return scalars, tables, notes
+    if sensor_specific_id is not None:
+        record['SensorSpecificID'] = sensor_specific_id
+        merged = dict(sensor_specific_fields)
+        for table_name, df in sensor_specific_tables.items():
+            if len(df):
+                merged[table_name] = df
+        record['SensorSpecific'] = merged
+
+    record['Notes'] = notes
+    return record
 
 
 def _decode_single_beam_ping(payload):
@@ -3948,47 +3982,52 @@ def _decode_single_beam_ping(payload):
 
     Untested against a verified GSF file: no sample data containing a
     GSF_RECORD_SINGLE_BEAM_PING record is available.
+
+    :return: record: dict -- the fixed ping scalars (e.g. 'PingTime',
+        'Depth_m') stay flat/unprefixed at the top level, plus
+        'SensorSpecificID' (int)/'SensorSpecific' (dict, tables as
+        pandas.DataFrames) if a sensor-specific tail subrecord was
+        present, and 'Notes' (list[str], always present).
     """
-    scalars = {}
+    record = {}
     (sec, nsec) = struct.unpack_from('>2I', payload, 0)
-    scalars['PingTime'] = _gsf_timestamp(sec, nsec).isoformat()
+    record['PingTime'] = _gsf_timestamp(sec, nsec).isoformat()
 
     (lon_raw, lat_raw) = struct.unpack_from('>2i', payload, 8)
-    scalars['Longitude_deg'] = lon_raw / 1.0e7
-    scalars['Latitude_deg'] = lat_raw / 1.0e7
+    record['Longitude_deg'] = lon_raw / 1.0e7
+    record['Latitude_deg'] = lat_raw / 1.0e7
 
     (tide_raw,) = struct.unpack_from('>h', payload, 16)
-    scalars['TideCorrector_m'] = tide_raw / 100.0
+    record['TideCorrector_m'] = tide_raw / 100.0
 
     (depth_corr_raw,) = struct.unpack_from('>i', payload, 18)
-    scalars['DepthCorrector_m'] = depth_corr_raw / 100.0
+    record['DepthCorrector_m'] = depth_corr_raw / 100.0
 
     (heading_raw,) = struct.unpack_from('>H', payload, 22)
-    scalars['Heading_deg'] = heading_raw / 100.0
+    record['Heading_deg'] = heading_raw / 100.0
 
     (pitch_raw, roll_raw, heave_raw) = struct.unpack_from('>3h', payload, 24)
-    scalars['Pitch_deg'] = pitch_raw / 100.0
-    scalars['Roll_deg'] = roll_raw / 100.0
-    scalars['Heave_m'] = heave_raw / 100.0
+    record['Pitch_deg'] = pitch_raw / 100.0
+    record['Roll_deg'] = roll_raw / 100.0
+    record['Heave_m'] = heave_raw / 100.0
 
     (depth_raw,) = struct.unpack_from('>i', payload, 30)
-    scalars['Depth_m'] = depth_raw / 100.0
+    record['Depth_m'] = depth_raw / 100.0
 
     (ssc_raw,) = struct.unpack_from('>h', payload, 34)
-    scalars['SoundSpeedCorrection_m'] = ssc_raw / 100.0
+    record['SoundSpeedCorrection_m'] = ssc_raw / 100.0
 
     (pos_type,) = struct.unpack_from('>H', payload, 36)
-    scalars['PositioningSystemType'] = pos_type
+    record['PositioningSystemType'] = pos_type
 
     remaining = len(payload) - 38
     notes = []
-    tables = {}
     if remaining > 4:
         word, = struct.unpack_from('>I', payload, 38)
         subrecord_id = (word >> 24) & 0xFF
         subrecord_size = word & 0x00FFFFFF
         if subrecord_id in _SINGLE_BEAM_SENSOR_SPECIFIC_CODECS:
-            family_label, decode_fn, _encode_fn = _SINGLE_BEAM_SENSOR_SPECIFIC_CODECS[subrecord_id]
+            _family_label, decode_fn, _encode_fn = _SINGLE_BEAM_SENSOR_SPECIFIC_CODECS[subrecord_id]
             try:
                 fields, extra_tables, _consumed = decode_fn(payload, 42)
             except (struct.error, IndexError) as exc:
@@ -3996,19 +4035,20 @@ def _decode_single_beam_ping(payload):
                              (_SINGLE_BEAM_SENSOR_SPECIFIC_NAMES.get(subrecord_id, str(subrecord_id)),
                               subrecord_id, subrecord_size, exc))
             else:
-                scalars.update({family_label + "." + k: v for k, v in fields.items()})
-                for table_name, rows in extra_tables.items():
-                    if rows:
-                        df = pd.DataFrame(rows)
-                        df.index.name = table_name
-                        tables[family_label + "." + table_name] = df
+                record['SensorSpecificID'] = subrecord_id
+                merged = dict(fields)
+                for table_name, df in extra_tables.items():
+                    if len(df):
+                        merged[table_name] = df
+                record['SensorSpecific'] = merged
         elif subrecord_id in _SINGLE_BEAM_SENSOR_SPECIFIC_NAMES:
             notes.append("%s (%d, %d bytes) not decoded" %
                          (_SINGLE_BEAM_SENSOR_SPECIFIC_NAMES[subrecord_id], subrecord_id, subrecord_size))
         else:
             notes.append("subrecord id %d (%d bytes) not decoded" % (subrecord_id, subrecord_size))
 
-    return scalars, tables, notes
+    record['Notes'] = notes
+    return record
 
 
 def _decode_swath_bathy_summary(payload):
@@ -4607,47 +4647,81 @@ def _encode_hv_navigation_error(nav_error_time, record_id, horizontal_error_m,
     return out
 
 
-def _encode_single_beam_ping(ping_time, longitude_deg, latitude_deg, tide_corrector_m,
-                              depth_corrector_m, heading_deg, pitch_deg, roll_deg,
-                              heave_m, depth_m, sound_speed_correction_m,
-                              positioning_system_type=0, sensor_specific=None):
+#: Fields _encode_single_beam_ping()/_encode_swath_bathymetry_ping() require
+#: `record` to supply (see each function's docstring).
+_REQUIRED_SINGLE_BEAM_PING_FIELDS = (
+    'PingTime', 'Longitude_deg', 'Latitude_deg', 'TideCorrector_m',
+    'DepthCorrector_m', 'Heading_deg', 'Pitch_deg', 'Roll_deg', 'Heave_m',
+    'Depth_m', 'SoundSpeedCorrection_m')
+
+
+def _split_sensor_specific(sensor_specific):
+    """
+    Split a merged SensorSpecific dict (as returned by
+    _decode_swath_bathymetry_ping()/_decode_single_beam_ping() -- a flat
+    dict of scalar fields plus zero or more pandas.DataFrame-valued table
+    entries) back into the (fields: dict, tables: dict[str,
+    pandas.DataFrame]) shape every registered encode_fn expects. This is
+    pure repackaging, not a data-format conversion -- table values pass
+    through untouched as DataFrames, exactly as decode produced them.
+    """
+    fields, tables = {}, {}
+    for k, v in sensor_specific.items():
+        if isinstance(v, pd.DataFrame):
+            tables[k] = v
+        else:
+            fields[k] = v
+    return fields, tables
+
+
+def _encode_single_beam_ping(record):
     """
     Encode a GSF_RECORD_SINGLE_BEAM_PING payload: the fixed-format
     scalars, plus (if given) one sensor-specific tail subrecord via
     _SINGLE_BEAM_SENSOR_SPECIFIC_CODECS. Ported from gsf_enc.c's
-    gsfEncodeSinglebeam(). The exact inverse of _decode_single_beam_ping().
+    gsfEncodeSinglebeam(). The exact inverse of _decode_single_beam_ping()
+    -- a decoded record can be passed straight back in, unmodified.
 
-    :param sensor_specific: optional (subrecord_id, fields) or
-        (subrecord_id, fields, tables) tuple -- same shape as
-        _encode_swath_bathymetry_ping()'s `sensor_specific` parameter, but
-        looked up in _SINGLE_BEAM_SENSOR_SPECIFIC_CODECS instead.
-    :raises KeyError: `sensor_specific`'s subrecord_id has no encoder
+    :param record: dict with the same shape _decode_single_beam_ping()
+        returns: the 11 fixed scalars listed in
+        _REQUIRED_SINGLE_BEAM_PING_FIELDS (all required), optional
+        'PositioningSystemType' (defaults to 0), and optional
+        'SensorSpecificID' (int)/'SensorSpecific' (dict, any table values
+        as pandas.DataFrame) for the one sensor-specific tail subrecord.
+        'Notes', if present, is ignored (there is no wire slot for it).
+    :raises ValueError: a required field is missing from `record`.
+    :raises KeyError: `record['SensorSpecificID']` has no encoder
         registered in _SINGLE_BEAM_SENSOR_SPECIFIC_CODECS.
 
     Untested against a verified GSF file: no sample data containing a
     GSF_RECORD_SINGLE_BEAM_PING record is available.
     """
-    sec, nsec = _gsf_epoch(ping_time)
-    out = struct.pack('>2I', sec, nsec)
-    out += struct.pack('>i', _gsf_round(longitude_deg * 1.0e7))
-    out += struct.pack('>i', _gsf_round(latitude_deg * 1.0e7))
-    out += struct.pack('>h', _gsf_round(tide_corrector_m * 100.0))
-    out += struct.pack('>i', _gsf_round(depth_corrector_m * 100.0))
-    out += struct.pack('>H', _gsf_round(heading_deg * 100.0))
-    out += struct.pack('>h', _gsf_round(pitch_deg * 100.0))
-    out += struct.pack('>h', _gsf_round(roll_deg * 100.0))
-    out += struct.pack('>h', _gsf_round(heave_m * 100.0))
-    out += struct.pack('>i', _gsf_round(depth_m * 100.0))
-    out += struct.pack('>h', _gsf_round(sound_speed_correction_m * 100.0))
-    out += struct.pack('>H', positioning_system_type)
+    missing = [k for k in _REQUIRED_SINGLE_BEAM_PING_FIELDS if record.get(k) is None]
+    if missing:
+        raise ValueError("record is missing required field(s): %s" % ', '.join(missing))
 
-    if sensor_specific is not None:
-        subrecord_id, fields, *rest = sensor_specific
-        sensor_tables = rest[0] if rest else {}
+    g = record.get
+    sec, nsec = _gsf_epoch(g('PingTime'))
+    out = struct.pack('>2I', sec, nsec)
+    out += struct.pack('>i', _gsf_round(g('Longitude_deg') * 1.0e7))
+    out += struct.pack('>i', _gsf_round(g('Latitude_deg') * 1.0e7))
+    out += struct.pack('>h', _gsf_round(g('TideCorrector_m') * 100.0))
+    out += struct.pack('>i', _gsf_round(g('DepthCorrector_m') * 100.0))
+    out += struct.pack('>H', _gsf_round(g('Heading_deg') * 100.0))
+    out += struct.pack('>h', _gsf_round(g('Pitch_deg') * 100.0))
+    out += struct.pack('>h', _gsf_round(g('Roll_deg') * 100.0))
+    out += struct.pack('>h', _gsf_round(g('Heave_m') * 100.0))
+    out += struct.pack('>i', _gsf_round(g('Depth_m') * 100.0))
+    out += struct.pack('>h', _gsf_round(g('SoundSpeedCorrection_m') * 100.0))
+    out += struct.pack('>H', int(g('PositioningSystemType', 0)))
+
+    subrecord_id = record.get('SensorSpecificID')
+    if subrecord_id is not None:
         if subrecord_id not in _SINGLE_BEAM_SENSOR_SPECIFIC_CODECS:
             raise KeyError("no encoder registered for single-beam sensor-specific subrecord id %d" % subrecord_id)
         _family_label, _decode_fn, encode_fn = _SINGLE_BEAM_SENSOR_SPECIFIC_CODECS[subrecord_id]
-        out += encode_fn(subrecord_id, fields, sensor_tables)
+        fields, tables = _split_sensor_specific(record.get('SensorSpecific') or {})
+        out += encode_fn(subrecord_id, fields, tables)
 
     return out
 
@@ -5018,13 +5092,17 @@ def _encode_kmall_specific(s, sector_rows=None, class_rows=None):
         _decode_kmall_specific()'s return). Missing keys default to 0.
         NumTxSectors/NumExtraDetectionClasses are always derived from
         len(sector_rows)/len(class_rows), not read from `s`.
-    :param sector_rows: list of per-transmit-sector dicts (see
-        _decode_kmall_specific()), at most 9 (GSF_MAX_KMALL_SECTORS).
-    :param class_rows: list of per-extra-detection-class dicts, at most 11
-        (GSF_MAX_KMALL_EXTRA_CLASSES).
+    :param sector_rows: pandas.DataFrame of per-transmit-sector rows (see
+        _decode_kmall_specific()), at most 9 (GSF_MAX_KMALL_SECTORS) are
+        written -- the exact DataFrame _decode_kmall_specific() returns
+        can be passed straight back in, no conversion required.
+    :param class_rows: pandas.DataFrame of per-extra-detection-class rows,
+        at most 11 (GSF_MAX_KMALL_EXTRA_CLASSES) are written.
     """
-    sector_rows = sector_rows or []
-    class_rows = class_rows or []
+    if sector_rows is None:
+        sector_rows = pd.DataFrame()
+    if class_rows is None:
+        class_rows = pd.DataFrame()
     g = s.get
 
     out = bytearray()
@@ -5084,9 +5162,9 @@ def _encode_kmall_specific(s, sector_rows=None, class_rows=None):
     out += struct.pack('>i', _gsf_round(g('EllipsoidHeightReRefPoint_m', 0.0) * 1.0e3))
     out += b'\x00' * 32
 
-    for row in sector_rows[:9]:  # gsf.h: GSF_MAX_KMALL_SECTORS
+    for _, row in sector_rows.iloc[:9].iterrows():  # gsf.h: GSF_MAX_KMALL_SECTORS
         r = row.get
-        out += struct.pack('>3B', r('TxSectorNumb', 0), r('TxArrNumber', 0), r('TxSubArray', 0))
+        out += struct.pack('>3B', int(r('TxSectorNumb', 0)), int(r('TxArrNumber', 0)), int(r('TxSubArray', 0)))
         out += struct.pack('>i', _gsf_round(r('SectorTransmitDelay_sec', 0.0) * 1.0e6))
         out += struct.pack('>i', _gsf_round(r('TiltAngleReTx_deg', 0.0) * 1.0e6))
         out += struct.pack('>i', _gsf_round(r('TxNominalSourceLevel_dB', 0.0) * 1.0e6))
@@ -5094,7 +5172,7 @@ def _encode_kmall_specific(s, sector_rows=None, class_rows=None):
         out += struct.pack('>i', _gsf_round(r('CentreFreq_Hz', 0.0) * 1.0e3))
         out += struct.pack('>i', _gsf_round(r('SignalBandWidth_Hz', 0.0) * 1.0e3))
         out += struct.pack('>i', _gsf_round(r('TotalSignalLength_sec', 0.0) * 1.0e6))
-        out += struct.pack('>2B', r('PulseShading', 0), r('SignalWaveForm', 0))
+        out += struct.pack('>2B', int(r('PulseShading', 0)), int(r('SignalWaveForm', 0)))
         out += struct.pack('>i', _gsf_round(r('HighVoltageLevel_dB', 0.0) * 1.0e6))
         out += struct.pack('>i', _gsf_round(r('SectorTrackingCorr_dB', 0.0) * 1.0e6))
         out += struct.pack('>i', _gsf_round(r('EffectiveSignalLength_sec', 0.0) * 1.0e6))
@@ -5119,15 +5197,52 @@ def _encode_kmall_specific(s, sector_rows=None, class_rows=None):
     out += struct.pack('>H', g('NumBytesPerClass', 35))
     out += b'\x00' * 32
 
-    for row in class_rows[:11]:  # gsf.h: GSF_MAX_KMALL_EXTRA_CLASSES
-        out += struct.pack('>H', row.get('NumExtraDetInClass', 0))
-        out += struct.pack('>B', row.get('AlarmFlag', 0))
+    for _, row in class_rows.iloc[:11].iterrows():  # gsf.h: GSF_MAX_KMALL_EXTRA_CLASSES
+        out += struct.pack('>H', int(row.get('NumExtraDetInClass', 0)))
+        out += struct.pack('>B', int(row.get('AlarmFlag', 0)))
         out += b'\x00' * 32
 
     out += b'\x00' * 32
 
     header_word = (_SUBRECORD_KMALL_SPECIFIC << 24) | len(out)
     return struct.pack('>I', header_word) + bytes(out)
+
+
+def _decode_kmall_specific_adapter(payload, pos):
+    """
+    Adapter registering KMALL_SPECIFIC (id 156) in
+    _PING_SENSOR_SPECIFIC_CODECS under the registry's generic
+    decode_fn(payload, pos) -> (fields, tables, bytes_consumed) contract
+    every other family follows. Delegates to _decode_kmall_specific(),
+    whose own two-named-table return predates this registry and keeps its
+    own dedicated tests -- this is pure repackaging, no data conversion,
+    since both sides already speak pandas.DataFrame.
+    """
+    scalars, sector_df, class_df, consumed = _decode_kmall_specific(payload, pos)
+    tables = {}
+    if len(sector_df):
+        tables['TxSectors'] = sector_df
+    if len(class_df):
+        tables['ExtraDetectionClasses'] = class_df
+    return scalars, tables, consumed
+
+
+def _encode_kmall_specific_adapter(subrecord_id, fields, tables=None):
+    """
+    Adapter registering KMALL_SPECIFIC (id 156) as an encode_fn under the
+    registry's generic (subrecord_id, fields, tables) -> bytes contract.
+    Splits the merged `tables` dict back into _encode_kmall_specific()'s
+    own two positional DataFrame parameters -- pure repackaging, no data
+    conversion. `subrecord_id` is accepted (matching the generic
+    contract) but ignored -- _encode_kmall_specific() always stamps 156
+    itself via _SUBRECORD_KMALL_SPECIFIC.
+    """
+    tables = tables or {}
+    return _encode_kmall_specific(fields, tables.get('TxSectors'), tables.get('ExtraDetectionClasses'))
+
+
+_PING_SENSOR_SPECIFIC_CODECS[_SUBRECORD_KMALL_SPECIFIC] = (
+    "KMALL", _decode_kmall_specific_adapter, _encode_kmall_specific_adapter)
 
 
 #: label (as used in tables['Beams']/_PING_ARRAY_SUBRECORDS) -> subrecordID.
@@ -5153,11 +5268,14 @@ def new_swath_bathymetry_ping_scalars():
     you must overwrite, and every optional field pre-set to its
     GSF_NULL_* "not available" sentinel (or, for CenterBeam/PingFlags/
     GPSTideCorrector_m, to 0/0.0 -- gsf.h defines no sentinel for those
-    three). Populate this dict with whatever you actually know and pass
-    it straight to write_swath_bathymetry_ping(); every field you don't
-    touch is written as "not available", not as a misleading 0/0.0, and
-    every valid key name is visible here in one place instead of having
-    to be looked up. See convert.md's "Marking a field as not available"
+    three). Populate this dict with whatever you actually know, add
+    'Beams' (a dict of {column label: array-like} or a pandas.DataFrame)
+    and, optionally, 'SensorSpecificID'/'SensorSpecific' for a vendor
+    sensor-specific subrecord, and pass the result straight to
+    write_swath_bathymetry_ping(); every scalar field you don't touch is
+    written as "not available", not as a misleading 0/0.0, and every
+    valid key name is visible here in one place instead of having to be
+    looked up. See convert.md's "Marking a field as not available"
     section.
 
     :raises ValueError: (from write_swath_bathymetry_ping()/
@@ -5186,79 +5304,81 @@ def new_swath_bathymetry_ping_scalars():
     }
 
 
-def _encode_swath_bathymetry_ping(scalars, beams, kmall_specific=None, tx_sectors=None,
-                                   scale_factors=None, major_version=3, sensor_specific=None):
+def _encode_swath_bathymetry_ping(record, scale_factors=None, major_version=3):
     """
     Encode a GSF_RECORD_SWATH_BATHYMETRY_PING payload: the fixed-format
     scalar fields, a GSF_SWATH_BATHY_SUBRECORD_SCALE_FACTORS subrecord, one
-    beam-array subrecord per entry in `beams`, and (if given) the KMALL
-    vendor-specific subrecord. The exact inverse of
-    _decode_swath_bathymetry_ping(): `scalars` and `beams` use the same
-    keys/column labels its `scalars`/`tables['Beams']` return, so a decoded
-    ping can be re-encoded directly (PingTime accepts the ISO8601 string
+    beam-array subrecord per entry in `record['Beams']`, and (if given) the
+    vendor sensor-specific subrecord. The exact inverse of
+    _decode_swath_bathymetry_ping(): `record` uses the same shape that
+    function returns, so a decoded ping can be re-encoded directly,
+    unmodified (PingTime accepts the ISO8601 string
     _decode_swath_bathymetry_ping() produces -- see _gsf_epoch()).
 
-    :param scalars: dict; PingTime, Longitude_deg, Latitude_deg, and
+    :param record: dict; PingTime, Longitude_deg, Latitude_deg, and
         NumberBeams are required (must be present and not None). Building
         this dict with new_swath_bathymetry_ping_scalars() is recommended
-        over hand-assembling it: it pre-fills every valid key name, so
-        there's nothing to look up and nothing to get wrong. CenterBeam,
+        over hand-assembling it: it pre-fills every valid scalar key name,
+        so there's nothing to look up and nothing to get wrong. CenterBeam,
         PingFlags, and (at major_version > 2) GPSTideCorrector_m default
         to 0/0.0 if absent (no GSF_NULL_* sentinel is defined for these).
-        Every other key (TideCorrector_m, DepthCorrector_m, Heading_deg,
-        Pitch_deg, Roll_deg, Heave_m, Course_deg, Speed_kn, and, at
-        major_version > 2, Height_m/SEP_m) defaults to its GSF_NULL_*
-        sentinel (e.g. GSF_NULL_SPEED = 99.0 knots) if absent, per gsf.h's
-        convention -- NOT 0/0.0, since 0 is itself a valid measured value
-        for most of these fields. Pass the value explicitly (0.0 or
-        otherwise) when you have it; omit the key only when it's
+        Every other scalar key (TideCorrector_m, DepthCorrector_m,
+        Heading_deg, Pitch_deg, Roll_deg, Heave_m, Course_deg, Speed_kn,
+        and, at major_version > 2, Height_m/SEP_m) defaults to its
+        GSF_NULL_* sentinel (e.g. GSF_NULL_SPEED = 99.0 knots) if absent,
+        per gsf.h's convention -- NOT 0/0.0, since 0 is itself a valid
+        measured value for most of these fields. Pass the value explicitly
+        (0.0 or otherwise) when you have it; omit the key only when it's
         genuinely unavailable.
-    :param beams: dict of {column label: array-like}, e.g. {'Depth_m': [...],
-        'AcrossTrack_m': [...]}. Every array must have length NumberBeams.
-        Only labels resolvable by _beam_array_subrecord_id() (i.e. present
-        in DEFAULT_PING_SCALE_FACTORS/`scale_factors`, or 'BeamFlags'/
-        'QualityFlags') can be encoded.
-    :param kmall_specific: optional dict for the KMALL_SPECIFIC subrecord
-        (see new_kmall_specific()/_decode_kmall_specific()'s return);
-        `tx_sectors` is its matching list of per-sector dicts (see
-        new_kmall_tx_sector()).
+
+        record['Beams']: dict of {column label: array-like} or a
+        pandas.DataFrame, e.g. {'Depth_m': [...], 'AcrossTrack_m': [...]}.
+        Every array must have length NumberBeams. Only labels resolvable
+        by _beam_array_subrecord_id() (i.e. present in
+        DEFAULT_PING_SCALE_FACTORS/`scale_factors`, or
+        'BeamFlags'/'QualityFlags') can be encoded. Omit it (or pass an
+        empty dict) for a ping with no beam arrays.
+
+        record['SensorSpecificID']/record['SensorSpecific']: optional, for
+        any vendor sensor-specific subrecord registered in
+        _PING_SENSOR_SPECIFIC_CODECS (including KMALL_SPECIFIC, id 156).
+        'SensorSpecific' is a flat dict of that family's scalar field
+        names (as returned, unprefixed, by _decode_swath_bathymetry_ping())
+        plus, for families with nested per-element arrays (EM3, EM3Raw,
+        EM4, KMALL), any table entries as pandas.DataFrame values under
+        their table name (e.g. 'TxSectors') -- the exact DataFrames
+        _decode_swath_bathymetry_ping() returns can be passed straight
+        back in, no conversion required.
+
+        record['Notes'], if present, is ignored (there is no wire slot for
+        record-level free-text notes in this subrecord).
     :param scale_factors: optional override of DEFAULT_PING_SCALE_FACTORS;
         same shape (subrecordID -> (multiplier, offset, field_width_bytes,
         signed)).
-    :param sensor_specific: optional (subrecord_id, fields) or
-        (subrecord_id, fields, tables) tuple for any other vendor
-        sensor-specific subrecord registered in _PING_SENSOR_SPECIFIC_CODECS
-        (every one except KMALL_SPECIFIC, which uses
-        `kmall_specific`/`tx_sectors` above instead). `fields` is a flat
-        dict of that family's scalar field names (as returned, minus the
-        "<Family>." prefix, by _decode_swath_bathymetry_ping()); `tables`
-        is an optional dict of {table name: list[dict]} for any nested
-        per-element arrays that family's decoder produces (e.g. EM3's
-        per-head run-time-parameters array) -- omit it (or pass {}) for
-        families with no such arrays. Mutually exclusive with
-        `kmall_specific` only in the sense that subrecord_id must not be
-        156 -- pass both if you genuinely need two sensor-specific
-        subrecords in one ping (unusual, but not disallowed by gsflib).
-    :raises KeyError: `sensor_specific`'s subrecord_id has no encoder
+    :raises KeyError: `record['SensorSpecificID']` has no encoder
         registered in _PING_SENSOR_SPECIFIC_CODECS.
     :raises ValueError: PingTime, Longitude_deg, Latitude_deg, or
-        NumberBeams is missing or None in `scalars`; or an encoded beam
+        NumberBeams is missing or None in `record`; or an encoded beam
         value doesn't fit its field width.
-    :raises KeyError: `beams` has a column with no resolvable subrecordID.
+    :raises KeyError: `record['Beams']` has a column with no resolvable
+        subrecordID.
     """
     missing = [k for k in ('PingTime', 'Longitude_deg', 'Latitude_deg', 'NumberBeams')
-               if scalars.get(k) is None]
+               if record.get(k) is None]
     if missing:
         raise ValueError(
-            "scalars is missing required field(s): %s (see "
+            "record is missing required field(s): %s (see "
             "new_swath_bathymetry_ping_scalars())" % ', '.join(missing))
 
-    g = scalars.get
-    number_beams = int(scalars['NumberBeams'])
+    g = record.get
+    number_beams = int(record['NumberBeams'])
+    beams = record.get('Beams')
+    if beams is None:
+        beams = {}
 
-    out = struct.pack('>2I', *_gsf_epoch(scalars['PingTime']))
-    out += struct.pack('>i', _gsf_round(scalars['Longitude_deg'] * 1.0e7))
-    out += struct.pack('>i', _gsf_round(scalars['Latitude_deg'] * 1.0e7))
+    out = struct.pack('>2I', *_gsf_epoch(record['PingTime']))
+    out += struct.pack('>i', _gsf_round(record['Longitude_deg'] * 1.0e7))
+    out += struct.pack('>i', _gsf_round(record['Latitude_deg'] * 1.0e7))
     out += struct.pack('>4H', number_beams, int(g('CenterBeam', 0)), int(g('PingFlags', 0)), 0)
     out += struct.pack('>h', _gsf_round(g('TideCorrector_m', GSF_NULL_TIDE_CORRECTOR) * 100.0))
     out += struct.pack('>i', _gsf_round(g('DepthCorrector_m', GSF_NULL_DEPTH_CORRECTOR) * 100.0))
@@ -5307,16 +5427,13 @@ def _encode_swath_bathymetry_ping(scalars, beams, kmall_specific=None, tx_sector
     out += _encode_scale_factors(used_scale_factors)
     out += array_subrecords
 
-    if kmall_specific is not None:
-        out += _encode_kmall_specific(kmall_specific, tx_sectors)
-
-    if sensor_specific is not None:
-        subrecord_id, fields, *rest = sensor_specific
-        sensor_tables = rest[0] if rest else {}
+    subrecord_id = record.get('SensorSpecificID')
+    if subrecord_id is not None:
         if subrecord_id not in _PING_SENSOR_SPECIFIC_CODECS:
             raise KeyError("no encoder registered for sensor-specific subrecord id %d" % subrecord_id)
         _family_label, _decode_fn, encode_fn = _PING_SENSOR_SPECIFIC_CODECS[subrecord_id]
-        out += encode_fn(subrecord_id, fields, sensor_tables)
+        fields, tables = _split_sensor_specific(record.get('SensorSpecific') or {})
+        out += encode_fn(subrecord_id, fields, tables)
 
     return out
 
@@ -5652,6 +5769,46 @@ class gsf():
     # Debugging
     ###########################################################
 
+    @staticmethod
+    def _print_ping_record(record):
+        """
+        print_records() helper for the two record types that return a
+        merged dict (_decode_swath_bathymetry_ping()/
+        _decode_single_beam_ping()) instead of the (scalars, tables,
+        notes) 3-tuple every other decoded record type uses. Prints flat
+        scalars, then 'Notes', then 'Beams'/'IntensityTimeSeries' as
+        tables, then 'SensorSpecific' (its own scalar fields under a
+        header naming the resolved family, followed by any of its own
+        table entries).
+        """
+        flat = {k: v for k, v in record.items()
+                if k not in ('Beams', 'IntensityTimeSeries', 'SensorSpecificID', 'SensorSpecific', 'Notes')}
+        if flat:
+            width = max(len(k) for k in flat)
+            for k, v in flat.items():
+                print("  %-*s : %s" % (width, k, v))
+        for note in record.get('Notes', []):
+            print("  # %s" % note)
+        for label in ('Beams', 'IntensityTimeSeries'):
+            table = record.get(label)
+            if table is not None and len(table):
+                print("-- %s --" % label)
+                print(table.to_string())
+        sensor_specific = record.get('SensorSpecific')
+        if sensor_specific:
+            sensor_id = record.get('SensorSpecificID')
+            family_name = _SENSOR_SPECIFIC_SUBRECORD_NAMES.get(sensor_id, str(sensor_id))
+            scalar_items = {k: v for k, v in sensor_specific.items() if not isinstance(v, pd.DataFrame)}
+            if scalar_items:
+                print("-- SensorSpecific (%s, id=%s) --" % (family_name, sensor_id))
+                width = max(len(k) for k in scalar_items)
+                for k, v in scalar_items.items():
+                    print("  %-*s : %s" % (width, k, v))
+            for k, v in sensor_specific.items():
+                if isinstance(v, pd.DataFrame) and len(v):
+                    print("-- %s --" % k)
+                    print(v.to_string())
+
     def print_records(self, record_type=None):
         """
         Debugging utility: walk the file and print each record. Where a
@@ -5755,6 +5912,9 @@ class gsf():
                     if decoded is None:
                         text = ''.join(chr(b) if 32 <= b < 127 else '.' for b in payload)
                         print(text)
+                    elif rid in (RecordType.GSF_RECORD_SWATH_BATHYMETRY_PING,
+                                 RecordType.GSF_RECORD_SINGLE_BEAM_PING):
+                        self._print_ping_record(decoded)
                     else:
                         scalars, tables, notes = decoded
                         if scalars:
@@ -5822,19 +5982,19 @@ class gsf():
 
                 if is_ping:
                     try:
-                        scalars, tables, notes = _decode_swath_bathymetry_ping(
+                        record = _decode_swath_bathymetry_ping(
                             payload, major_version, scale_factors, decode_intensity=True)
                     except (struct.error, IndexError) as exc:
                         print("# ping offset=%d: decode failed (%s)" % (offset, exc))
                     else:
-                        series = tables.get('IntensityTimeSeries')
+                        series = record.get('IntensityTimeSeries')
                         if series is None:
-                            note = next((n for n in notes if 'IntensityTimeSeries' in n), None)
+                            note = next((n for n in record.get('Notes', []) if 'IntensityTimeSeries' in n), None)
                             print("# ping offset=%d ping_time=%s: %s" %
-                                  (offset, scalars.get('PingTime', '?'),
+                                  (offset, record.get('PingTime', '?'),
                                    note or "no intensity time series subrecord"))
                         else:
-                            print("# ping offset=%d ping_time=%s" % (offset, scalars.get('PingTime', '?')))
+                            print("# ping offset=%d ping_time=%s" % (offset, record.get('PingTime', '?')))
                             print("# Beam,SampleCount,DetectSample,StartRangeSamples,Sample0,Sample1,...")
                             for beam, row in series.iterrows():
                                 fields = [str(beam), str(row['SampleCount']), str(row['DetectSample']),
@@ -5926,21 +6086,20 @@ class gsf():
             RecordType.GSF_RECORD_ATTITUDE,
             _encode_attitude(attitude_time, pitch_deg, roll_deg, heave_m, heading_deg))
 
-    def write_swath_bathymetry_ping(self, scalars, beams, kmall_specific=None,
-                                     tx_sectors=None, scale_factors=None, sensor_specific=None,
-                                     auto_scale=None):
+    def write_swath_bathymetry_ping(self, record, scale_factors=None, auto_scale=None):
         """
         Write a GSF_RECORD_SWATH_BATHYMETRY_PING record. See
         _encode_swath_bathymetry_ping() for the expected shape of
-        `scalars`/`beams`/`kmall_specific`/`tx_sectors`/`scale_factors`/
-        `sensor_specific`. Uses self.gsfVersion (set by write_header(),
-        which must be called first) to decide whether to include the
-        height/SEP/GPS-tide-corrector fields (major_version > 2 -- true
-        for every GSF_VERSION this codebase writes).
+        `record`/`scale_factors` -- the same dict shape
+        _decode_swath_bathymetry_ping() returns, so a decoded ping can be
+        passed straight back in. Uses self.gsfVersion (set by
+        write_header(), which must be called first) to decide whether to
+        include the height/SEP/GPS-tide-corrector fields (major_version >
+        2 -- true for every GSF_VERSION this codebase writes).
 
         :param auto_scale: if True (or left as None with self.auto_scale
             True), `scale_factors` is computed automatically for every
-            beam array in `beams`, instead of falling back to
+            beam array in `record['Beams']`, instead of falling back to
             DEFAULT_PING_SCALE_FACTORS: each array's (multiplier, offset)
             is chosen by _pick_ping_scale_factor() from that array's
             actual values in this ping, reusing whatever scale factor was
@@ -5962,6 +6121,10 @@ class gsf():
         if auto_scale and scale_factors is not None:
             raise ValueError(
                 "auto_scale=True and an explicit scale_factors= override are mutually exclusive")
+
+        beams = record.get('Beams')
+        if beams is None:
+            beams = {}
 
         if auto_scale:
             # Resolve one (multiplier, offset, width, signed) scale
@@ -5985,8 +6148,7 @@ class gsf():
         major_version = _gsf_major_version(self.gsfVersion)
         self.write_record(
             RecordType.GSF_RECORD_SWATH_BATHYMETRY_PING,
-            _encode_swath_bathymetry_ping(
-                scalars, beams, kmall_specific, tx_sectors, scale_factors, major_version, sensor_specific))
+            _encode_swath_bathymetry_ping(record, scale_factors, major_version))
 
     def write_swath_bathy_summary(self, start_time, end_time,
                                    min_latitude_deg, min_longitude_deg,
@@ -6052,24 +6214,19 @@ class gsf():
                 nav_error_time, record_id, horizontal_error_m, vertical_error_m,
                 sep_uncertainty_m, position_type))
 
-    def write_single_beam_ping(self, ping_time, longitude_deg, latitude_deg, tide_corrector_m,
-                                depth_corrector_m, heading_deg, pitch_deg, roll_deg, heave_m,
-                                depth_m, sound_speed_correction_m, positioning_system_type=0,
-                                sensor_specific=None):
+    def write_single_beam_ping(self, record):
         """
         Write a GSF_RECORD_SINGLE_BEAM_PING record. See
-        _encode_single_beam_ping() for the fixed fields and the
-        `sensor_specific` tail-subrecord parameter.
+        _encode_single_beam_ping() for the expected shape of `record` --
+        the same dict shape _decode_single_beam_ping() returns, so a
+        decoded ping can be passed straight back in.
 
         Untested against a verified GSF file: no sample data containing a
         GSF_RECORD_SINGLE_BEAM_PING record is available.
         """
         self.write_record(
             RecordType.GSF_RECORD_SINGLE_BEAM_PING,
-            _encode_single_beam_ping(
-                ping_time, longitude_deg, latitude_deg, tide_corrector_m, depth_corrector_m,
-                heading_deg, pitch_deg, roll_deg, heave_m, depth_m,
-                sound_speed_correction_m, positioning_system_type, sensor_specific))
+            _encode_single_beam_ping(record))
 
 
 ###########################################################

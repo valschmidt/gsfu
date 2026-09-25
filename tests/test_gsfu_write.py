@@ -21,6 +21,7 @@ independent of decode.
 import datetime
 import struct
 
+import pandas as pd
 import pytest
 
 from GSFU.gsfu import (
@@ -398,64 +399,61 @@ class TestEncodeHvNavigationError:
 # ---------------------------------------------------------------------------
 
 class TestEncodeSingleBeamPing:
+    _RECORD = {
+        'PingTime': 1700000000.5, 'Longitude_deg': -70.5, 'Latitude_deg': 43.1,
+        'TideCorrector_m': 0.1, 'DepthCorrector_m': -1.2, 'Heading_deg': 123.45,
+        'Pitch_deg': -1.1, 'Roll_deg': 0.4, 'Heave_m': 0.2, 'Depth_m': 25.75,
+        'SoundSpeedCorrection_m': 0.05,
+    }
+
     def test_round_trip(self):
-        payload = _encode_single_beam_ping(
-            ping_time=1700000000.5, longitude_deg=-70.5, latitude_deg=43.1,
-            tide_corrector_m=0.1, depth_corrector_m=-1.2, heading_deg=123.45,
-            pitch_deg=-1.1, roll_deg=0.4, heave_m=0.2, depth_m=25.75,
-            sound_speed_correction_m=0.05, positioning_system_type=3)
+        record = {**self._RECORD, 'PositioningSystemType': 3}
+        payload = _encode_single_beam_ping(record)
 
-        scalars, _tables, notes = _decode_single_beam_ping(payload)
+        decoded = _decode_single_beam_ping(payload)
 
-        assert scalars['Longitude_deg'] == pytest.approx(-70.5)
-        assert scalars['Latitude_deg'] == pytest.approx(43.1)
-        assert scalars['TideCorrector_m'] == pytest.approx(0.1)
-        assert scalars['DepthCorrector_m'] == pytest.approx(-1.2)
-        assert scalars['Heading_deg'] == pytest.approx(123.45)
-        assert scalars['Pitch_deg'] == pytest.approx(-1.1)
-        assert scalars['Roll_deg'] == pytest.approx(0.4)
-        assert scalars['Heave_m'] == pytest.approx(0.2)
-        assert scalars['Depth_m'] == pytest.approx(25.75)
-        assert scalars['SoundSpeedCorrection_m'] == pytest.approx(0.05)
-        assert scalars['PositioningSystemType'] == 3
-        assert notes == []
+        assert decoded['Longitude_deg'] == pytest.approx(-70.5)
+        assert decoded['Latitude_deg'] == pytest.approx(43.1)
+        assert decoded['TideCorrector_m'] == pytest.approx(0.1)
+        assert decoded['DepthCorrector_m'] == pytest.approx(-1.2)
+        assert decoded['Heading_deg'] == pytest.approx(123.45)
+        assert decoded['Pitch_deg'] == pytest.approx(-1.1)
+        assert decoded['Roll_deg'] == pytest.approx(0.4)
+        assert decoded['Heave_m'] == pytest.approx(0.2)
+        assert decoded['Depth_m'] == pytest.approx(25.75)
+        assert decoded['SoundSpeedCorrection_m'] == pytest.approx(0.05)
+        assert decoded['PositioningSystemType'] == 3
+        assert decoded['Notes'] == []
 
     def test_sensor_specific_round_trip(self):
         fields = {'NavigationError': -5, 'MppSource': 1, 'TideSource': 2}
-        payload = _encode_single_beam_ping(
-            ping_time=1700000000.5, longitude_deg=-70.5, latitude_deg=43.1,
-            tide_corrector_m=0.1, depth_corrector_m=-1.2, heading_deg=123.45,
-            pitch_deg=-1.1, roll_deg=0.4, heave_m=0.2, depth_m=25.75,
-            sound_speed_correction_m=0.05, sensor_specific=(201, fields))
+        record = {**self._RECORD, 'SensorSpecificID': 201, 'SensorSpecific': fields}
+        payload = _encode_single_beam_ping(record)
 
-        scalars, _tables, notes = _decode_single_beam_ping(payload)
+        decoded = _decode_single_beam_ping(payload)
 
-        assert scalars['Echotrac.NavigationError'] == -5
-        assert scalars['Echotrac.MppSource'] == 1
-        assert scalars['Echotrac.TideSource'] == 2
-        assert notes == []
+        assert decoded['SensorSpecificID'] == 201
+        assert decoded['SensorSpecific']['NavigationError'] == -5
+        assert decoded['SensorSpecific']['MppSource'] == 1
+        assert decoded['SensorSpecific']['TideSource'] == 2
+        assert decoded['Notes'] == []
 
     def test_noshdb_sensor_specific_round_trip(self):
         fields = {'TypeCode': 7, 'CartoCode': 9}
-        payload = _encode_single_beam_ping(
-            ping_time=1700000000.5, longitude_deg=-70.5, latitude_deg=43.1,
-            tide_corrector_m=0.1, depth_corrector_m=-1.2, heading_deg=123.45,
-            pitch_deg=-1.1, roll_deg=0.4, heave_m=0.2, depth_m=25.75,
-            sound_speed_correction_m=0.05, sensor_specific=(205, fields))
+        record = {**self._RECORD, 'SensorSpecificID': 205, 'SensorSpecific': fields}
+        payload = _encode_single_beam_ping(record)
 
-        scalars, _tables, notes = _decode_single_beam_ping(payload)
+        decoded = _decode_single_beam_ping(payload)
 
-        assert scalars['NOSHDB.TypeCode'] == 7
-        assert scalars['NOSHDB.CartoCode'] == 9
-        assert notes == []
+        assert decoded['SensorSpecificID'] == 205
+        assert decoded['SensorSpecific']['TypeCode'] == 7
+        assert decoded['SensorSpecific']['CartoCode'] == 9
+        assert decoded['Notes'] == []
 
     def test_sensor_specific_unregistered_id_raises_keyerror(self):
+        record = {**self._RECORD, 'SensorSpecificID': 999, 'SensorSpecific': {}}
         with pytest.raises(KeyError):
-            _encode_single_beam_ping(
-                ping_time=1700000000.5, longitude_deg=-70.5, latitude_deg=43.1,
-                tide_corrector_m=0.1, depth_corrector_m=-1.2, heading_deg=123.45,
-                pitch_deg=-1.1, roll_deg=0.4, heave_m=0.2, depth_m=25.75,
-                sound_speed_correction_m=0.05, sensor_specific=(999, {}))
+            _encode_single_beam_ping(record)
 
 
 # ---------------------------------------------------------------------------
@@ -1569,14 +1567,14 @@ class TestEncodeEm4Specific:
             'RunTime.ModelNumber': 710, 'RunTime.MinDepth_m': 10.0,
             'PuStatus.SensorStatus': 63, 'PuStatus.YawStabilization_deg': -1.5,
         }
-        sectors = [
+        sectors = pd.DataFrame([
             {'TiltAngle_deg': 1.5, 'FocusRange_m': 100.0, 'SignalLength_sec': 0.005,
              'TransmitDelay_sec': 0.0, 'CenterFrequency_Hz': 71000.0, 'MeanAbsorption_dBkm': 40.0,
              'WaveformID': 1, 'SectorNumber': 0, 'SignalBandwidth_Hz': 14000.0},
             {'TiltAngle_deg': -1.5, 'FocusRange_m': 0.0, 'SignalLength_sec': 0.003,
              'TransmitDelay_sec': 0.001, 'CenterFrequency_Hz': 72000.0, 'MeanAbsorption_dBkm': 41.0,
              'WaveformID': 0, 'SectorNumber': 1, 'SignalBandwidth_Hz': 15000.0},
-        ]
+        ])
         payload = _encode_em4_specific(133, fields, {'TxSectors': sectors})
 
         decoded, tables, consumed = _decode_em4_specific(payload, 4)
@@ -1591,8 +1589,8 @@ class TestEncodeEm4Specific:
         assert decoded['PuStatus.SensorStatus'] == 63
         assert decoded['PuStatus.YawStabilization_deg'] == pytest.approx(-1.5)
         assert len(tables['TxSectors']) == 2
-        assert tables['TxSectors'][0]['CenterFrequency_Hz'] == pytest.approx(71000.0)
-        assert tables['TxSectors'][1]['TiltAngle_deg'] == pytest.approx(-1.5)
+        assert tables['TxSectors'].iloc[0]['CenterFrequency_Hz'] == pytest.approx(71000.0)
+        assert tables['TxSectors'].iloc[1]['TiltAngle_deg'] == pytest.approx(-1.5)
         assert consumed == len(payload) - 4
 
     def test_registered_under_every_em4_id(self):
@@ -1609,7 +1607,7 @@ class TestEncodeEm4Specific:
         assert word & 0xFFFFFF == len(payload) - 4
 
         _decoded, tables, consumed = _decode_em4_specific(payload, 4)
-        assert tables == {'TxSectors': []}
+        assert len(tables['TxSectors']) == 0
         assert consumed == len(payload) - 4
 
 
@@ -1687,16 +1685,16 @@ class TestEncodeEm3Specific:
         decoded, tables, consumed = _decode_em3_specific(payload, 4)
 
         assert decoded == self._FIELDS
-        assert tables == {'RunTime': []}
+        assert len(tables['RunTime']) == 0
         assert consumed == len(payload) - 4
 
     def test_round_trip_head0_only(self):
-        payload = _encode_em3_specific(118, self._FIELDS, {'RunTime': [self._HEAD0]})
+        payload = _encode_em3_specific(118, self._FIELDS, {'RunTime': pd.DataFrame([self._HEAD0])})
         _decoded, tables, consumed = _decode_em3_specific(payload, 4)
 
         assert len(tables['RunTime']) == 1
-        assert tables['RunTime'][0]['Head'] == 0
-        assert tables['RunTime'][0]['ModelNumber'] == 3000
+        assert tables['RunTime'].iloc[0]['Head'] == 0
+        assert tables['RunTime'].iloc[0]['ModelNumber'] == 3000
         assert consumed == len(payload) - 4
 
     def test_round_trip_both_heads(self):
@@ -1704,26 +1702,26 @@ class TestEncodeEm3Specific:
         # shipped can only ever write head 0 -- confirms this encoder can
         # write both heads of an EM3000D dual-head system.
         head1 = dict(self._HEAD0, Head=1, SerialNumber=101)
-        payload = _encode_em3_specific(130, self._FIELDS, {'RunTime': [self._HEAD0, head1]})
+        payload = _encode_em3_specific(130, self._FIELDS, {'RunTime': pd.DataFrame([self._HEAD0, head1])})
         _decoded, tables, consumed = _decode_em3_specific(payload, 4)
 
         assert len(tables['RunTime']) == 2
-        assert tables['RunTime'][0]['Head'] == 0
-        assert tables['RunTime'][1]['Head'] == 1
-        assert tables['RunTime'][1]['SerialNumber'] == 101
+        assert tables['RunTime'].iloc[0]['Head'] == 0
+        assert tables['RunTime'].iloc[1]['Head'] == 1
+        assert tables['RunTime'].iloc[1]['SerialNumber'] == 101
         assert consumed == len(payload) - 4
 
     def test_head1_without_head0_raises(self):
         with pytest.raises(ValueError):
-            _encode_em3_specific(118, self._FIELDS, {'RunTime': [dict(self._HEAD0, Head=1)]})
+            _encode_em3_specific(118, self._FIELDS, {'RunTime': pd.DataFrame([dict(self._HEAD0, Head=1)])})
 
     def test_duplicate_head_raises(self):
         with pytest.raises(ValueError):
-            _encode_em3_specific(118, self._FIELDS, {'RunTime': [self._HEAD0, dict(self._HEAD0)]})
+            _encode_em3_specific(118, self._FIELDS, {'RunTime': pd.DataFrame([self._HEAD0, dict(self._HEAD0)])})
 
     def test_invalid_head_value_raises(self):
         with pytest.raises(ValueError):
-            _encode_em3_specific(118, self._FIELDS, {'RunTime': [dict(self._HEAD0, Head=2)]})
+            _encode_em3_specific(118, self._FIELDS, {'RunTime': pd.DataFrame([dict(self._HEAD0, Head=2)])})
 
     def test_registered_under_every_em3_id(self):
         for subrecord_id in (118, 119, 120, 128, 129, 130, 131, 132, 139):
@@ -1749,14 +1747,14 @@ class TestEncodeEm3RawSpecific:
             'RunTime.ModelNumber': 300, 'RunTime.MinDepth_m': 10.0,
             'PuStatus.SensorStatus': 63, 'PuStatus.YawStabilization_deg': -1.5,
         }
-        sectors = [
+        sectors = pd.DataFrame([
             {'TiltAngle_deg': 1.5, 'FocusRange_m': 100.0, 'SignalLength_sec': 0.005,
              'TransmitDelay_sec': 0.0, 'CenterFrequency_Hz': 71000.0,
              'WaveformID': 1, 'SectorNumber': 0, 'SignalBandwidth_Hz': 14000.0},
             {'TiltAngle_deg': -1.5, 'FocusRange_m': 0.0, 'SignalLength_sec': 0.003,
              'TransmitDelay_sec': 0.001, 'CenterFrequency_Hz': 72000.0,
              'WaveformID': 0, 'SectorNumber': 1, 'SignalBandwidth_Hz': 15000.0},
-        ]
+        ])
         payload = _encode_em3raw_specific(140, fields, {'TxSectors': sectors})
 
         decoded, tables, consumed = _decode_em3raw_specific(payload, 4)
@@ -1773,9 +1771,9 @@ class TestEncodeEm3RawSpecific:
         assert decoded['PuStatus.SensorStatus'] == 63
         assert decoded['PuStatus.YawStabilization_deg'] == pytest.approx(-1.5)
         assert len(tables['TxSectors']) == 2
-        assert tables['TxSectors'][0]['CenterFrequency_Hz'] == pytest.approx(71000.0)
-        assert 'MeanAbsorption_dBkm' not in tables['TxSectors'][0]
-        assert tables['TxSectors'][1]['TiltAngle_deg'] == pytest.approx(-1.5)
+        assert tables['TxSectors'].iloc[0]['CenterFrequency_Hz'] == pytest.approx(71000.0)
+        assert 'MeanAbsorption_dBkm' not in tables['TxSectors'].columns
+        assert tables['TxSectors'].iloc[1]['TiltAngle_deg'] == pytest.approx(-1.5)
         assert consumed == len(payload) - 4
 
     def test_registered_under_every_em3raw_id(self):
@@ -1792,7 +1790,7 @@ class TestEncodeEm3RawSpecific:
         assert word & 0xFFFFFF == len(payload) - 4
 
         _decoded, tables, consumed = _decode_em3raw_specific(payload, 4)
-        assert tables == {'TxSectors': []}
+        assert len(tables['TxSectors']) == 0
         assert consumed == len(payload) - 4
 
 
@@ -1809,8 +1807,8 @@ class TestEncodeKmallSpecific:
         assert decoded['PingRate_Hz'] == pytest.approx(40.0)
         assert decoded['FreqRangeLowLim_Hz'] == pytest.approx(49000.0)
         assert decoded['Latitude_deg'] == pytest.approx(43.1)
-        assert sector_rows == []
-        assert class_rows == []
+        assert len(sector_rows) == 0
+        assert len(class_rows) == 0
         assert consumed == len(payload) - 4
 
     def test_gsf_kmall_version_always_zero(self):
@@ -1827,10 +1825,10 @@ class TestEncodeKmallSpecific:
         assert decoded['NumTxSectors'] == 0
 
     def test_tx_sectors_round_trip_and_count_derived_from_list(self):
-        sectors = [
+        sectors = pd.DataFrame([
             {'TxSectorNumb': 0, 'CentreFreq_Hz': 49000.0, 'TiltAngleReTx_deg': 4.5},
             {'TxSectorNumb': 1, 'CentreFreq_Hz': 52000.0, 'TiltAngleReTx_deg': -3.2},
-        ]
+        ])
         # Deliberately wrong NumTxSectors in `s` -- must be ignored in favor
         # of len(sectors).
         payload = _encode_kmall_specific({'NumTxSectors': 99}, sector_rows=sectors)
@@ -1839,20 +1837,22 @@ class TestEncodeKmallSpecific:
 
         assert decoded['NumTxSectors'] == 2
         assert len(decoded_sectors) == 2
-        assert decoded_sectors[0]['CentreFreq_Hz'] == pytest.approx(49000.0)
-        assert decoded_sectors[1]['TiltAngleReTx_deg'] == pytest.approx(-3.2)
+        assert decoded_sectors.iloc[0]['CentreFreq_Hz'] == pytest.approx(49000.0)
+        assert decoded_sectors.iloc[1]['TiltAngleReTx_deg'] == pytest.approx(-3.2)
 
     def test_extra_detection_classes_round_trip(self):
-        classes = [{'NumExtraDetInClass': 5, 'AlarmFlag': 1}]
+        classes = pd.DataFrame([{'NumExtraDetInClass': 5, 'AlarmFlag': 1}])
         payload = _encode_kmall_specific({}, class_rows=classes)
 
         decoded, _sectors, decoded_classes, _consumed = _decode_kmall_specific(payload, 4)
 
         assert decoded['NumExtraDetectionClasses'] == 1
-        assert decoded_classes == [{'NumExtraDetInClass': 5, 'AlarmFlag': 1}]
+        assert len(decoded_classes) == 1
+        assert decoded_classes.iloc[0]['NumExtraDetInClass'] == 5
+        assert decoded_classes.iloc[0]['AlarmFlag'] == 1
 
     def test_byte_length_matches_header_word(self):
-        payload = _encode_kmall_specific({}, sector_rows=[{}], class_rows=[{}])
+        payload = _encode_kmall_specific({}, sector_rows=pd.DataFrame([{}]), class_rows=pd.DataFrame([{}]))
         word, = struct.unpack_from('>I', payload, 0)
         assert (word >> 24) & 0xFF == 156
         assert word & 0xFFFFFF == len(payload) - 4
@@ -1872,54 +1872,61 @@ class TestEncodeSwathBathymetryPing:
     }
     _BEAMS = {'Depth_m': [10.0, 10.5, 9.95], 'AcrossTrack_m': [-8.0, 0.0, 5.0]}
 
+    @classmethod
+    def _record(cls, beams=None, **overrides):
+        record = {**cls._SCALARS, 'Beams': cls._BEAMS if beams is None else beams}
+        record.update(overrides)
+        return record
+
     def test_round_trip_scalars_and_beams(self):
-        payload = _encode_swath_bathymetry_ping(self._SCALARS, self._BEAMS, major_version=3)
+        payload = _encode_swath_bathymetry_ping(self._record(), major_version=3)
 
-        scalars, tables, notes = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
+        decoded = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
 
-        assert scalars['NumberBeams'] == 3
-        assert scalars['Longitude_deg'] == pytest.approx(-70.5)
-        assert scalars['Latitude_deg'] == pytest.approx(43.1)
-        assert scalars['Pitch_deg'] == pytest.approx(-1.1)
-        assert list(tables['Beams']['Depth_m']) == pytest.approx([10.0, 10.5, 9.95])
-        assert list(tables['Beams']['AcrossTrack_m']) == pytest.approx([-8.0, 0.0, 5.0])
-        assert notes == []
+        assert decoded['NumberBeams'] == 3
+        assert decoded['Longitude_deg'] == pytest.approx(-70.5)
+        assert decoded['Latitude_deg'] == pytest.approx(43.1)
+        assert decoded['Pitch_deg'] == pytest.approx(-1.1)
+        assert list(decoded['Beams']['Depth_m']) == pytest.approx([10.0, 10.5, 9.95])
+        assert list(decoded['Beams']['AcrossTrack_m']) == pytest.approx([-8.0, 0.0, 5.0])
+        assert decoded['Notes'] == []
 
     def test_major_version_2_omits_height_sep_gps_fields(self):
-        payload_v2 = _encode_swath_bathymetry_ping(self._SCALARS, {}, major_version=2)
-        payload_v3 = _encode_swath_bathymetry_ping(self._SCALARS, {}, major_version=3)
+        payload_v2 = _encode_swath_bathymetry_ping(self._record(beams={}), major_version=2)
+        payload_v3 = _encode_swath_bathymetry_ping(self._record(beams={}), major_version=3)
         # Height_m/SEP_m/GPSTideCorrector_m (4 bytes each) plus 2 spare bytes.
         assert len(payload_v3) - len(payload_v2) == 14
 
-        scalars_v2, _t, _n = _decode_swath_bathymetry_ping(payload_v2, major_version=2, scale_factors={})
-        scalars_v3, _t, _n = _decode_swath_bathymetry_ping(payload_v3, major_version=3, scale_factors={})
-        assert 'Height_m' not in scalars_v2
-        assert 'Height_m' in scalars_v3
+        decoded_v2 = _decode_swath_bathymetry_ping(payload_v2, major_version=2, scale_factors={})
+        decoded_v3 = _decode_swath_bathymetry_ping(payload_v3, major_version=3, scale_factors={})
+        assert 'Height_m' not in decoded_v2
+        assert 'Height_m' in decoded_v3
 
     def test_missing_required_scalar_raises_valueerror(self):
-        incomplete = dict(self._SCALARS)
+        incomplete = self._record()
         del incomplete['NumberBeams']
         with pytest.raises(ValueError, match='NumberBeams'):
-            _encode_swath_bathymetry_ping(incomplete, self._BEAMS)
+            _encode_swath_bathymetry_ping(incomplete)
 
     def test_required_scalar_left_as_none_raises_valueerror(self):
         # new_swath_bathymetry_ping_scalars() sets required fields to None
         # as a placeholder -- forgetting to overwrite one must not
         # silently encode None (a struct.pack TypeError deep in the
         # encoder) or a nonsense value.
-        scalars = new_swath_bathymetry_ping_scalars()
-        scalars.update(Longitude_deg=-70.5, Latitude_deg=43.1, NumberBeams=1)
+        record = new_swath_bathymetry_ping_scalars()
+        record.update(Longitude_deg=-70.5, Latitude_deg=43.1, NumberBeams=1)
+        record['Beams'] = {'Depth_m': [10.0]}
         # PingTime deliberately left None.
         with pytest.raises(ValueError, match='PingTime'):
-            _encode_swath_bathymetry_ping(scalars, {'Depth_m': [10.0]})
+            _encode_swath_bathymetry_ping(record)
 
     def test_unknown_beams_column_raises_keyerror(self):
         with pytest.raises(KeyError):
-            _encode_swath_bathymetry_ping(self._SCALARS, {'NotARealColumn': [1, 2, 3]})
+            _encode_swath_bathymetry_ping(self._record(beams={'NotARealColumn': [1, 2, 3]}))
 
     def test_omitted_optional_scalars_default_to_null_sentinels_not_zero(self):
         # Per gsf.h's "Define null values to be used for missing data": a
-        # field left out of `scalars` must not silently become 0/0.0 --
+        # field left out of `record` must not silently become 0/0.0 --
         # several of these fields are equally valid at exactly zero.
         required_only = {
             'PingTime': self._SCALARS['PingTime'],
@@ -1927,30 +1934,30 @@ class TestEncodeSwathBathymetryPing:
             'Latitude_deg': self._SCALARS['Latitude_deg'],
             'NumberBeams': self._SCALARS['NumberBeams'],
         }
-        payload = _encode_swath_bathymetry_ping(required_only, {}, major_version=3)
-        scalars, _tables, _notes = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
+        payload = _encode_swath_bathymetry_ping(required_only, major_version=3)
+        decoded = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
 
-        assert scalars['TideCorrector_m'] == pytest.approx(GSF_NULL_TIDE_CORRECTOR)
-        assert scalars['DepthCorrector_m'] == pytest.approx(GSF_NULL_DEPTH_CORRECTOR)
-        assert scalars['Heading_deg'] == pytest.approx(GSF_NULL_HEADING)
-        assert scalars['Pitch_deg'] == pytest.approx(GSF_NULL_PITCH)
-        assert scalars['Roll_deg'] == pytest.approx(GSF_NULL_ROLL)
-        assert scalars['Heave_m'] == pytest.approx(GSF_NULL_HEAVE)
-        assert scalars['Course_deg'] == pytest.approx(GSF_NULL_COURSE)
-        assert scalars['Speed_kn'] == pytest.approx(GSF_NULL_SPEED)
-        assert scalars['Height_m'] == pytest.approx(GSF_NULL_HEIGHT)
-        assert scalars['SEP_m'] == pytest.approx(GSF_NULL_SEP)
+        assert decoded['TideCorrector_m'] == pytest.approx(GSF_NULL_TIDE_CORRECTOR)
+        assert decoded['DepthCorrector_m'] == pytest.approx(GSF_NULL_DEPTH_CORRECTOR)
+        assert decoded['Heading_deg'] == pytest.approx(GSF_NULL_HEADING)
+        assert decoded['Pitch_deg'] == pytest.approx(GSF_NULL_PITCH)
+        assert decoded['Roll_deg'] == pytest.approx(GSF_NULL_ROLL)
+        assert decoded['Heave_m'] == pytest.approx(GSF_NULL_HEAVE)
+        assert decoded['Course_deg'] == pytest.approx(GSF_NULL_COURSE)
+        assert decoded['Speed_kn'] == pytest.approx(GSF_NULL_SPEED)
+        assert decoded['Height_m'] == pytest.approx(GSF_NULL_HEIGHT)
+        assert decoded['SEP_m'] == pytest.approx(GSF_NULL_SEP)
         # No GSF_NULL_* sentinel is defined for these -- 0 is the only
         # available default.
-        assert scalars['CenterBeam'] == 0
-        assert scalars['GPSTideCorrector_m'] == pytest.approx(0.0)
+        assert decoded['CenterBeam'] == 0
+        assert decoded['GPSTideCorrector_m'] == pytest.approx(0.0)
 
     def test_explicit_zero_survives_round_trip_distinct_from_null_default(self):
         # A caller-supplied 0.0 (a real, known-zero measurement) must not
         # collapse into the same on-disk value as the null default above.
-        scalars = dict(self._SCALARS, Course_deg=0.0, Speed_kn=0.0)
-        payload = _encode_swath_bathymetry_ping(scalars, self._BEAMS, major_version=3)
-        decoded, _tables, _notes = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
+        payload = _encode_swath_bathymetry_ping(
+            self._record(Course_deg=0.0, Speed_kn=0.0), major_version=3)
+        decoded = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
 
         assert decoded['Course_deg'] == pytest.approx(0.0)
         assert decoded['Speed_kn'] == pytest.approx(0.0)
@@ -1958,55 +1965,57 @@ class TestEncodeSwathBathymetryPing:
     def test_beam_flags_round_trip(self):
         beams = dict(self._BEAMS)
         beams['BeamFlags'] = [0, 0, 1]
-        payload = _encode_swath_bathymetry_ping(self._SCALARS, beams)
-        _scalars, tables, _notes = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
-        assert list(tables['Beams']['BeamFlags']) == [0, 0, 1]
+        payload = _encode_swath_bathymetry_ping(self._record(beams=beams))
+        decoded = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
+        assert list(decoded['Beams']['BeamFlags']) == [0, 0, 1]
 
     def test_quality_flags_round_trip(self):
         beams = dict(self._BEAMS)
         beams['QualityFlags'] = [3, 0, 2]
-        payload = _encode_swath_bathymetry_ping(self._SCALARS, beams)
-        _scalars, tables, _notes = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
-        assert list(tables['Beams']['QualityFlags']) == [3, 0, 2]
+        payload = _encode_swath_bathymetry_ping(self._record(beams=beams))
+        decoded = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
+        assert list(decoded['Beams']['QualityFlags']) == [3, 0, 2]
 
     def test_kmall_specific_and_tx_sectors_round_trip(self):
         kmall_specific = {'EchoSounderID': 712, 'DgmType': 1}
-        tx_sectors = [{'TxSectorNumb': 0, 'CentreFreq_Hz': 49000.0}]
-        payload = _encode_swath_bathymetry_ping(
-            self._SCALARS, self._BEAMS, kmall_specific=kmall_specific, tx_sectors=tx_sectors)
+        tx_sectors = pd.DataFrame([{'TxSectorNumb': 0, 'CentreFreq_Hz': 49000.0}])
+        record = self._record(
+            SensorSpecificID=156, SensorSpecific={**kmall_specific, 'TxSectors': tx_sectors})
+        payload = _encode_swath_bathymetry_ping(record)
 
-        scalars, tables, notes = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
+        decoded = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
 
-        assert scalars['KMALL.EchoSounderID'] == 712
-        assert 'TxSectors' in tables
-        assert len(tables['TxSectors']) == 1
-        assert notes == []
+        assert decoded['SensorSpecificID'] == 156
+        assert decoded['SensorSpecific']['EchoSounderID'] == 712
+        assert 'TxSectors' in decoded['SensorSpecific']
+        assert len(decoded['SensorSpecific']['TxSectors']) == 1
+        assert decoded['Notes'] == []
 
     def test_sensor_specific_round_trip(self):
         # Generic _PING_SENSOR_SPECIFIC_CODECS dispatch (elac_mkii_specific
         # id 117 as the reference example -- any other registered id
         # exercises the same code path in _encode_/_decode_swath_bathymetry_ping()).
         fields = {'Mode': 5, 'PingNumber': 42}
-        payload = _encode_swath_bathymetry_ping(
-            self._SCALARS, self._BEAMS, sensor_specific=(117, fields))
+        record = self._record(SensorSpecificID=117, SensorSpecific=fields)
+        payload = _encode_swath_bathymetry_ping(record)
 
-        scalars, _tables, notes = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
+        decoded = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
 
-        assert scalars['ElacMkII.Mode'] == 5
-        assert scalars['ElacMkII.PingNumber'] == 42
-        assert notes == []
+        assert decoded['SensorSpecific']['Mode'] == 5
+        assert decoded['SensorSpecific']['PingNumber'] == 42
+        assert decoded['Notes'] == []
 
     def test_em12_sensor_specific_round_trip(self):
         fields = {'PingNumber': 100, 'Resolution': 1, 'PingQuality': 50,
                   'SoundVelocity_mps': 1500.3, 'Mode': 2}
-        payload = _encode_swath_bathymetry_ping(
-            self._SCALARS, self._BEAMS, sensor_specific=(103, fields))
+        record = self._record(SensorSpecificID=103, SensorSpecific=fields)
+        payload = _encode_swath_bathymetry_ping(record)
 
-        scalars, _tables, notes = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
+        decoded = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
 
-        assert scalars['EM12.PingNumber'] == 100
-        assert scalars['EM12.SoundVelocity_mps'] == pytest.approx(1500.3)
-        assert notes == []
+        assert decoded['SensorSpecific']['PingNumber'] == 100
+        assert decoded['SensorSpecific']['SoundVelocity_mps'] == pytest.approx(1500.3)
+        assert decoded['Notes'] == []
 
     def test_em1000_sensor_specific_round_trip(self):
         # EM1000 (id 111) shares EM950's codec -- confirm the shared-codec
@@ -2014,26 +2023,27 @@ class TestEncodeSwathBathymetryPing:
         # in isolation (see TestEncodeEm950Specific.
         # test_same_codec_registered_for_em950_and_em1000).
         fields = {'PingNumber': 42, 'Mode': 3}
-        payload = _encode_swath_bathymetry_ping(
-            self._SCALARS, self._BEAMS, sensor_specific=(111, fields))
+        record = self._record(SensorSpecificID=111, SensorSpecific=fields)
+        payload = _encode_swath_bathymetry_ping(record)
 
-        scalars, _tables, notes = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
+        decoded = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
 
-        assert scalars['EM1000.PingNumber'] == 42
-        assert scalars['EM1000.Mode'] == 3
-        assert notes == []
+        assert decoded['SensorSpecificID'] == 111
+        assert decoded['SensorSpecific']['PingNumber'] == 42
+        assert decoded['SensorSpecific']['Mode'] == 3
+        assert decoded['Notes'] == []
 
     def test_seabat_sensor_specific_round_trip(self):
         fields = {'PingNumber': 42, 'SurfaceVelocity_mps': 1500.5, 'Mode': 3,
                   'SonarRange_m': 100, 'TransmitPower': 5, 'ReceiveGain': 6}
-        payload = _encode_swath_bathymetry_ping(
-            self._SCALARS, self._BEAMS, sensor_specific=(110, fields))
+        record = self._record(SensorSpecificID=110, SensorSpecific=fields)
+        payload = _encode_swath_bathymetry_ping(record)
 
-        scalars, _tables, notes = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
+        decoded = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
 
-        assert scalars['SeaBat.PingNumber'] == 42
-        assert scalars['SeaBat.SurfaceVelocity_mps'] == pytest.approx(1500.5)
-        assert notes == []
+        assert decoded['SensorSpecific']['PingNumber'] == 42
+        assert decoded['SensorSpecific']['SurfaceVelocity_mps'] == pytest.approx(1500.5)
+        assert decoded['Notes'] == []
 
     def test_reson8100_sensor_specific_round_trip(self):
         # id 125 (RESON_8125) exercises the shared Reson8100 codec under a
@@ -2041,129 +2051,129 @@ class TestEncodeSwathBathymetryPing:
         # dispatch both follow subrecord_id correctly.
         fields = {'PingNumber': 3, 'SonarID': 99, 'SurfaceVelocity_mps': 1500.2,
                   'BeamSpacing_deg': 0.5, 'ProjectorAngle': -50}
-        payload = _encode_swath_bathymetry_ping(
-            self._SCALARS, self._BEAMS, sensor_specific=(125, fields))
+        record = self._record(SensorSpecificID=125, SensorSpecific=fields)
+        payload = _encode_swath_bathymetry_ping(record)
 
-        scalars, _tables, notes = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
+        decoded = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
 
-        assert scalars['Reson8100.PingNumber'] == 3
-        assert scalars['Reson8100.SonarID'] == 99
-        assert scalars['Reson8100.SurfaceVelocity_mps'] == pytest.approx(1500.2)
-        assert scalars['Reson8100.BeamSpacing_deg'] == pytest.approx(0.5)
-        assert scalars['Reson8100.ProjectorAngle'] == -50
-        assert notes == []
+        assert decoded['SensorSpecific']['PingNumber'] == 3
+        assert decoded['SensorSpecific']['SonarID'] == 99
+        assert decoded['SensorSpecific']['SurfaceVelocity_mps'] == pytest.approx(1500.2)
+        assert decoded['SensorSpecific']['BeamSpacing_deg'] == pytest.approx(0.5)
+        assert decoded['SensorSpecific']['ProjectorAngle'] == -50
+        assert decoded['Notes'] == []
 
     def test_delta_t_sensor_specific_round_trip(self):
         fields = {'DecodeFileType': 'DT4', 'PingNumber': 77, 'SoundVelocity_mps': 1500.0,
                   'Altitude_m': 12.34}
-        payload = _encode_swath_bathymetry_ping(
-            self._SCALARS, self._BEAMS, sensor_specific=(150, fields))
+        record = self._record(SensorSpecificID=150, SensorSpecific=fields)
+        payload = _encode_swath_bathymetry_ping(record)
 
-        scalars, _tables, notes = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
+        decoded = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
 
-        assert scalars['DeltaT.DecodeFileType'] == 'DT4'
-        assert scalars['DeltaT.PingNumber'] == 77
-        assert scalars['DeltaT.SoundVelocity_mps'] == pytest.approx(1500.0)
-        assert scalars['DeltaT.Altitude_m'] == pytest.approx(12.34)
-        assert notes == []
+        assert decoded['SensorSpecific']['DecodeFileType'] == 'DT4'
+        assert decoded['SensorSpecific']['PingNumber'] == 77
+        assert decoded['SensorSpecific']['SoundVelocity_mps'] == pytest.approx(1500.0)
+        assert decoded['SensorSpecific']['Altitude_m'] == pytest.approx(12.34)
+        assert decoded['Notes'] == []
 
     def test_sass_sensor_specific_round_trip(self):
         # id 112 (TypeIII SeaBeam) exercises the shared SASS codec under
         # its non-primary id.
         fields = {'LeftmostBeam': 1, 'RightmostBeam': 60, 'PingNumber': 5}
-        payload = _encode_swath_bathymetry_ping(
-            self._SCALARS, self._BEAMS, sensor_specific=(112, fields))
+        record = self._record(SensorSpecificID=112, SensorSpecific=fields)
+        payload = _encode_swath_bathymetry_ping(record)
 
-        scalars, _tables, notes = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
+        decoded = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
 
-        assert scalars['TypeIIISeaBeam.LeftmostBeam'] == 1
-        assert scalars['TypeIIISeaBeam.RightmostBeam'] == 60
-        assert scalars['TypeIIISeaBeam.PingNumber'] == 5
-        assert notes == []
+        assert decoded['SensorSpecific']['LeftmostBeam'] == 1
+        assert decoded['SensorSpecific']['RightmostBeam'] == 60
+        assert decoded['SensorSpecific']['PingNumber'] == 5
+        assert decoded['Notes'] == []
 
     def test_r2sonic_sensor_specific_round_trip(self):
         fields = {'ModelNumber': '2024', 'PingNumber': 42, 'SoundSpeed_mps': 1500.0,
                   'A0MoreInfo': [1.0, -2.0, 3.0, 0.0, 0.0, 0.0]}
-        payload = _encode_swath_bathymetry_ping(
-            self._SCALARS, self._BEAMS, sensor_specific=(151, fields))
+        record = self._record(SensorSpecificID=151, SensorSpecific=fields)
+        payload = _encode_swath_bathymetry_ping(record)
 
-        scalars, _tables, notes = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
+        decoded = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
 
-        assert scalars['R2Sonic.ModelNumber'] == '2024'
-        assert scalars['R2Sonic.PingNumber'] == 42
-        assert scalars['R2Sonic.SoundSpeed_mps'] == pytest.approx(1500.0)
-        assert scalars['R2Sonic.A0MoreInfo'] == pytest.approx([1.0, -2.0, 3.0, 0.0, 0.0, 0.0])
-        assert notes == []
+        assert decoded['SensorSpecific']['ModelNumber'] == '2024'
+        assert decoded['SensorSpecific']['PingNumber'] == 42
+        assert decoded['SensorSpecific']['SoundSpeed_mps'] == pytest.approx(1500.0)
+        assert decoded['SensorSpecific']['A0MoreInfo'] == pytest.approx([1.0, -2.0, 3.0, 0.0, 0.0, 0.0])
+        assert decoded['Notes'] == []
 
     def test_reson7125_sensor_specific_round_trip(self):
         fields = {'ProtocolVersion': 1, 'DeviceID': 7125, 'PingNumber': 42,
                   'Frequency_Hz': 400000.0, 'Gain_dB': -3.0}
-        payload = _encode_swath_bathymetry_ping(
-            self._SCALARS, self._BEAMS, sensor_specific=(138, fields))
+        record = self._record(SensorSpecificID=138, SensorSpecific=fields)
+        payload = _encode_swath_bathymetry_ping(record)
 
-        scalars, _tables, notes = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
+        decoded = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
 
-        assert scalars['Reson7125.DeviceID'] == 7125
-        assert scalars['Reson7125.PingNumber'] == 42
-        assert scalars['Reson7125.Frequency_Hz'] == pytest.approx(400000.0)
-        assert scalars['Reson7125.Gain_dB'] == pytest.approx(-3.0)
-        assert notes == []
+        assert decoded['SensorSpecific']['DeviceID'] == 7125
+        assert decoded['SensorSpecific']['PingNumber'] == 42
+        assert decoded['SensorSpecific']['Frequency_Hz'] == pytest.approx(400000.0)
+        assert decoded['SensorSpecific']['Gain_dB'] == pytest.approx(-3.0)
+        assert decoded['Notes'] == []
 
     def test_reson_tseries_sensor_specific_round_trip(self):
         fields = {'ProtocolVersion': 1, 'DeviceID': 7125, 'PingNumber': 12345,
                   'Frequency_Hz': 400000.0, 'Gain_dB': -3.0,
                   'DeviceDescription': 'T50-S SN 12345', 'SoundVelocity_mps': 1500.123456}
-        payload = _encode_swath_bathymetry_ping(
-            self._SCALARS, self._BEAMS, sensor_specific=(155, fields))
+        record = self._record(SensorSpecificID=155, SensorSpecific=fields)
+        payload = _encode_swath_bathymetry_ping(record)
 
-        scalars, _tables, notes = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
+        decoded = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
 
-        assert scalars['ResonTSeries.DeviceID'] == 7125
-        assert scalars['ResonTSeries.PingNumber'] == 12345
-        assert scalars['ResonTSeries.Frequency_Hz'] == pytest.approx(400000.0)
-        assert scalars['ResonTSeries.Gain_dB'] == pytest.approx(-3.0)
-        assert scalars['ResonTSeries.DeviceDescription'] == 'T50-S SN 12345'
-        assert scalars['ResonTSeries.SoundVelocity_mps'] == pytest.approx(1500.123456)
-        assert notes == []
+        assert decoded['SensorSpecific']['DeviceID'] == 7125
+        assert decoded['SensorSpecific']['PingNumber'] == 12345
+        assert decoded['SensorSpecific']['Frequency_Hz'] == pytest.approx(400000.0)
+        assert decoded['SensorSpecific']['Gain_dB'] == pytest.approx(-3.0)
+        assert decoded['SensorSpecific']['DeviceDescription'] == 'T50-S SN 12345'
+        assert decoded['SensorSpecific']['SoundVelocity_mps'] == pytest.approx(1500.123456)
+        assert decoded['Notes'] == []
 
     def test_em4_sensor_specific_round_trip(self):
         fields = {
             'ModelNumber': 710, 'SurfaceVelocity_mps': 1500.0,
             'RunTime.MinDepth_m': 10.0, 'PuStatus.SensorStatus': 63,
         }
-        sectors = [{'TiltAngle_deg': 1.5, 'CenterFrequency_Hz': 71000.0, 'SectorNumber': 0}]
-        payload = _encode_swath_bathymetry_ping(
-            self._SCALARS, self._BEAMS, sensor_specific=(133, fields, {'TxSectors': sectors}))
+        sectors = pd.DataFrame([{'TiltAngle_deg': 1.5, 'CenterFrequency_Hz': 71000.0, 'SectorNumber': 0}])
+        record = self._record(SensorSpecificID=133, SensorSpecific={**fields, 'TxSectors': sectors})
+        payload = _encode_swath_bathymetry_ping(record)
 
-        scalars, tables, notes = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
+        decoded = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
 
-        assert scalars['EM4.ModelNumber'] == 710
-        assert scalars['EM4.SurfaceVelocity_mps'] == pytest.approx(1500.0)
-        assert scalars['EM4.RunTime.MinDepth_m'] == pytest.approx(10.0)
-        assert scalars['EM4.PuStatus.SensorStatus'] == 63
-        assert len(tables['EM4.TxSectors']) == 1
-        assert tables['EM4.TxSectors'].iloc[0]['CenterFrequency_Hz'] == pytest.approx(71000.0)
-        assert notes == []
+        assert decoded['SensorSpecific']['ModelNumber'] == 710
+        assert decoded['SensorSpecific']['SurfaceVelocity_mps'] == pytest.approx(1500.0)
+        assert decoded['SensorSpecific']['RunTime.MinDepth_m'] == pytest.approx(10.0)
+        assert decoded['SensorSpecific']['PuStatus.SensorStatus'] == 63
+        assert len(decoded['SensorSpecific']['TxSectors']) == 1
+        assert decoded['SensorSpecific']['TxSectors'].iloc[0]['CenterFrequency_Hz'] == pytest.approx(71000.0)
+        assert decoded['Notes'] == []
 
     def test_em3raw_sensor_specific_round_trip(self):
         fields = {
             'ModelNumber': 300, 'SurfaceVelocity_mps': 1500.0, 'DepthDifference_m': 0.5,
             'RunTime.MinDepth_m': 10.0, 'PuStatus.SensorStatus': 63,
         }
-        sectors = [{'TiltAngle_deg': 1.5, 'CenterFrequency_Hz': 71000.0, 'SectorNumber': 0}]
-        payload = _encode_swath_bathymetry_ping(
-            self._SCALARS, self._BEAMS, sensor_specific=(140, fields, {'TxSectors': sectors}))
+        sectors = pd.DataFrame([{'TiltAngle_deg': 1.5, 'CenterFrequency_Hz': 71000.0, 'SectorNumber': 0}])
+        record = self._record(SensorSpecificID=140, SensorSpecific={**fields, 'TxSectors': sectors})
+        payload = _encode_swath_bathymetry_ping(record)
 
-        scalars, tables, notes = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
+        decoded = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
 
-        assert scalars['EM3Raw.ModelNumber'] == 300
-        assert scalars['EM3Raw.SurfaceVelocity_mps'] == pytest.approx(1500.0)
-        assert scalars['EM3Raw.DepthDifference_m'] == pytest.approx(0.5)
-        assert scalars['EM3Raw.RunTime.MinDepth_m'] == pytest.approx(10.0)
-        assert scalars['EM3Raw.PuStatus.SensorStatus'] == 63
-        assert len(tables['EM3Raw.TxSectors']) == 1
-        assert tables['EM3Raw.TxSectors'].iloc[0]['CenterFrequency_Hz'] == pytest.approx(71000.0)
-        assert notes == []
+        assert decoded['SensorSpecific']['ModelNumber'] == 300
+        assert decoded['SensorSpecific']['SurfaceVelocity_mps'] == pytest.approx(1500.0)
+        assert decoded['SensorSpecific']['DepthDifference_m'] == pytest.approx(0.5)
+        assert decoded['SensorSpecific']['RunTime.MinDepth_m'] == pytest.approx(10.0)
+        assert decoded['SensorSpecific']['PuStatus.SensorStatus'] == 63
+        assert len(decoded['SensorSpecific']['TxSectors']) == 1
+        assert decoded['SensorSpecific']['TxSectors'].iloc[0]['CenterFrequency_Hz'] == pytest.approx(71000.0)
+        assert decoded['Notes'] == []
 
     def test_em3_sensor_specific_round_trip(self):
         fields = {
@@ -2181,34 +2191,34 @@ class TestEncodeSwathBathymetryPing:
             'PortCoverageSector_deg': 60, 'Stabilization': 0, 'StbdCoverageSector_deg': 0,
             'StbdSwathWidth_m': 0, 'HiloFreqAbsorpRatio': 2,
         }
-        payload = _encode_swath_bathymetry_ping(
-            self._SCALARS, self._BEAMS, sensor_specific=(118, fields, {'RunTime': [head0]}))
+        run_time = pd.DataFrame([head0])
+        record = self._record(SensorSpecificID=118, SensorSpecific={**fields, 'RunTime': run_time})
+        payload = _encode_swath_bathymetry_ping(record)
 
-        scalars, tables, notes = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
+        decoded = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
 
-        assert scalars['EM3.ModelNumber'] == 3000
-        assert scalars['EM3.SurfaceVelocity_mps'] == pytest.approx(1500.0)
-        assert len(tables['EM3.RunTime']) == 1
-        assert tables['EM3.RunTime'].iloc[0]['Head'] == 0
-        assert tables['EM3.RunTime'].iloc[0]['MinDepth_m'] == pytest.approx(5.0)
-        assert notes == []
+        assert decoded['SensorSpecific']['ModelNumber'] == 3000
+        assert decoded['SensorSpecific']['SurfaceVelocity_mps'] == pytest.approx(1500.0)
+        assert len(decoded['SensorSpecific']['RunTime']) == 1
+        assert decoded['SensorSpecific']['RunTime'].iloc[0]['Head'] == 0
+        assert decoded['SensorSpecific']['RunTime'].iloc[0]['MinDepth_m'] == pytest.approx(5.0)
+        assert decoded['Notes'] == []
 
     def test_sensor_specific_unregistered_id_raises_keyerror(self):
+        record = self._record(SensorSpecificID=999, SensorSpecific={})
         with pytest.raises(KeyError):
-            _encode_swath_bathymetry_ping(
-                self._SCALARS, self._BEAMS, sensor_specific=(999, {}))
+            _encode_swath_bathymetry_ping(record)
 
     def test_scale_factors_override_changes_precision(self):
         override = dict(DEFAULT_PING_SCALE_FACTORS)
         override[1] = (10.0, 0.0, 4, False)  # coarser depth precision (0.1m)
-        scalars = dict(self._SCALARS, NumberBeams=1)
-        payload = _encode_swath_bathymetry_ping(
-            scalars, {'Depth_m': [10.03]}, scale_factors=override)
+        record = self._record(beams={'Depth_m': [10.03]}, NumberBeams=1)
+        payload = _encode_swath_bathymetry_ping(record, scale_factors=override)
 
-        _scalars, tables, _notes = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
+        decoded = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
 
         # 10.03 rounds to the nearest 0.1m under the coarser override.
-        assert list(tables['Beams']['Depth_m']) == pytest.approx([10.0])
+        assert list(decoded['Beams']['Depth_m']) == pytest.approx([10.0])
 
 
 # ---------------------------------------------------------------------------
@@ -2241,12 +2251,13 @@ class TestTemplateHelpers:
     def test_ping_scalars_template_populated_and_used_directly(self):
         # The whole point: fill in the required fields plus whatever you
         # know, leave the rest, and pass it straight to the encoder.
-        scalars = new_swath_bathymetry_ping_scalars()
-        scalars.update(
+        record = new_swath_bathymetry_ping_scalars()
+        record.update(
             PingTime=1700000000.0, Longitude_deg=-70.5, Latitude_deg=43.1,
             NumberBeams=1, Speed_kn=5.0)
-        payload = _encode_swath_bathymetry_ping(scalars, {'Depth_m': [10.0]})
-        decoded, _tables, _notes = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
+        record['Beams'] = {'Depth_m': [10.0]}
+        payload = _encode_swath_bathymetry_ping(record)
+        decoded = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
 
         assert decoded['Speed_kn'] == pytest.approx(5.0)
         assert decoded['Course_deg'] == pytest.approx(GSF_NULL_COURSE)  # left untouched
@@ -2264,13 +2275,13 @@ class TestTemplateHelpers:
     def test_kmall_tx_sector_template_round_trips(self):
         row = new_kmall_tx_sector()
         row.update(TxSectorNumb=2, CentreFreq_Hz=71000.0)
-        payload = _encode_kmall_specific({}, sector_rows=[row])
+        payload = _encode_kmall_specific({}, sector_rows=pd.DataFrame([row]))
         _decoded, sectors, _classes, _consumed = _decode_kmall_specific(payload, 4)
 
         assert len(sectors) == 1
-        assert sectors[0]['TxSectorNumb'] == 2
-        assert sectors[0]['CentreFreq_Hz'] == pytest.approx(71000.0)
-        assert sectors[0]['TxArrNumber'] == 0
+        assert sectors.iloc[0]['TxSectorNumb'] == 2
+        assert sectors.iloc[0]['CentreFreq_Hz'] == pytest.approx(71000.0)
+        assert sectors.iloc[0]['TxArrNumber'] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -2340,9 +2351,9 @@ class TestGsfWriteMethods:
             attitude_time=[1700000000.0, 1700000000.1],
             pitch_deg=[-1.1, -1.0], roll_deg=[0.4, 0.5],
             heave_m=[0.2, 0.1], heading_deg=[12.3, 12.4])
-        G.write_swath_bathymetry_ping(
-            {'PingTime': 1700000000.5, 'Longitude_deg': -70.5, 'Latitude_deg': 43.1, 'NumberBeams': 2},
-            {'Depth_m': [10.0, 10.5]})
+        G.write_swath_bathymetry_ping({
+            'PingTime': 1700000000.5, 'Longitude_deg': -70.5, 'Latitude_deg': 43.1, 'NumberBeams': 2,
+            'Beams': {'Depth_m': [10.0, 10.5]}})
         G.closeFile()
 
         G2 = gsf(str(path))
@@ -2367,9 +2378,9 @@ class TestGsfWriteMethods:
         path = tmp_path / "out.gsf"
         G = gsf(str(path))
         G.write_header(version="GSF-v02.05")
-        G.write_swath_bathymetry_ping(
-            {'PingTime': 1700000000.0, 'Longitude_deg': 0.0, 'Latitude_deg': 0.0, 'NumberBeams': 1},
-            {'Depth_m': [10.0]})
+        G.write_swath_bathymetry_ping({
+            'PingTime': 1700000000.0, 'Longitude_deg': 0.0, 'Latitude_deg': 0.0, 'NumberBeams': 1,
+            'Beams': {'Depth_m': [10.0]}})
         G.closeFile()
 
         G2 = gsf(str(path))
@@ -2379,8 +2390,8 @@ class TestGsfWriteMethods:
         G2.FID.seek(ping_offset)
         dataSize, _readSize, _data_id = G2.read_record_header()
         payload = G2.FID.read(dataSize)
-        scalars, _tables, _notes = _decode_swath_bathymetry_ping(payload, major_version=2, scale_factors={})
-        assert 'Height_m' not in scalars
+        decoded = _decode_swath_bathymetry_ping(payload, major_version=2, scale_factors={})
+        assert 'Height_m' not in decoded
 
     def test_previously_unimplemented_record_types_round_trip(self, tmp_path, capsys):
         # write_swath_bathy_summary/write_comment/write_history/
@@ -2405,11 +2416,11 @@ class TestGsfWriteMethods:
         G.write_hv_navigation_error(
             1700000000.0, record_id=2, horizontal_error_m=0.35,
             vertical_error_m=0.12, sep_uncertainty_m=0.5, position_type="GPS")
-        G.write_single_beam_ping(
-            ping_time=1700000000.5, longitude_deg=-70.5, latitude_deg=43.1,
-            tide_corrector_m=0.1, depth_corrector_m=-1.2, heading_deg=123.45,
-            pitch_deg=-1.1, roll_deg=0.4, heave_m=0.2, depth_m=25.75,
-            sound_speed_correction_m=0.05, positioning_system_type=3)
+        G.write_single_beam_ping({
+            'PingTime': 1700000000.5, 'Longitude_deg': -70.5, 'Latitude_deg': 43.1,
+            'TideCorrector_m': 0.1, 'DepthCorrector_m': -1.2, 'Heading_deg': 123.45,
+            'Pitch_deg': -1.1, 'Roll_deg': 0.4, 'Heave_m': 0.2, 'Depth_m': 25.75,
+            'SoundSpeedCorrection_m': 0.05, 'PositioningSystemType': 3})
         G.closeFile()
 
         G2 = gsf(str(path))
@@ -2472,9 +2483,9 @@ class TestAutoScaleWriteSwathBathymetryPing:
         path = tmp_path / "out.gsf"
         G = gsf(str(path))
         G.write_header()
-        G.write_swath_bathymetry_ping(
-            {'PingTime': 1700000000.0, 'Longitude_deg': 0.0, 'Latitude_deg': 0.0, 'NumberBeams': 2},
-            {'Depth_m': [10.0, 10.5]})
+        G.write_swath_bathymetry_ping({
+            'PingTime': 1700000000.0, 'Longitude_deg': 0.0, 'Latitude_deg': 0.0, 'NumberBeams': 2,
+            'Beams': {'Depth_m': [10.0, 10.5]}})
         G.closeFile()
 
         table = self._scale_factors_subrecord_at(G)
@@ -2485,10 +2496,9 @@ class TestAutoScaleWriteSwathBathymetryPing:
         G = gsf(str(path), auto_scale=True)
         G.write_header()
         for depths in ([10.0, 10.5], [10.1, 10.4], [9.9, 10.6]):
-            G.write_swath_bathymetry_ping(
-                {'PingTime': 1700000000.0, 'Longitude_deg': 0.0, 'Latitude_deg': 0.0,
-                 'NumberBeams': len(depths)},
-                {'Depth_m': depths})
+            G.write_swath_bathymetry_ping({
+                'PingTime': 1700000000.0, 'Longitude_deg': 0.0, 'Latitude_deg': 0.0,
+                'NumberBeams': len(depths), 'Beams': {'Depth_m': depths}})
         G.closeFile()
 
         tables = [self._scale_factors_subrecord_at(G, i) for i in range(3)]
@@ -2500,22 +2510,22 @@ class TestAutoScaleWriteSwathBathymetryPing:
         G = gsf(str(path), auto_scale=True)
         G.write_header()
         # ping1: a shallow, narrow range.
-        G.write_swath_bathymetry_ping(
-            {'PingTime': 1700000000.0, 'Longitude_deg': 0.0, 'Latitude_deg': 0.0, 'NumberBeams': 2},
-            {'Depth_m': [10.0, 10.5]})
+        G.write_swath_bathymetry_ping({
+            'PingTime': 1700000000.0, 'Longitude_deg': 0.0, 'Latitude_deg': 0.0, 'NumberBeams': 2,
+            'Beams': {'Depth_m': [10.0, 10.5]}})
         # ping2: a much deeper range that forces a rescale (a positive
         # offset that only made sense for the shallow ping no longer
         # applies at these depths -- and even without an offset
         # involved, DEFAULT_PING_SCALE_FACTORS's 1mm/4-byte depth
         # settings have enough headroom that a genuinely forced rescale
         # needs an intentionally awkward range like this one).
-        G.write_swath_bathymetry_ping(
-            {'PingTime': 1700000000.0, 'Longitude_deg': 0.0, 'Latitude_deg': 0.0, 'NumberBeams': 2},
-            {'Depth_m': [-2.0, 500.0]})
+        G.write_swath_bathymetry_ping({
+            'PingTime': 1700000000.0, 'Longitude_deg': 0.0, 'Latitude_deg': 0.0, 'NumberBeams': 2,
+            'Beams': {'Depth_m': [-2.0, 500.0]}})
         # ping3: similar to ping2, should reuse ping2's scale factor.
-        G.write_swath_bathymetry_ping(
-            {'PingTime': 1700000000.0, 'Longitude_deg': 0.0, 'Latitude_deg': 0.0, 'NumberBeams': 2},
-            {'Depth_m': [-1.5, 495.0]})
+        G.write_swath_bathymetry_ping({
+            'PingTime': 1700000000.0, 'Longitude_deg': 0.0, 'Latitude_deg': 0.0, 'NumberBeams': 2,
+            'Beams': {'Depth_m': [-1.5, 495.0]}})
         G.closeFile()
 
         tables = [self._scale_factors_subrecord_at(G, i) for i in range(3)]
@@ -2528,9 +2538,9 @@ class TestAutoScaleWriteSwathBathymetryPing:
         G = gsf(str(path), auto_scale=True)
         G.write_header()
         depths = [-0.03, 10.0, 45.2]
-        G.write_swath_bathymetry_ping(
-            {'PingTime': 1700000000.0, 'Longitude_deg': 0.0, 'Latitude_deg': 0.0, 'NumberBeams': len(depths)},
-            {'Depth_m': depths})
+        G.write_swath_bathymetry_ping({
+            'PingTime': 1700000000.0, 'Longitude_deg': 0.0, 'Latitude_deg': 0.0, 'NumberBeams': len(depths),
+            'Beams': {'Depth_m': depths}})
         G.closeFile()
 
         G2 = gsf(str(path))
@@ -2539,8 +2549,8 @@ class TestAutoScaleWriteSwathBathymetryPing:
         G2.FID.seek(offset)
         dataSize, _readSize, _data_id = G2.read_record_header()
         payload = G2.FID.read(dataSize)
-        _scalars, tables, _notes = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
-        assert list(tables['Beams']['Depth_m']) == pytest.approx(depths, abs=0.001)
+        decoded = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
+        assert list(decoded['Beams']['Depth_m']) == pytest.approx(depths, abs=0.001)
 
     def test_auto_scale_and_explicit_scale_factors_mutually_exclusive(self, tmp_path):
         path = tmp_path / "out.gsf"
@@ -2548,8 +2558,8 @@ class TestAutoScaleWriteSwathBathymetryPing:
         G.write_header()
         with pytest.raises(ValueError):
             G.write_swath_bathymetry_ping(
-                {'PingTime': 1700000000.0, 'Longitude_deg': 0.0, 'Latitude_deg': 0.0, 'NumberBeams': 1},
-                {'Depth_m': [10.0]},
+                {'PingTime': 1700000000.0, 'Longitude_deg': 0.0, 'Latitude_deg': 0.0, 'NumberBeams': 1,
+                 'Beams': {'Depth_m': [10.0]}},
                 scale_factors={1: (1000.0, 0.0, 4, False)})
 
     def test_auto_scale_per_call_override(self, tmp_path):
@@ -2559,9 +2569,9 @@ class TestAutoScaleWriteSwathBathymetryPing:
         G = gsf(str(path))
         assert G.auto_scale is False
         G.write_header()
-        G.write_swath_bathymetry_ping(
-            {'PingTime': 1700000000.0, 'Longitude_deg': 0.0, 'Latitude_deg': 0.0, 'NumberBeams': 1},
-            {'Depth_m': [10.0]}, auto_scale=True)
+        G.write_swath_bathymetry_ping({
+            'PingTime': 1700000000.0, 'Longitude_deg': 0.0, 'Latitude_deg': 0.0, 'NumberBeams': 1,
+            'Beams': {'Depth_m': [10.0]}}, auto_scale=True)
         G.closeFile()
         assert 1 in G._auto_scale_factors
 
@@ -2569,9 +2579,9 @@ class TestAutoScaleWriteSwathBathymetryPing:
         path = tmp_path / "out.gsf"
         G = gsf(str(path), auto_scale=True)
         G.write_header()
-        G.write_swath_bathymetry_ping(
-            {'PingTime': 1700000000.0, 'Longitude_deg': 0.0, 'Latitude_deg': 0.0, 'NumberBeams': 2},
-            {'Depth_m': [10.0, 10.5], 'AcrossTrack_m': [-5.0, 5.0]})
+        G.write_swath_bathymetry_ping({
+            'PingTime': 1700000000.0, 'Longitude_deg': 0.0, 'Latitude_deg': 0.0, 'NumberBeams': 2,
+            'Beams': {'Depth_m': [10.0, 10.5], 'AcrossTrack_m': [-5.0, 5.0]}})
         G.closeFile()
 
         assert 1 in G._auto_scale_factors      # Depth_m

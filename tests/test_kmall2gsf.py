@@ -178,19 +178,19 @@ class TestConvertRealFiles:
         if data_id.checksumFlag:
             g.FID.seek(4, 1)
         payload = g.FID.read(dataSize)
-        scalars, tables, notes = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
+        record = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
 
-        assert notes == []
-        assert -90.0 <= scalars["Latitude_deg"] <= 90.0
-        assert -180.0 <= scalars["Longitude_deg"] <= 180.0
-        assert scalars["NumberBeams"] == len(tables["Beams"])
-        assert (tables["Beams"]["Depth_m"] > 0).all()
+        assert record["Notes"] == []
+        assert -90.0 <= record["Latitude_deg"] <= 90.0
+        assert -180.0 <= record["Longitude_deg"] <= 180.0
+        assert record["NumberBeams"] == len(record["Beams"])
+        assert (record["Beams"]["Depth_m"] > 0).all()
 
         # Fields MRZ carries no data for are written as their GSF_NULL_*
         # "not available" sentinel, not 0.0 (which would be indistinguishable
         # from a real, computed zero) -- see convert.md.
-        assert scalars["TideCorrector_m"] == pytest.approx(GSF_NULL_TIDE_CORRECTOR)
-        assert scalars["DepthCorrector_m"] == pytest.approx(GSF_NULL_DEPTH_CORRECTOR)
-        assert scalars["Course_deg"] == pytest.approx(GSF_NULL_COURSE)
-        assert scalars["Speed_kn"] == pytest.approx(GSF_NULL_SPEED)
-        assert scalars["SEP_m"] == pytest.approx(GSF_NULL_SEP)
+        assert record["TideCorrector_m"] == pytest.approx(GSF_NULL_TIDE_CORRECTOR)
+        assert record["DepthCorrector_m"] == pytest.approx(GSF_NULL_DEPTH_CORRECTOR)
+        assert record["Course_deg"] == pytest.approx(GSF_NULL_COURSE)
+        assert record["Speed_kn"] == pytest.approx(GSF_NULL_SPEED)
+        assert record["SEP_m"] == pytest.approx(GSF_NULL_SEP)

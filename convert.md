@@ -162,8 +162,8 @@ up and no name to mistype:
 ```python
 from GSFU.gsfu import new_swath_bathymetry_ping_scalars
 
-scalars = new_swath_bathymetry_ping_scalars()
-scalars.update(
+record = new_swath_bathymetry_ping_scalars()
+record.update(
     PingTime=1724650073.719285,
     Longitude_deg=-129.981855,
     Latitude_deg=45.925417,
@@ -176,7 +176,7 @@ scalars.update(
     Height_m=-32.1,   # antenna height above the ellipsoid, if known
 )
 
-beams = {
+record["Beams"] = {
     "Depth_m":         [7.342, 7.356, 7.370],
     "AcrossTrack_m":   [-3.89, 0.0, 3.89],
     "AlongTrack_m":    [0.0, 0.0, 0.0],
@@ -185,7 +185,7 @@ beams = {
     "QualityFactor":   [50, 52, 49],
 }
 
-G.write_swath_bathymetry_ping(scalars, beams)
+G.write_swath_bathymetry_ping(record)
 ```
 
 `new_swath_bathymetry_ping_scalars()` sets the four required fields
@@ -196,11 +196,11 @@ field with its **GSF_NULL_\* sentinel** (or, for `CenterBeam`, `PingFlags`,
 and `GPSTideCorrector_m`, `0`/`0.0` -- gsf.h defines no sentinel for those
 three). Fields you never touch are written as "not available", not as a
 misleading `0`/`0.0` -- see "Marking a field as not available" below for
-why that distinction matters. (Building `scalars` as a plain `dict` literal
+why that distinction matters. (Building `record` as a plain `dict` literal
 the way earlier GSF-writing tools do also still works exactly as before --
 the template is a convenience, not a required calling convention.)
 
-Every array in `beams` must have exactly `NumberBeams` entries. The
+Every array in `record["Beams"]` must have exactly `NumberBeams` entries. The
 dict *key* is what selects which subrecord gets written and, in turn, its
 scale factor -- `_beam_array_subrecord_id()` resolves each label (e.g.
 `"Depth_m"`, `"BeamAngle_deg"`) to its `GSF_SWATH_BATHY_SUBRECORD_*` id.
@@ -210,9 +210,11 @@ recognized labels.
 
 To add the KMALL (Kongsberg SIS 5) vendor-specific subrecord, the same
 template pattern applies -- `new_kmall_specific()` for the scalar block,
-`new_kmall_tx_sector()` for each entry of `tx_sectors`:
+`new_kmall_tx_sector()` for each row of the `TxSectors` table -- assigned
+to `record["SensorSpecificID"]`/`record["SensorSpecific"]`:
 
 ```python
+import pandas as pd
 from GSFU.gsfu import new_kmall_specific, new_kmall_tx_sector
 
 kmall_specific = new_kmall_specific()
@@ -222,10 +224,11 @@ sector0 = new_kmall_tx_sector()
 sector0.update(TxSectorNumb=0, CentreFreq_Hz=70000.0, TiltAngleReTx_deg=0.0)
 sector1 = new_kmall_tx_sector()
 sector1.update(TxSectorNumb=1, CentreFreq_Hz=71000.0, TiltAngleReTx_deg=15.0)
-tx_sectors = [sector0, sector1]
 
-G.write_swath_bathymetry_ping(
-    scalars, beams, kmall_specific=kmall_specific, tx_sectors=tx_sectors)
+record["SensorSpecificID"] = 156
+record["SensorSpecific"] = {**kmall_specific, "TxSectors": pd.DataFrame([sector0, sector1])}
+
+G.write_swath_bathymetry_ping(record)
 ```
 
 Note the spelling: `CentreFreq_Hz`, not `CenterFreq_Hz` -- one of the ~65
@@ -233,9 +236,12 @@ vendor-specific field names carried over from the originating `.kmall`
 format's own (British) spelling, and exactly the kind of thing
 `new_kmall_specific()`/`new_kmall_tx_sector()` save you from having to get
 right from memory. `kmall_specific` is a flat dict of scalar fields
-(matching the `KMALL.*` names `-p` prints, minus the `KMALL.` prefix);
-`tx_sectors` is a list of per-sector dicts, one per transmit sector (up to
-`GSF_MAX_KMALL_SECTORS` = 9). Both are optional -- omit them entirely for a
+(matching the names `-p` prints under `-- SensorSpecific (KMALL_SPECIFIC,
+id=156) --`); `record["SensorSpecific"]["TxSectors"]` is a `pandas.DataFrame`,
+one row per transmit sector (up to `GSF_MAX_KMALL_SECTORS` = 9) -- the exact
+shape `_decode_swath_bathymetry_ping()` returns, so a decoded KMALL ping's
+`TxSectors` table can be assigned back in unmodified. Both
+`SensorSpecificID`/`SensorSpecific` are optional -- omit them entirely for a
 non-KMALL system, or if you don't need the vendor-specific block. Unlike
 the ping scalars above, gsf.h defines no null-value convention for these
 vendor-specific fields, so both templates default every field to plain
@@ -261,7 +267,7 @@ from GSFU.gsfu import DEFAULT_PING_SCALE_FACTORS
 my_scale_factors = dict(DEFAULT_PING_SCALE_FACTORS)
 my_scale_factors[1] = (10000.0, 0.0, 4, False)  # Depth_m: 4 bytes, 0.1mm precision
 
-G.write_swath_bathymetry_ping(scalars, beams, scale_factors=my_scale_factors)
+G.write_swath_bathymetry_ping(record, scale_factors=my_scale_factors)
 ```
 
 Each entry is `subrecordID: (multiplier, offset, field_width_bytes,
@@ -301,16 +307,16 @@ extreme, implausible edge of) the field's valid range:
 
 All are importable from `GSFU.gsfu` (`from GSFU.gsfu import GSF_NULL_SPEED`,
 etc.), and `new_swath_bathymetry_ping_scalars()` (above) already fills in
-every one of them for you -- if you build `scalars` that way, a field you
+every one of them for you -- if you build `record` that way, a field you
 never overwrite is automatically "not available", not `0`/`0.0`. Building
-`scalars` as a plain dict instead? Set the constant explicitly rather than
+`record` as a plain dict instead? Set the constant explicitly rather than
 omitting the key, so the "not available" intent is visible in your own
 code too:
 
 ```python
 from GSFU.gsfu import GSF_NULL_COURSE, GSF_NULL_SPEED
 
-scalars = {
+record = {
     "PingTime": ping_time, "Longitude_deg": lon, "Latitude_deg": lat,
     "NumberBeams": n,
     "Course_deg": GSF_NULL_COURSE,  # course-made-good not computed by this source
@@ -326,18 +332,18 @@ the ping record this API writes) are likewise stuck at `0.0` in gsf.h
 itself, for the same reason.
 
 **Per-beam arrays are different.** `Depth_m`, `AcrossTrack_m`,
-`TravelTime_s`, and the rest of the beam-array columns in `beams` have
-*no* meaningful null value -- gsf.h defines all of their nulls as plain
+`TravelTime_s`, and the rest of the beam-array columns in `record["Beams"]`
+have *no* meaningful null value -- gsf.h defines all of their nulls as plain
 `0.0`, with an explicit warning that a `0.0` beam value does **not** by
 itself mean "no data". To mark individual beams unusable, write a
-`'BeamFlags'` column in `beams` (one `GSF_IGNORE_BEAM`-or-not byte per
-beam) instead of trying to signal it through the depth/travel-time/etc.
+`'BeamFlags'` column in `record["Beams"]` (one `GSF_IGNORE_BEAM`-or-not byte
+per beam) instead of trying to signal it through the depth/travel-time/etc.
 values themselves:
 
 ```python
 from GSFU.gsfu import GSF_IGNORE_BEAM
 
-beams["BeamFlags"] = [0, GSF_IGNORE_BEAM, 0]  # beam 1 of 3 is unusable
+record["Beams"]["BeamFlags"] = [0, GSF_IGNORE_BEAM, 0]  # beam 1 of 3 is unusable
 ```
 
 And to flag an entire ping as unusable (rather than one beam within it),
@@ -346,7 +352,7 @@ set the low bit of `PingFlags`:
 ```python
 from GSFU.gsfu import GSF_IGNORE_PING
 
-scalars["PingFlags"] = GSF_IGNORE_PING
+record["PingFlags"] = GSF_IGNORE_PING
 ```
 
 ## Closing the file
@@ -370,19 +376,23 @@ G.write_sound_velocity_profile(
 
 for ping_time, lat, lon, beams in my_pings:
     G.write_attitude(...)  # or batch these separately, see above
-    scalars = new_swath_bathymetry_ping_scalars()
-    scalars.update(
+    record = new_swath_bathymetry_ping_scalars()
+    record.update(
         PingTime=ping_time, Latitude_deg=lat, Longitude_deg=lon,
         NumberBeams=len(beams["Depth_m"]))
-    G.write_swath_bathymetry_ping(scalars, beams)
+    record["Beams"] = beams
+    G.write_swath_bathymetry_ping(record)
 
 G.closeFile()
 ```
 
 ## Re-encoding a record you decoded
 
-Because `write_*`'s dict shapes match what the `_decode_*` functions
-return, you can round-trip a record through `gsfu.py`'s own reader:
+Because `write_*`'s `record` dict shape matches what the `_decode_*`
+functions return, you can round-trip a record through `gsfu.py`'s own
+reader unmodified -- no repackaging, even for a vendor sensor-specific
+subrecord's own tables (`SensorSpecific["TxSectors"]` etc., already
+`pandas.DataFrame`s on both sides):
 
 ```python
 from GSFU.gsfu import gsf, _decode_swath_bathymetry_ping
@@ -395,11 +405,11 @@ dataSize, _readSize, data_id = src.read_record_header()
 if data_id.checksumFlag:
     src.FID.seek(4, 1)  # skip the optional 4-byte checksum word
 payload = src.FID.read(dataSize)
-scalars, tables, notes = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
+record = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
 
 dst = gsf("copy.gsf")
 dst.write_header()
-dst.write_swath_bathymetry_ping(scalars, tables["Beams"])
+dst.write_swath_bathymetry_ping(record)
 dst.closeFile()
 ```
 

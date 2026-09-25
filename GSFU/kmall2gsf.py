@@ -50,6 +50,7 @@ import struct
 import sys
 
 import numpy as np
+import pandas as pd
 
 from GSFU.gsfu import (
     GSF_NULL_COURSE,
@@ -500,11 +501,13 @@ def convert(kmall_path, gsf_path, attitude_source=1, verbose=False):
 
         pitch, roll, heave, _heading = interpolate_attitude(attitude_samples, mrz['header']['dgtime'])
 
-        scalars = mrz_to_ping_scalars(mrz, pitch, roll, heave)
-        beams = mrz_to_beams(mrz)
         kmall_specific, tx_sectors = mrz_to_kmall_specific(mrz)
+        record = mrz_to_ping_scalars(mrz, pitch, roll, heave)
+        record['Beams'] = mrz_to_beams(mrz)
+        record['SensorSpecificID'] = 156
+        record['SensorSpecific'] = {**kmall_specific, 'TxSectors': pd.DataFrame(tx_sectors)}
 
-        G.write_swath_bathymetry_ping(scalars, beams, kmall_specific=kmall_specific, tx_sectors=tx_sectors)
+        G.write_swath_bathymetry_ping(record)
         ping_count += 1
         if verbose and ping_count % 100 == 0:
             print("  wrote %d pings" % ping_count)
