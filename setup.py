@@ -7,7 +7,7 @@ _LONG_DESCRIPTION = (_HERE / "README.md").read_text(encoding="utf-8")
 
 setup(
     name="gsfu",
-    version="0.1.0",
+    version="0.2.0",
     license="BSD-2-Clause",
     packages=find_packages(exclude=("tests", "tests.*")),
     python_requires=">=3.8",
