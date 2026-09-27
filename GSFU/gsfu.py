@@ -8,11 +8,19 @@ Sensor Format (GSF) sonar data files.
 The physical, on-disk record encoding implemented here (the record size
 field, the packed data identifier word, and the optional checksum) and the
 record type constants/descriptions below are taken from the reference C
-implementation of the GSF library ("gsflib"), Copyright 2019 Leidos, Inc.,
-distributed under the LGPL 2.1:
+implementation of the GSF library ("gsflib"), version 3.11, distributed by
+Leidos, Inc. under the LGPL 2.1 from the Leidos product page:
 
-    https://github.com/Spatialnetics/gsflib
-    (source/gsf/gsf.h, source/gsf/gsf.c)
+    https://www.leidos.com/products/ocean-marine
+
+GSF v3.11 was released in 2025, but the copyright notices in its source
+files were not updated and still read "Copyright 2019 Leidos, Inc.". That
+distribution unpacks to a single GSF_03-11/ directory, and every gsflib
+source file cited in this module (gsf.h, gsf.c, gsf_dec.c, gsf_enc.c, and
+so on) is named relative to that directory's top level. It is the only
+copy of gsflib this module was written against; other copies found online
+(such as GitHub mirrors) may or may not be identical, and are not
+authoritative.
 
 Comments copied or closely paraphrased from gsf.h are so noted, so that
 readers already familiar with gsflib recognize the record layout, names,
@@ -29,10 +37,8 @@ functions -- the wire-format details there (byte order, scaling, signedness)
 are not derivable from the gsf.h struct definitions alone, since those
 describe the decoded in-memory form, not the packed on-disk encoding.
 
-Verified current against GSF v3.11 (2026-09-01): gsf.h and gsf_dec.c from
-the official v3.11 distribution are byte-identical (modulo CRLF/LF) to the
-Spatialnetics/gsflib source above, so no decoder here has drifted from
-current gsflib. The v3.11 change summary documents exactly one decode
+The v3.11 distribution's own change summary
+(gsf_version_03_11_change_summary.pdf) documents exactly one decode
 behavior change since v3.10 -- beam_angle_forward (ping subrecord 18) was
 briefly, mistakenly encoded signed for about 8 months in v3.10 only, then
 reverted -- which this code does not special-case (see the comment at
@@ -3909,9 +3915,7 @@ def _decode_kmall_imagery_specific(payload, pos):
     function exists only to advance past its 64 bytes; unlike its
     sibling _decode_*_imagery_specific() functions, it has no fields to
     decode and so returns only the byte count rather than a (fields,
-    bytes_consumed) tuple. There is no encoder for this preamble, since
-    the per-beam intensity time series subrecord has no encoder at all
-    yet.
+    bytes_consumed) tuple.
 
     :param payload: the raw bytes of the ping record. Unused, since this
         preamble's content is entirely skipped, but accepted for a
@@ -3923,6 +3927,40 @@ def _decode_kmall_imagery_specific(payload, pos):
     :return: bytes_consumed, always 64.
     """
     return 64
+
+
+def _encode_kmall_imagery_specific():
+    """
+    Encode the KMALL sensor-imagery preamble embedded in a
+    GSF_SWATH_BATHY_SUBRECORD_INTENSITY_SERIES_ARRAY subrecord (id 21),
+    which is entirely spare/reserved for the KMALL sensor. This is the
+    inverse of _decode_kmall_imagery_specific(), and is ported from the
+    reference gsflib C library's EncodeKMALLImagerySpecific() function in
+    gsf_enc.c. It takes no fields, since there is nothing in this
+    preamble to encode.
+
+    :return: the encoded preamble, as bytes. Always 64 bytes, all zero.
+    """
+    return b'\x00' * 64
+
+
+def new_em3_imagery_specific():
+    """
+    Return a new dictionary with every EM3-series sensor-imagery preamble
+    field name present, each pre-set to 0 or 0.0. gsf.h defines no
+    GSF_NULL_* sentinel for these vendor-specific fields, so 0 is the
+    only "not specified" marker available. _decode_em3_imagery_specific()
+    builds its result starting from this same template, so the two can
+    never define a different set of field names.
+
+    :return: a dictionary with every EM3-series imagery preamble field
+        name present, pre-set to 0 or 0.0.
+    """
+    return {
+        'RangeNorm_samples': 0, 'StartTvgRamp_samples': 0, 'StopTvgRamp_samples': 0,
+        'BSNormal_dB': 0, 'BSOblique_dB': 0, 'MeanAbsorption_dBkm': 0.0,
+        'Offset': 0, 'Scale': 0,
+    }
 
 
 def _decode_em3_imagery_specific(payload, pos):
@@ -3938,9 +3976,9 @@ def _decode_em3_imagery_specific(payload, pos):
     own ping-level sensor-specific subrecord, and lives only inside
     subrecord 21. This function is called by _decode_brb_intensity() to
     decode that preamble, and is ported from the reference gsflib C
-    library's DecodeEM3ImagerySpecific() function in gsf_dec.c. There is
-    no encoder for this preamble, since the per-beam intensity time
-    series subrecord has no encoder at all yet.
+    library's DecodeEM3ImagerySpecific() function in gsf_dec.c. Its
+    result starts from new_em3_imagery_specific()'s template, so its
+    field names always match what _encode_em3_imagery_specific() expects.
 
     This function has not been tested against a verified GSF file, since
     no sample data containing an EM3-series intensity series subrecord
@@ -3954,27 +3992,70 @@ def _decode_em3_imagery_specific(payload, pos):
         of the decoded scalar fields, and bytes_consumed is always 18.
     """
     start = pos
-    (range_norm,) = struct.unpack_from('>H', payload, pos); pos += 2
-    (start_tvg_ramp,) = struct.unpack_from('>H', payload, pos); pos += 2
-    (stop_tvg_ramp,) = struct.unpack_from('>H', payload, pos); pos += 2
-    bsn = payload[pos]; pos += 1
-    bso = payload[pos]; pos += 1
+    fields = new_em3_imagery_specific()
+    (fields['RangeNorm_samples'],) = struct.unpack_from('>H', payload, pos); pos += 2
+    (fields['StartTvgRamp_samples'],) = struct.unpack_from('>H', payload, pos); pos += 2
+    (fields['StopTvgRamp_samples'],) = struct.unpack_from('>H', payload, pos); pos += 2
+    fields['BSNormal_dB'] = payload[pos]; pos += 1
+    fields['BSOblique_dB'] = payload[pos]; pos += 1
     (mean_absorption_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
-    (offset,) = struct.unpack_from('>h', payload, pos); pos += 2
-    (scale,) = struct.unpack_from('>h', payload, pos); pos += 2
+    fields['MeanAbsorption_dBkm'] = mean_absorption_raw / 100.0
+    (fields['Offset'],) = struct.unpack_from('>h', payload, pos); pos += 2
+    (fields['Scale'],) = struct.unpack_from('>h', payload, pos); pos += 2
     pos += 4  # spare
 
-    fields = {
-        'RangeNorm_samples': range_norm,
-        'StartTvgRamp_samples': start_tvg_ramp,
-        'StopTvgRamp_samples': stop_tvg_ramp,
-        'BSNormal_dB': bsn,
-        'BSOblique_dB': bso,
-        'MeanAbsorption_dBkm': mean_absorption_raw / 100.0,
-        'Offset': offset,
-        'Scale': scale,
-    }
     return fields, pos - start
+
+
+def _encode_em3_imagery_specific(fields):
+    """
+    Encode the EM3-series sensor-imagery preamble embedded in a
+    GSF_SWATH_BATHY_SUBRECORD_INTENSITY_SERIES_ARRAY subrecord (id 21).
+    This is the inverse of _decode_em3_imagery_specific(), and is ported
+    from the reference gsflib C library's EncodeEM3ImagerySpecific()
+    function in gsf_enc.c. BSNormal_dB and BSOblique_dB are written as
+    plain truncating byte casts with no rounding, matching how
+    _decode_em3_imagery_specific() reads them: as whole-number bytes
+    with no fractional scale factor applied.
+
+    :param fields: a dictionary of the scalar fields to encode, in the
+        same shape _decode_em3_imagery_specific() returns or
+        new_em3_imagery_specific() creates. A field that is missing from
+        the dictionary is written as zero.
+
+    :return: the encoded preamble, as bytes. Always 18 bytes.
+    """
+    g = fields.get
+    body = struct.pack('>H', int(g('RangeNorm_samples', 0)))
+    body += struct.pack('>H', int(g('StartTvgRamp_samples', 0)))
+    body += struct.pack('>H', int(g('StopTvgRamp_samples', 0)))
+    body += struct.pack('>B', int(g('BSNormal_dB', 0)) & 0xFF)
+    body += struct.pack('>B', int(g('BSOblique_dB', 0)) & 0xFF)
+    body += struct.pack('>H', _gsf_round(g('MeanAbsorption_dBkm', 0.0) * 100.0))
+    body += struct.pack('>h', int(g('Offset', 0)))
+    body += struct.pack('>h', int(g('Scale', 0)))
+    body += b'\x00' * 4  # spare
+    return body
+
+
+def new_em4_imagery_specific():
+    """
+    Return a new dictionary with every EM4-series sensor-imagery preamble
+    field name present, each pre-set to 0 or 0.0. gsf.h defines no
+    GSF_NULL_* sentinel for these vendor-specific fields, so 0 is the
+    only "not specified" marker available. _decode_em4_imagery_specific()
+    builds its result starting from this same template, so the two can
+    never define a different set of field names.
+
+    :return: a dictionary with every EM4-series imagery preamble field
+        name present, pre-set to 0 or 0.0.
+    """
+    return {
+        'SamplingFrequency_Hz': 0.0, 'MeanAbsorption_dBkm': 0.0,
+        'TxPulseLength_us': 0, 'RangeNorm_samples': 0, 'StartTvgRamp_samples': 0,
+        'StopTvgRamp_samples': 0, 'BSNormal_dB': 0.0, 'BSOblique_dB': 0.0,
+        'TxBeamWidth_deg': 0.0, 'TvgCrossOver_deg': 0.0, 'Offset': 0, 'Scale': 0,
+    }
 
 
 def _decode_em4_imagery_specific(payload, pos):
@@ -3989,9 +4070,9 @@ def _decode_em4_imagery_specific(payload, pos):
     sensor-specific subrecord, and lives only inside subrecord 21. This
     function is called by _decode_brb_intensity() to decode that
     preamble, and is ported from the reference gsflib C library's
-    DecodeEM4ImagerySpecific() function in gsf_dec.c. There is no
-    encoder for this preamble, since the per-beam intensity time series
-    subrecord has no encoder at all yet.
+    DecodeEM4ImagerySpecific() function in gsf_dec.c. Its result starts
+    from new_em4_imagery_specific()'s template, so its field names always
+    match what _encode_em4_imagery_specific() expects.
 
     This function has not been tested against a verified GSF file, since
     none of the sample files checked into this project carry an
@@ -4008,37 +4089,78 @@ def _decode_em4_imagery_specific(payload, pos):
         of the decoded scalar fields, and bytes_consumed is always 50.
     """
     start = pos
+    fields = new_em4_imagery_specific()
     (freq_int,) = struct.unpack_from('>I', payload, pos); pos += 4
     (freq_frac,) = struct.unpack_from('>I', payload, pos); pos += 4
-    sampling_frequency = freq_int + freq_frac / 4.0e9
+    fields['SamplingFrequency_Hz'] = freq_int + freq_frac / 4.0e9
     (mean_absorption_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
-    (tx_pulse_length,) = struct.unpack_from('>H', payload, pos); pos += 2
-    (range_norm,) = struct.unpack_from('>H', payload, pos); pos += 2
-    (start_tvg_ramp,) = struct.unpack_from('>H', payload, pos); pos += 2
-    (stop_tvg_ramp,) = struct.unpack_from('>H', payload, pos); pos += 2
+    fields['MeanAbsorption_dBkm'] = mean_absorption_raw / 100.0
+    (fields['TxPulseLength_us'],) = struct.unpack_from('>H', payload, pos); pos += 2
+    (fields['RangeNorm_samples'],) = struct.unpack_from('>H', payload, pos); pos += 2
+    (fields['StartTvgRamp_samples'],) = struct.unpack_from('>H', payload, pos); pos += 2
+    (fields['StopTvgRamp_samples'],) = struct.unpack_from('>H', payload, pos); pos += 2
     (bsn_raw,) = struct.unpack_from('>h', payload, pos); pos += 2
+    fields['BSNormal_dB'] = bsn_raw / 10.0
     (bso_raw,) = struct.unpack_from('>h', payload, pos); pos += 2
+    fields['BSOblique_dB'] = bso_raw / 10.0
     (tx_beam_width_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
+    fields['TxBeamWidth_deg'] = tx_beam_width_raw / 10.0
     (tvg_cross_over_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
-    (offset,) = struct.unpack_from('>h', payload, pos); pos += 2
-    (scale,) = struct.unpack_from('>h', payload, pos); pos += 2
+    fields['TvgCrossOver_deg'] = tvg_cross_over_raw / 10.0
+    (fields['Offset'],) = struct.unpack_from('>h', payload, pos); pos += 2
+    (fields['Scale'],) = struct.unpack_from('>h', payload, pos); pos += 2
     pos += 20  # spare
 
-    fields = {
-        'SamplingFrequency_Hz': sampling_frequency,
-        'MeanAbsorption_dBkm': mean_absorption_raw / 100.0,
-        'TxPulseLength_us': tx_pulse_length,
-        'RangeNorm_samples': range_norm,
-        'StartTvgRamp_samples': start_tvg_ramp,
-        'StopTvgRamp_samples': stop_tvg_ramp,
-        'BSNormal_dB': bsn_raw / 10.0,
-        'BSOblique_dB': bso_raw / 10.0,
-        'TxBeamWidth_deg': tx_beam_width_raw / 10.0,
-        'TvgCrossOver_deg': tvg_cross_over_raw / 10.0,
-        'Offset': offset,
-        'Scale': scale,
-    }
     return fields, pos - start
+
+
+def _encode_em4_imagery_specific(fields):
+    """
+    Encode the EM4-series sensor-imagery preamble embedded in a
+    GSF_SWATH_BATHY_SUBRECORD_INTENSITY_SERIES_ARRAY subrecord (id 21).
+    This is the inverse of _decode_em4_imagery_specific(), and is ported
+    from the reference gsflib C library's EncodeEM4ImagerySpecific()
+    function in gsf_enc.c.
+
+    :param fields: a dictionary of the scalar fields to encode, in the
+        same shape _decode_em4_imagery_specific() returns or
+        new_em4_imagery_specific() creates. A field that is missing from
+        the dictionary is written as zero.
+
+    :return: the encoded preamble, as bytes. Always 50 bytes.
+    """
+    g = fields.get
+    sampling_frequency = g('SamplingFrequency_Hz', 0.0)
+    freq_int = int(sampling_frequency)
+    freq_frac = _gsf_round((sampling_frequency - freq_int) * 4.0e9)
+    body = struct.pack('>I', freq_int)
+    body += struct.pack('>I', freq_frac)
+    body += struct.pack('>H', _gsf_round(g('MeanAbsorption_dBkm', 0.0) * 100.0))
+    body += struct.pack('>H', _gsf_round(g('TxPulseLength_us', 0.0)))
+    body += struct.pack('>H', int(g('RangeNorm_samples', 0)))
+    body += struct.pack('>H', int(g('StartTvgRamp_samples', 0)))
+    body += struct.pack('>H', int(g('StopTvgRamp_samples', 0)))
+    body += struct.pack('>h', _gsf_round(g('BSNormal_dB', 0.0) * 10.0))
+    body += struct.pack('>h', _gsf_round(g('BSOblique_dB', 0.0) * 10.0))
+    body += struct.pack('>H', _gsf_round(g('TxBeamWidth_deg', 0.0) * 10.0))
+    body += struct.pack('>H', _gsf_round(g('TvgCrossOver_deg', 0.0) * 10.0))
+    body += struct.pack('>h', int(g('Offset', 0)))
+    body += struct.pack('>h', int(g('Scale', 0)))
+    body += b'\x00' * 20  # spare
+    return body
+
+
+def new_reson_size_spare_imagery_specific():
+    """
+    Return a new dictionary with the single field name used by the
+    Reson 7125 and Reson T-series sensor-imagery preamble, pre-set to 0.
+    _decode_reson_size_spare_imagery_specific() builds its result
+    starting from this same template, so the two can never define a
+    different set of field names.
+
+    :return: a dictionary with a single 'Size' key, pre-set to 0.
+    """
+    return {'Size': 0}
 
 
 def _decode_reson_size_spare_imagery_specific(payload, pos):
@@ -4057,9 +4179,10 @@ def _decode_reson_size_spare_imagery_specific(payload, pos):
     library's DecodeReson7100ImagerySpecific() and
     DecodeResonTSeriesImagerySpecific() functions in gsf_dec.c, which
     are byte-for-byte identical apart from their names, so this single
-    function serves both. There is no encoder for this preamble, since
-    the per-beam intensity time series subrecord has no encoder at all
-    yet.
+    function serves both. Its result starts from
+    new_reson_size_spare_imagery_specific()'s template, so its field
+    names always match what _encode_reson_size_spare_imagery_specific()
+    expects.
 
     This function has not been tested against a verified GSF file, since
     no sample data containing a Reson 7125 or Reson T-series intensity
@@ -4074,9 +4197,33 @@ def _decode_reson_size_spare_imagery_specific(payload, pos):
         bytes_consumed is always 66.
     """
     start = pos
-    (size,) = struct.unpack_from('>H', payload, pos); pos += 2
+    fields = new_reson_size_spare_imagery_specific()
+    (fields['Size'],) = struct.unpack_from('>H', payload, pos); pos += 2
     pos += 64  # spare
-    return {'Size': size}, pos - start
+    return fields, pos - start
+
+
+def _encode_reson_size_spare_imagery_specific(fields):
+    """
+    Encode the sensor-imagery preamble embedded in a
+    GSF_SWATH_BATHY_SUBRECORD_INTENSITY_SERIES_ARRAY subrecord (id 21)
+    for the Reson 7125 and Reson T-series sonars. This is the inverse of
+    _decode_reson_size_spare_imagery_specific(), and is ported from the
+    reference gsflib C library's EncodeReson7100ImagerySpecific() and
+    EncodeResonTSeriesImagerySpecific() functions in gsf_enc.c, which are
+    byte-for-byte identical apart from their names, so this single
+    function serves both.
+
+    :param fields: a dictionary of the scalar fields to encode, in the
+        same shape _decode_reson_size_spare_imagery_specific() returns
+        or new_reson_size_spare_imagery_specific() creates. A field that
+        is missing from the dictionary is written as zero.
+
+    :return: the encoded preamble, as bytes. Always 66 bytes.
+    """
+    body = struct.pack('>H', int(fields.get('Size', 0)))
+    body += b'\x00' * 64  # spare
+    return body
 
 
 def _decode_reson8100_imagery_specific(payload, pos):
@@ -4092,9 +4239,7 @@ def _decode_reson8100_imagery_specific(payload, pos):
     subrecord, and lives only inside subrecord 21. This function is
     called by _decode_brb_intensity() to decode that preamble, and is
     ported from the reference gsflib C library's
-    DecodeReson8100ImagerySpecific() function in gsf_dec.c. There is no
-    encoder for this preamble, since the per-beam intensity time series
-    subrecord has no encoder at all yet.
+    DecodeReson8100ImagerySpecific() function in gsf_dec.c.
 
     This function has not been tested against a verified GSF file, since
     no sample data containing a Reson 8100-family intensity series
@@ -4113,6 +4258,39 @@ def _decode_reson8100_imagery_specific(payload, pos):
     return {}, 8
 
 
+def _encode_reson8100_imagery_specific():
+    """
+    Encode the sensor-imagery preamble embedded in a
+    GSF_SWATH_BATHY_SUBRECORD_INTENSITY_SERIES_ARRAY subrecord (id 21)
+    for the Reson 8100-family sonars, whose preamble is entirely
+    spare/reserved. This is the inverse of
+    _decode_reson8100_imagery_specific(), and is ported from the
+    reference gsflib C library's EncodeReson8100ImagerySpecific()
+    function in gsf_enc.c. It takes no fields, since there is nothing in
+    this preamble to encode.
+
+    :return: the encoded preamble, as bytes. Always 8 bytes, all zero.
+    """
+    return b'\x00' * 8
+
+
+def new_klein5410bss_imagery_specific():
+    """
+    Return a new dictionary with every Klein 5410 BSS sensor-imagery
+    preamble field name present, each pre-set to 0 or an all-zero list.
+    gsf.h defines no GSF_NULL_* sentinel for these vendor-specific
+    fields, so 0 is the only "not specified" marker available.
+    _decode_klein5410bss_imagery_specific() builds its result starting
+    from this same template, so the two can never define a different set
+    of field names.
+
+    :return: a dictionary with every Klein 5410 BSS imagery preamble
+        field name present, pre-set to 0 or an all-zero five-element
+        list.
+    """
+    return {'ResMode': 0, 'TvgPage': 0, 'BeamID': [0, 0, 0, 0, 0]}
+
+
 def _decode_klein5410bss_imagery_specific(payload, pos):
     """
     Decode the Klein 5410 BSS sensor-imagery preamble embedded in a
@@ -4124,9 +4302,10 @@ def _decode_klein5410bss_imagery_specific(payload, pos):
     sensor-specific subrecord, and lives only inside subrecord 21. This
     function is called by _decode_brb_intensity() to decode that
     preamble, and is ported from the reference gsflib C library's
-    DecodeKlein5410BssImagerySpecific() function in gsf_dec.c. There is
-    no encoder for this preamble, since the per-beam intensity time
-    series subrecord has no encoder at all yet.
+    DecodeKlein5410BssImagerySpecific() function in gsf_dec.c. Its result
+    starts from new_klein5410bss_imagery_specific()'s template, so its
+    field names always match what
+    _encode_klein5410bss_imagery_specific() expects.
 
     This function has not been tested against a verified GSF file, since
     no sample data containing a Klein 5410 BSS intensity series
@@ -4140,13 +4319,63 @@ def _decode_klein5410bss_imagery_specific(payload, pos):
         of the decoded scalar fields, and bytes_consumed is always 18.
     """
     start = pos
-    (res_mode,) = struct.unpack_from('>H', payload, pos); pos += 2
-    (tvg_page,) = struct.unpack_from('>H', payload, pos); pos += 2
-    beam_id = list(struct.unpack_from('>5H', payload, pos)); pos += 10
+    fields = new_klein5410bss_imagery_specific()
+    (fields['ResMode'],) = struct.unpack_from('>H', payload, pos); pos += 2
+    (fields['TvgPage'],) = struct.unpack_from('>H', payload, pos); pos += 2
+    fields['BeamID'] = list(struct.unpack_from('>5H', payload, pos)); pos += 10
     pos += 4  # spare
-
-    fields = {'ResMode': res_mode, 'TvgPage': tvg_page, 'BeamID': beam_id}
     return fields, pos - start
+
+
+def _encode_klein5410bss_imagery_specific(fields):
+    """
+    Encode the Klein 5410 BSS sensor-imagery preamble embedded in a
+    GSF_SWATH_BATHY_SUBRECORD_INTENSITY_SERIES_ARRAY subrecord (id 21).
+    This is the inverse of _decode_klein5410bss_imagery_specific(), and
+    is ported from the reference gsflib C library's
+    EncodeKlein5410BssImagerySpecific() function in gsf_enc.c.
+
+    :param fields: a dictionary of the scalar fields to encode, in the
+        same shape _decode_klein5410bss_imagery_specific() returns or
+        new_klein5410bss_imagery_specific() creates. A field that is
+        missing from the dictionary is written as zero.
+
+    :return: the encoded preamble, as bytes. Always 18 bytes.
+    """
+    beam_id = list(fields.get('BeamID') or [0, 0, 0, 0, 0])
+    beam_id = (beam_id + [0, 0, 0, 0, 0])[:5]
+    body = struct.pack('>H', int(fields.get('ResMode', 0)))
+    body += struct.pack('>H', int(fields.get('TvgPage', 0)))
+    body += struct.pack('>5H', *[int(v) for v in beam_id])
+    body += b'\x00' * 4  # spare
+    return body
+
+
+def new_r2sonic_imagery_specific():
+    """
+    Return a new dictionary with every R2Sonic sensor-imagery preamble
+    field name present, pre-set to 0, 0.0, an empty string, an all-zero
+    six-element list, or None for 'PingTime'. gsf.h defines no
+    GSF_NULL_* sentinel for these vendor-specific fields, so these are
+    the only "not specified" markers available.
+    _decode_r2sonic_imagery_specific() builds its result starting from
+    this same template, so the two can never define a different set of
+    field names.
+
+    :return: a dictionary with every R2Sonic imagery preamble field name
+        present, pre-set to its default value.
+    """
+    return {
+        'ModelNumber': "", 'SerialNumber': "", 'PingTime': None, 'PingNumber': 0,
+        'PingPeriod_s': 0.0, 'SoundSpeed_mps': 0.0, 'Frequency_Hz': 0.0,
+        'TxPower_dB': 0.0, 'TxPulseWidth_s': 0.0,
+        'TxBeamwidthVert_deg': 0.0, 'TxBeamwidthHoriz_deg': 0.0,
+        'TxSteeringVert_deg': 0.0, 'TxSteeringHoriz_deg': 0.0, 'TxMiscInfo': 0,
+        'RxBandwidth_Hz': 0.0, 'RxSampleRate_Hz': 0.0, 'RxRange_m': 0.0,
+        'RxGain_dB': 0.0, 'RxSpreading': 0.0, 'RxAbsorption_dBkm': 0.0,
+        'RxMountTilt_deg': 0.0, 'RxMiscInfo': 0,
+        'Reserved': 0, 'NumBeams': 0, 'MoreInfo': [0.0] * 6,
+    }
 
 
 def _decode_r2sonic_imagery_specific(payload, pos):
@@ -4161,9 +4390,9 @@ def _decode_r2sonic_imagery_specific(payload, pos):
     subrecord, and lives only inside subrecord 21. This function is
     called by _decode_brb_intensity() to decode that preamble, and is
     ported from the reference gsflib C library's
-    DecodeR2SonicImagerySpecific() function in gsf_dec.c. There is no
-    encoder for this preamble, since the per-beam intensity time series
-    subrecord has no encoder at all yet.
+    DecodeR2SonicImagerySpecific() function in gsf_dec.c. Its result
+    starts from new_r2sonic_imagery_specific()'s template, so its field
+    names always match what _encode_r2sonic_imagery_specific() expects.
 
     This function has not been tested against a verified GSF file, since
     no sample data containing an R2Sonic intensity series subrecord is
@@ -4177,62 +4406,119 @@ def _decode_r2sonic_imagery_specific(payload, pos):
         of the decoded scalar fields, and bytes_consumed is always 168.
     """
     start = pos
-    model_number = payload[pos:pos + 12].split(b'\x00', 1)[0].decode('ascii', 'replace'); pos += 12
-    serial_number = payload[pos:pos + 12].split(b'\x00', 1)[0].decode('ascii', 'replace'); pos += 12
+    fields = new_r2sonic_imagery_specific()
+    fields['ModelNumber'] = payload[pos:pos + 12].split(b'\x00', 1)[0].decode('ascii', 'replace'); pos += 12
+    fields['SerialNumber'] = payload[pos:pos + 12].split(b'\x00', 1)[0].decode('ascii', 'replace'); pos += 12
     (sec,) = struct.unpack_from('>i', payload, pos); pos += 4
     (nsec,) = struct.unpack_from('>I', payload, pos); pos += 4
-    (ping_number,) = struct.unpack_from('>I', payload, pos); pos += 4
+    fields['PingTime'] = _gsf_timestamp(sec, nsec)
+    (fields['PingNumber'],) = struct.unpack_from('>I', payload, pos); pos += 4
     (ping_period_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    fields['PingPeriod_s'] = ping_period_raw / 1.0e6
     (sound_speed_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    fields['SoundSpeed_mps'] = sound_speed_raw / 1.0e2
     (frequency_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    fields['Frequency_Hz'] = frequency_raw / 1.0e3
     (tx_power_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    fields['TxPower_dB'] = tx_power_raw / 1.0e2
     (tx_pulse_width_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    fields['TxPulseWidth_s'] = tx_pulse_width_raw / 1.0e7
     (tx_beamwidth_vert_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    fields['TxBeamwidthVert_deg'] = tx_beamwidth_vert_raw / 1.0e6
     (tx_beamwidth_horiz_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    fields['TxBeamwidthHoriz_deg'] = tx_beamwidth_horiz_raw / 1.0e6
     (tx_steering_vert_raw,) = struct.unpack_from('>i', payload, pos); pos += 4
+    fields['TxSteeringVert_deg'] = tx_steering_vert_raw / 1.0e6
     (tx_steering_horiz_raw,) = struct.unpack_from('>i', payload, pos); pos += 4
-    (tx_misc_info,) = struct.unpack_from('>I', payload, pos); pos += 4
+    fields['TxSteeringHoriz_deg'] = tx_steering_horiz_raw / 1.0e6
+    (fields['TxMiscInfo'],) = struct.unpack_from('>I', payload, pos); pos += 4
     (rx_bandwidth_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    fields['RxBandwidth_Hz'] = rx_bandwidth_raw / 1.0e4
     (rx_sample_rate_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    fields['RxSampleRate_Hz'] = rx_sample_rate_raw / 1.0e3
     (rx_range_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    fields['RxRange_m'] = rx_range_raw / 1.0e5
     (rx_gain_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    fields['RxGain_dB'] = rx_gain_raw / 1.0e2
     (rx_spreading_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    fields['RxSpreading'] = rx_spreading_raw / 1.0e3
     (rx_absorption_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
+    fields['RxAbsorption_dBkm'] = rx_absorption_raw / 1.0e3
     (rx_mount_tilt_raw,) = struct.unpack_from('>i', payload, pos); pos += 4
-    (rx_misc_info,) = struct.unpack_from('>I', payload, pos); pos += 4
-    (reserved,) = struct.unpack_from('>H', payload, pos); pos += 2
-    (num_beams,) = struct.unpack_from('>H', payload, pos); pos += 2
-    more_info = [v / 1.0e6 for v in struct.unpack_from('>6i', payload, pos)]; pos += 24
+    fields['RxMountTilt_deg'] = rx_mount_tilt_raw / 1.0e6
+    (fields['RxMiscInfo'],) = struct.unpack_from('>I', payload, pos); pos += 4
+    (fields['Reserved'],) = struct.unpack_from('>H', payload, pos); pos += 2
+    (fields['NumBeams'],) = struct.unpack_from('>H', payload, pos); pos += 2
+    fields['MoreInfo'] = [v / 1.0e6 for v in struct.unpack_from('>6i', payload, pos)]; pos += 24
     pos += 32  # spare
-
-    fields = {
-        'ModelNumber': model_number,
-        'SerialNumber': serial_number,
-        'PingTime': _gsf_timestamp(sec, nsec),
-        'PingNumber': ping_number,
-        'PingPeriod_s': ping_period_raw / 1.0e6,
-        'SoundSpeed_mps': sound_speed_raw / 1.0e2,
-        'Frequency_Hz': frequency_raw / 1.0e3,
-        'TxPower_dB': tx_power_raw / 1.0e2,
-        'TxPulseWidth_s': tx_pulse_width_raw / 1.0e7,
-        'TxBeamwidthVert_deg': tx_beamwidth_vert_raw / 1.0e6,
-        'TxBeamwidthHoriz_deg': tx_beamwidth_horiz_raw / 1.0e6,
-        'TxSteeringVert_deg': tx_steering_vert_raw / 1.0e6,
-        'TxSteeringHoriz_deg': tx_steering_horiz_raw / 1.0e6,
-        'TxMiscInfo': tx_misc_info,
-        'RxBandwidth_Hz': rx_bandwidth_raw / 1.0e4,
-        'RxSampleRate_Hz': rx_sample_rate_raw / 1.0e3,
-        'RxRange_m': rx_range_raw / 1.0e5,
-        'RxGain_dB': rx_gain_raw / 1.0e2,
-        'RxSpreading': rx_spreading_raw / 1.0e3,
-        'RxAbsorption_dBkm': rx_absorption_raw / 1.0e3,
-        'RxMountTilt_deg': rx_mount_tilt_raw / 1.0e6,
-        'RxMiscInfo': rx_misc_info,
-        'Reserved': reserved,
-        'NumBeams': num_beams,
-        'MoreInfo': more_info,
-    }
     return fields, pos - start
+
+
+def _encode_r2sonic_imagery_specific(fields):
+    """
+    Encode the R2Sonic sensor-imagery preamble embedded in a
+    GSF_SWATH_BATHY_SUBRECORD_INTENSITY_SERIES_ARRAY subrecord (id 21).
+    This is the inverse of _decode_r2sonic_imagery_specific(), and is
+    ported from the reference gsflib C library's
+    EncodeR2SonicImagerySpecific() function in gsf_enc.c.
+
+    The reference C encoder rounds most fields by adding an unconditional
+    0.501 before truncating, which is only correct for fields that are
+    physically non-negative, and rounds a handful of signed fields (the
+    vertical and horizontal transmit steering angles, the receive mount
+    tilt, and the "more info" array) with a sign-aware branch that adds
+    0.501 or subtracts 0.501 depending on the sign of the value. This
+    Python port instead uses the standard sign-correct _gsf_round()
+    convention for every field. That convention is numerically
+    equivalent to the reference encoder's unconditional +0.501 for the
+    non-negative fields, and matches the reference encoder's sign-aware
+    branch exactly for the signed fields, so the encoded output is the
+    same either way.
+
+    :param fields: a dictionary of the scalar fields to encode, in the
+        same shape _decode_r2sonic_imagery_specific() returns or
+        new_r2sonic_imagery_specific() creates. A field that is missing
+        from the dictionary is written as zero. 'PingTime' of None is
+        written as zero seconds and nanoseconds.
+
+    :return: the encoded preamble, as bytes. Always 168 bytes.
+    """
+    g = fields.get
+
+    def model_bytes(key):
+        return (g(key) or "").encode('ascii')[:12].ljust(12, b'\x00')
+
+    body = model_bytes('ModelNumber')
+    body += model_bytes('SerialNumber')
+    ping_time = g('PingTime')
+    sec, nsec = _gsf_epoch(ping_time) if ping_time is not None else (0, 0)
+    body += struct.pack('>2I', sec, nsec)
+    body += struct.pack('>I', int(g('PingNumber', 0)))
+    body += struct.pack('>I', _gsf_round(g('PingPeriod_s', 0.0) * 1.0e6))
+    body += struct.pack('>I', _gsf_round(g('SoundSpeed_mps', 0.0) * 1.0e2))
+    body += struct.pack('>I', _gsf_round(g('Frequency_Hz', 0.0) * 1.0e3))
+    body += struct.pack('>I', _gsf_round(g('TxPower_dB', 0.0) * 1.0e2))
+    body += struct.pack('>I', _gsf_round(g('TxPulseWidth_s', 0.0) * 1.0e7))
+    body += struct.pack('>I', _gsf_round(g('TxBeamwidthVert_deg', 0.0) * 1.0e6))
+    body += struct.pack('>I', _gsf_round(g('TxBeamwidthHoriz_deg', 0.0) * 1.0e6))
+    body += struct.pack('>i', _gsf_round(g('TxSteeringVert_deg', 0.0) * 1.0e6))
+    body += struct.pack('>i', _gsf_round(g('TxSteeringHoriz_deg', 0.0) * 1.0e6))
+    body += struct.pack('>I', int(g('TxMiscInfo', 0)))
+    body += struct.pack('>I', _gsf_round(g('RxBandwidth_Hz', 0.0) * 1.0e4))
+    body += struct.pack('>I', _gsf_round(g('RxSampleRate_Hz', 0.0) * 1.0e3))
+    body += struct.pack('>I', _gsf_round(g('RxRange_m', 0.0) * 1.0e5))
+    body += struct.pack('>I', _gsf_round(g('RxGain_dB', 0.0) * 1.0e2))
+    body += struct.pack('>I', _gsf_round(g('RxSpreading', 0.0) * 1.0e3))
+    body += struct.pack('>I', _gsf_round(g('RxAbsorption_dBkm', 0.0) * 1.0e3))
+    body += struct.pack('>i', _gsf_round(g('RxMountTilt_deg', 0.0) * 1.0e6))
+    body += struct.pack('>I', int(g('RxMiscInfo', 0)))
+    body += struct.pack('>H', int(g('Reserved', 0)))
+    body += struct.pack('>H', int(g('NumBeams', 0)))
+    more_info = list(g('MoreInfo') or [0.0] * 6)
+    more_info = (more_info + [0.0] * 6)[:6]
+    body += struct.pack('>6i', *(_gsf_round(v * 1.0e6) for v in more_info))
+    body += b'\x00' * 32  # spare
+    return body
 
 
 def _decode_kmall_specific(payload, pos):
@@ -4408,6 +4694,58 @@ def _decode_kmall_specific(payload, pos):
     return s, pos - start
 
 
+def new_intensity_time_series_header(sensor_id=None):
+    """
+    Return a new dictionary with the fixed 'BitsPerSample' and
+    'AppliedCorrections' fields that begin every
+    GSF_SWATH_BATHY_SUBRECORD_INTENSITY_SERIES_ARRAY subrecord (id 21),
+    merged with the sensor-imagery preamble template for sensor_id, if
+    that vendor places a preamble in this subrecord.
+    _decode_brb_intensity() builds its result starting from this same
+    template, so the two can never define a different set of field
+    names.
+
+    :param sensor_id: the vendor "_SPECIFIC" subrecord id whose
+        sensor-imagery preamble fields, if any, should be merged into
+        the returned dictionary. Left as None, or naming a sensor that
+        gsflib gives no preamble to (or whose preamble carries no
+        fields, such as KMALL or the Reson 8100 family), the returned
+        dictionary holds only the two fixed fields.
+
+    :return: a dictionary with 'BitsPerSample' (pre-set to 16) and
+        'AppliedCorrections' (pre-set to 0), plus that sensor's own
+        imagery preamble fields, if any.
+    """
+    header = {'BitsPerSample': 16, 'AppliedCorrections': 0}
+    if sensor_id in _SUBRECORD_EM3_IMAGERY_IDS:
+        header.update(new_em3_imagery_specific())
+    elif sensor_id in _SUBRECORD_EM4_IMAGERY_IDS:
+        header.update(new_em4_imagery_specific())
+    elif sensor_id in _SUBRECORD_RESON_SIZE_SPARE_IMAGERY_IDS:
+        header.update(new_reson_size_spare_imagery_specific())
+    elif sensor_id == _SUBRECORD_KLEIN_5410_BSS_SPECIFIC:
+        header.update(new_klein5410bss_imagery_specific())
+    elif sensor_id in _SUBRECORD_R2SONIC_IMAGERY_IDS:
+        header.update(new_r2sonic_imagery_specific())
+    # KMALL and the Reson 8100 family have a preamble with no fields;
+    # every other sensor_id has no preamble at all.
+    return header
+
+
+def new_intensity_time_series_beam():
+    """
+    Return a new dictionary with every per-beam field name used within a
+    GSF_SWATH_BATHY_SUBRECORD_INTENSITY_SERIES_ARRAY subrecord's 'Beams'
+    table, each pre-set to 0 or an empty list. _decode_brb_intensity()
+    builds each beam row starting from this same template, so the two
+    can never define a different set of field names.
+
+    :return: a dictionary with 'SampleCount', 'DetectSample',
+        'StartRangeSamples', and 'Samples' (an empty list) present.
+    """
+    return {'SampleCount': 0, 'DetectSample': 0, 'StartRangeSamples': 0, 'Samples': []}
+
+
 def _decode_brb_intensity(payload, pos, num_beams, sensor_id):
     """
     Decode a GSF_SWATH_BATHY_SUBRECORD_INTENSITY_SERIES_ARRAY subrecord
@@ -4426,6 +4764,9 @@ def _decode_brb_intensity(payload, pos, num_beams, sensor_id):
     SeaBeam, the EM12/100/950/1000/121 family, GeoSwath, DeltaT), has no
     preamble at all, matching gsf_dec.c's switch default of a zero-length
     sensor block, and decoding proceeds straight to the per-beam samples.
+    The result starts from new_intensity_time_series_header()'s and
+    new_intensity_time_series_beam()'s templates, so its field names
+    always match what _encode_brb_intensity() expects.
 
     :param payload: the raw bytes of the ping record.
     :param pos: the byte offset within payload where this subrecord's
@@ -4438,55 +4779,56 @@ def _decode_brb_intensity(payload, pos, num_beams, sensor_id):
 
     :return: None if num_beams is not positive, or if the encoded
         bits-per-sample value does not resolve to a supported sample
-        width. Otherwise, a tuple of (header, beam_rows, bytes_consumed).
-        header is a dictionary with 'BitsPerSample', 'AppliedCorrections',
-        and any fields decoded from a sensor-imagery preamble. beam_rows
-        is a list with one dictionary per beam, each holding
-        'SampleCount', 'DetectSample', 'StartRangeSamples', and 'Samples'
-        (a list of integer sample values). bytes_consumed is the number
-        of bytes read from payload.
+        width. Otherwise, a tuple of (record, bytes_consumed). record is
+        a dictionary with 'BitsPerSample', 'AppliedCorrections', any
+        fields decoded from a sensor-imagery preamble, and 'Beams', a
+        pandas.DataFrame with one row per beam holding 'SampleCount',
+        'DetectSample', 'StartRangeSamples', and 'Samples' (a list of
+        integer sample values). bytes_consumed is the number of bytes
+        read from payload.
     """
     if num_beams <= 0:
         return None
 
     start = pos
-    bits_per_sample = payload[pos]; pos += 1
-    (applied_corrections,) = struct.unpack_from('>I', payload, pos); pos += 4
+    header = new_intensity_time_series_header(sensor_id)
+    header['BitsPerSample'] = payload[pos]; pos += 1
+    (header['AppliedCorrections'],) = struct.unpack_from('>I', payload, pos); pos += 4
     pos += 16  # spare
 
-    sensor_fields = {}
+    bits_per_sample = header['BitsPerSample']
     if sensor_id == _SUBRECORD_KMALL_SPECIFIC:
         pos += _decode_kmall_imagery_specific(payload, pos)
     elif sensor_id in _SUBRECORD_EM3_IMAGERY_IDS:
         sensor_fields, consumed = _decode_em3_imagery_specific(payload, pos)
-        pos += consumed
+        header.update(sensor_fields); pos += consumed
     elif sensor_id in _SUBRECORD_EM4_IMAGERY_IDS:
         sensor_fields, consumed = _decode_em4_imagery_specific(payload, pos)
-        pos += consumed
+        header.update(sensor_fields); pos += consumed
     elif sensor_id in _SUBRECORD_RESON_SIZE_SPARE_IMAGERY_IDS:
         sensor_fields, consumed = _decode_reson_size_spare_imagery_specific(payload, pos)
-        pos += consumed
+        header.update(sensor_fields); pos += consumed
     elif sensor_id in _SUBRECORD_RESON_8100_IMAGERY_IDS:
-        sensor_fields, consumed = _decode_reson8100_imagery_specific(payload, pos)
+        _sensor_fields, consumed = _decode_reson8100_imagery_specific(payload, pos)
         pos += consumed
     elif sensor_id == _SUBRECORD_KLEIN_5410_BSS_SPECIFIC:
         sensor_fields, consumed = _decode_klein5410bss_imagery_specific(payload, pos)
-        pos += consumed
+        header.update(sensor_fields); pos += consumed
     elif sensor_id in _SUBRECORD_R2SONIC_IMAGERY_IDS:
         sensor_fields, consumed = _decode_r2sonic_imagery_specific(payload, pos)
-        pos += consumed
+        header.update(sensor_fields); pos += consumed
     # else: no sensor-imagery preamble precedes the per-beam samples for
     # this sensor_id (gsf_dec.c's switch default, sensor_size=0).
 
     bytes_per_sample = bits_per_sample // 8
-    header = {'BitsPerSample': bits_per_sample, 'AppliedCorrections': applied_corrections}
-    header.update(sensor_fields)
-
     beam_rows = []
     for _beam in range(num_beams):
-        (sample_count, detect_sample, start_range_samples) = struct.unpack_from('>3H', payload, pos)
+        row = new_intensity_time_series_beam()
+        (row['SampleCount'], row['DetectSample'], row['StartRangeSamples']) = \
+            struct.unpack_from('>3H', payload, pos)
         pos += 6
         pos += 6  # spare
+        sample_count = row['SampleCount']
 
         if bits_per_sample == 12:
             samples = []
@@ -4505,14 +4847,110 @@ def _decode_brb_intensity(payload, pos, num_beams, sensor_id):
         else:
             return None
 
-        beam_rows.append({
-            'SampleCount': sample_count,
-            'DetectSample': detect_sample,
-            'StartRangeSamples': start_range_samples,
-            'Samples': samples,
-        })
+        row['Samples'] = samples
+        beam_rows.append(row)
 
-    return header, beam_rows, pos - start
+    beams = pd.DataFrame(beam_rows)
+    beams.index.name = 'Beam'
+    record = dict(header)
+    record['Beams'] = beams
+    return record, pos - start
+
+
+def _encode_brb_intensity(record, sensor_id):
+    """
+    Encode a GSF_SWATH_BATHY_SUBRECORD_INTENSITY_SERIES_ARRAY subrecord
+    (id 21), the per-beam receive-beam backscatter time series that can
+    accompany a swath bathymetry ping. This is the inverse of
+    _decode_brb_intensity(), and is ported from the reference gsflib C
+    library's EncodeBRBIntensity() function in gsf_enc.c.
+
+    The fixed header and the per-beam sample loop that follows it are the
+    same for every sensor, but gsflib inserts an optional sensor-specific
+    "imagery" preamble between them, whose size and layout depend on
+    sensor_id, dispatched here exactly as _decode_brb_intensity() does.
+    Each beam's sample count is taken from the length of its 'Samples'
+    list rather than trusting a separately stored count, so the two can
+    never disagree. 12-bit samples are packed two-into-three-bytes using
+    gsflib's own bit layout; 8-, 16-, and 32-bit samples are packed as
+    plain big-endian values.
+
+    :param record: a dictionary in the same shape _decode_brb_intensity()
+        returns or new_intensity_time_series_header() creates, plus a
+        'Beams' key holding a pandas.DataFrame with one row per beam and
+        'DetectSample', 'StartRangeSamples', and 'Samples' columns. A
+        header field that is missing from the dictionary is written as
+        zero.
+    :param sensor_id: the vendor "_SPECIFIC" subrecord id for this ping,
+        used to decide which sensor-imagery preamble format, if any,
+        precedes the per-beam samples. This should be the same value
+        used to decode or construct record, so the preamble that is
+        written matches the fields record actually carries.
+
+    :return: the encoded subrecord, as bytes, including its own 4-byte
+        identifier word. As in gsf_enc.c, and unlike every other ping
+        subrecord, that word's size field counts the identifier word
+        itself, not just the bytes that follow it.
+
+    :raises ValueError: if record's 'BitsPerSample' is not 8, 12, 16, or
+        32, matching the reference encoder's GSF_MB_PING_RECORD_ENCODE_FAILED
+        error for the same condition.
+    """
+    bits_per_sample = int(record.get('BitsPerSample', 16))
+    if bits_per_sample not in (8, 12, 16, 32):
+        raise ValueError("unsupported BitsPerSample for IntensityTimeSeries: %r" % (bits_per_sample,))
+
+    body = struct.pack('>B', bits_per_sample)
+    body += struct.pack('>I', int(record.get('AppliedCorrections', 0)))
+    body += b'\x00' * 16  # spare
+
+    if sensor_id == _SUBRECORD_KMALL_SPECIFIC:
+        body += _encode_kmall_imagery_specific()
+    elif sensor_id in _SUBRECORD_EM3_IMAGERY_IDS:
+        body += _encode_em3_imagery_specific(record)
+    elif sensor_id in _SUBRECORD_EM4_IMAGERY_IDS:
+        body += _encode_em4_imagery_specific(record)
+    elif sensor_id in _SUBRECORD_RESON_SIZE_SPARE_IMAGERY_IDS:
+        body += _encode_reson_size_spare_imagery_specific(record)
+    elif sensor_id in _SUBRECORD_RESON_8100_IMAGERY_IDS:
+        body += _encode_reson8100_imagery_specific()
+    elif sensor_id == _SUBRECORD_KLEIN_5410_BSS_SPECIFIC:
+        body += _encode_klein5410bss_imagery_specific(record)
+    elif sensor_id in _SUBRECORD_R2SONIC_IMAGERY_IDS:
+        body += _encode_r2sonic_imagery_specific(record)
+    # else: no sensor-imagery preamble precedes the per-beam samples for
+    # this sensor_id (gsf_enc.c's switch default, sensor_size=0).
+
+    bytes_per_sample = bits_per_sample // 8
+    beams = record.get('Beams')
+    if beams is None:
+        beams = pd.DataFrame(columns=['DetectSample', 'StartRangeSamples', 'Samples'])
+    for row in beams.itertuples():
+        samples = list(row.Samples)
+        sample_count = len(samples)
+        body += struct.pack('>3H', sample_count, int(row.DetectSample), int(row.StartRangeSamples))
+        body += b'\x00' * 6  # spare
+
+        if bits_per_sample == 12:
+            for i in range(0, sample_count, 2):
+                s0 = int(samples[i]) & 0xFFF
+                b0 = (s0 >> 4) & 0xFF
+                if i + 1 < sample_count:
+                    s1 = int(samples[i + 1]) & 0xFFF
+                    b1 = ((s0 & 0x0F) << 4) | ((s1 >> 8) & 0x0F)
+                    b2 = s1 & 0xFF
+                else:
+                    b1 = (s0 & 0x0F) << 4
+                    b2 = 0
+                body += bytes((b0, b1, b2))
+        else:
+            dtype = {1: '>u1', 2: '>u2', 4: '>u4'}[bytes_per_sample]
+            body += np.array(samples, dtype=dtype).tobytes()
+
+    # Unlike every other ping subrecord, gsf_enc.c's EncodeBRBIntensity()
+    # counts its own 4-byte identifier word in this subrecord's size field.
+    header_word = ((_SUBRECORD_INTENSITY_SERIES_ARRAY & 0xFF) << 24) | (len(body) + 4)
+    return struct.pack('>I', header_word) + body
 
 
 def _gsf_timestamp(sec, nsec):
@@ -4695,10 +5133,11 @@ def _decode_swath_bathymetry_ping(payload, major_version, scale_factors, decode_
         stored flat, unprefixed, at the top level. 'Beams' is present, as
         a pandas.DataFrame indexed by beam number, whenever at least one
         per-beam array subrecord was decoded for this ping.
-        'IntensityTimeSeries' is present, as a pandas.DataFrame indexed
-        by beam number, only when decode_intensity is True and the ping
-        carried that subrecord. 'SensorSpecificID' (an int) and
-        'SensorSpecific' (a dictionary, which may itself contain
+        'IntensityTimeSeries' is present, as a dictionary in the shape
+        _decode_brb_intensity() returns (with its own 'Beams'
+        pandas.DataFrame nested inside), only when decode_intensity is
+        True and the ping carried that subrecord. 'SensorSpecificID' (an
+        int) and 'SensorSpecific' (a dictionary, which may itself contain
         pandas.DataFrame tables) are present together whenever the ping
         carried a vendor sensor-specific subrecord that could be
         decoded -- at most one such subrecord can appear per ping, per
@@ -4795,6 +5234,11 @@ def _decode_swath_bathymetry_ping(payload, major_version, scale_factors, decode_
                     beam_columns[label] = values
 
         elif subrecord_id == _SUBRECORD_INTENSITY_SERIES_ARRAY:
+            # Unlike every other ping subrecord, gsf_enc.c's
+            # EncodeBRBIntensity() counts its own 4-byte identifier word in
+            # this subrecord's size field (gsf_dec.c never reads that size,
+            # advancing by the bytes DecodeBRBIntensity() consumed instead).
+            subrecord_size -= 4
             if not decode_intensity:
                 notes.append(
                     "IntensityTimeSeries (21, %d bytes) not decoded here: "
@@ -4810,10 +5254,8 @@ def _decode_swath_bathymetry_ping(payload, major_version, scale_factors, decode_
                             "IntensityTimeSeries (21, %d bytes) not decoded: no beams, or an "
                             "unsupported bits-per-sample encoding (sensor_id=%s)" % (subrecord_size, sensor_id))
                     else:
-                        _header, beam_rows, _consumed = decoded
-                        series = pd.DataFrame(beam_rows)
-                        series.index.name = 'Beam'
-                        record['IntensityTimeSeries'] = series
+                        intensity_record, _consumed = decoded
+                        record['IntensityTimeSeries'] = intensity_record
 
         elif subrecord_id in _PING_SENSOR_SPECIFIC_CODECS:
             sensor_id = subrecord_id
@@ -6685,6 +7127,17 @@ def _encode_swath_bathymetry_ping(record, scale_factors=None, major_version=3):
         DataFrames _decode_swath_bathymetry_ping() returns can be passed
         straight back in, with no conversion required.
 
+        record['IntensityTimeSeries'], if present, is a dictionary in
+        the same shape _decode_brb_intensity() returns or
+        new_intensity_time_series_header() creates, plus a 'Beams' key
+        holding a pandas.DataFrame with one row per beam. It is encoded
+        as a GSF_SWATH_BATHY_SUBRECORD_INTENSITY_SERIES_ARRAY subrecord,
+        written after the sensor-specific subrecord, matching the
+        reference gsflib C library's own subrecord ordering. Whichever
+        vendor sensor-imagery preamble, if any, is written into this
+        subrecord is chosen from record['SensorSpecificID'], not from
+        anything inside record['IntensityTimeSeries'] itself.
+
         record['Notes'], if present, is ignored: there is no wire slot
         for record-level free-text notes in this subrecord.
 
@@ -6788,6 +7241,10 @@ def _encode_swath_bathymetry_ping(record, scale_factors=None, major_version=3):
         sensor_specific = dict(record.get('SensorSpecific') or {})
         sensor_specific['SubrecordID'] = subrecord_id
         out += encode_fn(sensor_specific)
+
+    intensity_record = record.get('IntensityTimeSeries')
+    if intensity_record is not None:
+        out += _encode_brb_intensity(intensity_record, subrecord_id)
 
     return out
 
@@ -7203,11 +7660,15 @@ class gsf():
         every entry other than 'Beams', 'IntensityTimeSeries',
         'SensorSpecificID', 'SensorSpecific', and 'Notes') as a "key :
         value" line; then each string in `record['Notes']`, if present;
-        then the 'Beams' and 'IntensityTimeSeries' entries, if present and
-        non-empty, each as a table with one row per beam; and finally, if
-        `record['SensorSpecific']` is present, that vendor sensor-specific
-        subrecord's own scalar fields under a header naming its resolved
-        family (looked up from `record['SensorSpecificID']` via
+        then `record['Beams']`, if present and non-empty, as a table with
+        one row per beam; then `record['IntensityTimeSeries']`, if
+        present, as its own scalar fields (the sample encoding and any
+        vendor imagery-preamble fields) followed by its nested 'Beams'
+        table, one row per beam's backscatter sample series; and finally,
+        if `record['SensorSpecific']` is present, that vendor
+        sensor-specific subrecord's own scalar fields under a header
+        naming its resolved family (looked up from
+        `record['SensorSpecificID']` via
         _SENSOR_SPECIFIC_SUBRECORD_NAMES), followed by any of its own
         per-element tables.
 
@@ -7223,11 +7684,22 @@ class gsf():
                 print("  %-*s : %s" % (width, k, v))
         for note in record.get('Notes', []):
             print("  # %s" % note)
-        for label in ('Beams', 'IntensityTimeSeries'):
-            table = record.get(label)
-            if table is not None and len(table):
-                print("-- %s --" % label)
-                print(table.to_string())
+        beams = record.get('Beams')
+        if beams is not None and len(beams):
+            print("-- Beams --")
+            print(beams.to_string())
+        intensity_record = record.get('IntensityTimeSeries')
+        if intensity_record:
+            scalar_items = {k: v for k, v in intensity_record.items() if k != 'Beams'}
+            if scalar_items:
+                print("-- IntensityTimeSeries --")
+                width = max(len(k) for k in scalar_items)
+                for k, v in scalar_items.items():
+                    print("  %-*s : %s" % (width, k, v))
+            intensity_beams = intensity_record.get('Beams')
+            if intensity_beams is not None and len(intensity_beams):
+                print("-- IntensityTimeSeries.Beams --")
+                print(intensity_beams.to_string())
         sensor_specific = record.get('SensorSpecific')
         if sensor_specific:
             sensor_id = record.get('SensorSpecificID')
@@ -7441,8 +7913,8 @@ class gsf():
                     except (struct.error, IndexError) as exc:
                         print("# ping offset=%d: decode failed (%s)" % (offset, exc))
                     else:
-                        series = record.get('IntensityTimeSeries')
-                        if series is None:
+                        intensity_record = record.get('IntensityTimeSeries')
+                        if intensity_record is None:
                             note = next((n for n in record.get('Notes', []) if 'IntensityTimeSeries' in n), None)
                             print("# ping offset=%d ping_time=%s: %s" %
                                   (offset, record.get('PingTime', '?'),
@@ -7450,7 +7922,7 @@ class gsf():
                         else:
                             print("# ping offset=%d ping_time=%s" % (offset, record.get('PingTime', '?')))
                             print("# Beam,SampleCount,DetectSample,StartRangeSamples,Sample0,Sample1,...")
-                            for beam, row in series.iterrows():
+                            for beam, row in intensity_record['Beams'].iterrows():
                                 fields = [str(beam), str(row['SampleCount']), str(row['DetectSample']),
                                           str(row['StartRangeSamples'])]
                                 fields.extend(str(v) for v in row['Samples'])

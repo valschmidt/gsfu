@@ -40,6 +40,7 @@ from GSFU.gsfu import (
     _SUBRECORD_RESON_SIZE_SPARE_IMAGERY_IDS,
     _decode_bdb_specific,
     _decode_brb_intensity,
+    _encode_brb_intensity,
     _decode_cmp_sass_specific,
     _decode_delta_t_specific,
     _decode_echotrac_specific,
@@ -1944,9 +1945,10 @@ class TestDecodeBRBIntensitySynthetic:
         # 1000/121, GeoSwath, DeltaT), and any id this decoder doesn't
         # recognize at all.
         payload = self._preamble(8) + self._beam(1, 0, 0, [42], '>B')
-        header, beam_rows, consumed = _decode_brb_intensity(payload, 0, num_beams=1, sensor_id=999)
-        assert header == {'BitsPerSample': 8, 'AppliedCorrections': 0}
-        assert beam_rows[0]['Samples'] == [42]
+        record, consumed = _decode_brb_intensity(payload, 0, num_beams=1, sensor_id=999)
+        assert record.keys() == {'BitsPerSample', 'AppliedCorrections', 'Beams'}
+        assert (record['BitsPerSample'], record['AppliedCorrections']) == (8, 0)
+        assert record['Beams'].loc[0, 'Samples'] == [42]
         assert consumed == len(payload)
 
     def test_zero_beams_returns_none(self):
@@ -1958,22 +1960,22 @@ class TestDecodeBRBIntensitySynthetic:
             + self._beam(3, 1, 100, [10, 20, 30], '>B') \
             + self._beam(2, 0, 50, [200, 201], '>B')
 
-        header, beam_rows, consumed = _decode_brb_intensity(payload, 0, num_beams=2, sensor_id=999)
+        record, consumed = _decode_brb_intensity(payload, 0, num_beams=2, sensor_id=999)
 
-        assert header['BitsPerSample'] == 8
-        assert len(beam_rows) == 2
-        assert beam_rows[0] == {
+        assert record['BitsPerSample'] == 8
+        assert len(record['Beams']) == 2
+        assert record['Beams'].loc[0].to_dict() == {
             'SampleCount': 3, 'DetectSample': 1, 'StartRangeSamples': 100, 'Samples': [10, 20, 30]}
-        assert beam_rows[1] == {
+        assert record['Beams'].loc[1].to_dict() == {
             'SampleCount': 2, 'DetectSample': 0, 'StartRangeSamples': 50, 'Samples': [200, 201]}
         assert consumed == len(payload)
 
     def test_16_bit_samples_decoded_per_beam(self):
         payload = self._preamble(16) + self._beam(2, 5, 10, [1000, 65000], '>H')
 
-        _header, beam_rows, consumed = _decode_brb_intensity(payload, 0, num_beams=1, sensor_id=999)
+        record, consumed = _decode_brb_intensity(payload, 0, num_beams=1, sensor_id=999)
 
-        assert beam_rows[0]['Samples'] == [1000, 65000]
+        assert record['Beams'].loc[0, 'Samples'] == [1000, 65000]
         assert consumed == len(payload)
 
     def test_12_bit_packed_samples_decoded(self):
@@ -1984,9 +1986,9 @@ class TestDecodeBRBIntensitySynthetic:
         payload = self._preamble(12) \
             + struct.pack('>3H', 2, 0, 0) + b"\x00" * 6 + packed
 
-        _header, beam_rows, consumed = _decode_brb_intensity(payload, 0, num_beams=1, sensor_id=999)
+        record, consumed = _decode_brb_intensity(payload, 0, num_beams=1, sensor_id=999)
 
-        assert beam_rows[0]['Samples'] == [0xABC, 0x123]
+        assert record['Beams'].loc[0, 'Samples'] == [0xABC, 0x123]
         assert consumed == len(payload)
 
     def test_12_bit_odd_sample_count_drops_trailing_half_sample(self):
@@ -1996,17 +1998,18 @@ class TestDecodeBRBIntensitySynthetic:
         payload = self._preamble(12) \
             + struct.pack('>3H', 1, 0, 0) + b"\x00" * 6 + packed
 
-        _header, beam_rows, _consumed = _decode_brb_intensity(payload, 0, num_beams=1, sensor_id=999)
+        record, _consumed = _decode_brb_intensity(payload, 0, num_beams=1, sensor_id=999)
 
-        assert beam_rows[0]['Samples'] == [0xABC]
+        assert record['Beams'].loc[0, 'Samples'] == [0xABC]
 
     def test_kmall_preamble_skipped_as_pure_spare(self):
         payload = self._preamble(8, sensor_imagery=b"\x00" * 64) + self._beam(1, 0, 0, [7], '>B')
 
-        header, beam_rows, consumed = _decode_brb_intensity(payload, 0, num_beams=1, sensor_id=156)
+        record, consumed = _decode_brb_intensity(payload, 0, num_beams=1, sensor_id=156)
 
-        assert header == {'BitsPerSample': 8, 'AppliedCorrections': 0}
-        assert beam_rows[0]['Samples'] == [7]
+        assert record.keys() == {'BitsPerSample', 'AppliedCorrections', 'Beams'}
+        assert (record['BitsPerSample'], record['AppliedCorrections']) == (8, 0)
+        assert record['Beams'].loc[0, 'Samples'] == [7]
         assert consumed == len(payload)
 
     @pytest.mark.parametrize("sensor_id", sorted(_SUBRECORD_EM3_IMAGERY_IDS))
@@ -2014,17 +2017,17 @@ class TestDecodeBRBIntensitySynthetic:
         imagery = struct.pack('>HHHBBHhh', 100, 5, 200, 12, 34, 5000, -10, 2) + b"\x00" * 4
         payload = self._preamble(8, sensor_imagery=imagery) + self._beam(1, 0, 0, [9], '>B')
 
-        header, beam_rows, consumed = _decode_brb_intensity(payload, 0, num_beams=1, sensor_id=sensor_id)
+        record, consumed = _decode_brb_intensity(payload, 0, num_beams=1, sensor_id=sensor_id)
 
-        assert header['RangeNorm_samples'] == 100
-        assert header['StartTvgRamp_samples'] == 5
-        assert header['StopTvgRamp_samples'] == 200
-        assert header['BSNormal_dB'] == 12
-        assert header['BSOblique_dB'] == 34
-        assert header['MeanAbsorption_dBkm'] == pytest.approx(50.0)
-        assert header['Offset'] == -10
-        assert header['Scale'] == 2
-        assert beam_rows[0]['Samples'] == [9]
+        assert record['RangeNorm_samples'] == 100
+        assert record['StartTvgRamp_samples'] == 5
+        assert record['StopTvgRamp_samples'] == 200
+        assert record['BSNormal_dB'] == 12
+        assert record['BSOblique_dB'] == 34
+        assert record['MeanAbsorption_dBkm'] == pytest.approx(50.0)
+        assert record['Offset'] == -10
+        assert record['Scale'] == 2
+        assert record['Beams'].loc[0, 'Samples'] == [9]
         assert consumed == len(payload)
 
     @pytest.mark.parametrize("sensor_id", sorted(_SUBRECORD_EM4_IMAGERY_IDS))
@@ -2034,21 +2037,21 @@ class TestDecodeBRBIntensitySynthetic:
             + b"\x00" * 20
         payload = self._preamble(8, sensor_imagery=imagery) + self._beam(1, 0, 0, [9], '>B')
 
-        header, beam_rows, consumed = _decode_brb_intensity(payload, 0, num_beams=1, sensor_id=sensor_id)
+        record, consumed = _decode_brb_intensity(payload, 0, num_beams=1, sensor_id=sensor_id)
 
-        assert header['SamplingFrequency_Hz'] == pytest.approx(191.125)
-        assert header['MeanAbsorption_dBkm'] == pytest.approx(30.0)
-        assert header['TxPulseLength_us'] == 150
-        assert header['RangeNorm_samples'] == 100
-        assert header['StartTvgRamp_samples'] == 5
-        assert header['StopTvgRamp_samples'] == 200
-        assert header['BSNormal_dB'] == pytest.approx(-5.0)
-        assert header['BSOblique_dB'] == pytest.approx(12.0)
-        assert header['TxBeamWidth_deg'] == pytest.approx(0.7)
-        assert header['TvgCrossOver_deg'] == pytest.approx(25.0)
-        assert header['Offset'] == -10
-        assert header['Scale'] == 10
-        assert beam_rows[0]['Samples'] == [9]
+        assert record['SamplingFrequency_Hz'] == pytest.approx(191.125)
+        assert record['MeanAbsorption_dBkm'] == pytest.approx(30.0)
+        assert record['TxPulseLength_us'] == 150
+        assert record['RangeNorm_samples'] == 100
+        assert record['StartTvgRamp_samples'] == 5
+        assert record['StopTvgRamp_samples'] == 200
+        assert record['BSNormal_dB'] == pytest.approx(-5.0)
+        assert record['BSOblique_dB'] == pytest.approx(12.0)
+        assert record['TxBeamWidth_deg'] == pytest.approx(0.7)
+        assert record['TvgCrossOver_deg'] == pytest.approx(25.0)
+        assert record['Offset'] == -10
+        assert record['Scale'] == 10
+        assert record['Beams'].loc[0, 'Samples'] == [9]
         assert consumed == len(payload)
 
     @pytest.mark.parametrize("sensor_id", sorted(_SUBRECORD_RESON_SIZE_SPARE_IMAGERY_IDS))
@@ -2056,33 +2059,34 @@ class TestDecodeBRBIntensitySynthetic:
         imagery = struct.pack('>H', 42) + b"\x00" * 64
         payload = self._preamble(8, sensor_imagery=imagery) + self._beam(1, 0, 0, [9], '>B')
 
-        header, beam_rows, consumed = _decode_brb_intensity(payload, 0, num_beams=1, sensor_id=sensor_id)
+        record, consumed = _decode_brb_intensity(payload, 0, num_beams=1, sensor_id=sensor_id)
 
-        assert header['Size'] == 42
-        assert beam_rows[0]['Samples'] == [9]
+        assert record['Size'] == 42
+        assert record['Beams'].loc[0, 'Samples'] == [9]
         assert consumed == len(payload)
 
     @pytest.mark.parametrize("sensor_id", sorted(_SUBRECORD_RESON_8100_IMAGERY_IDS))
     def test_reson_8100_imagery_preamble_skipped_as_pure_spare(self, sensor_id):
         payload = self._preamble(8, sensor_imagery=b"\x00" * 8) + self._beam(1, 0, 0, [9], '>B')
 
-        header, beam_rows, consumed = _decode_brb_intensity(payload, 0, num_beams=1, sensor_id=sensor_id)
+        record, consumed = _decode_brb_intensity(payload, 0, num_beams=1, sensor_id=sensor_id)
 
-        assert header == {'BitsPerSample': 8, 'AppliedCorrections': 0}
-        assert beam_rows[0]['Samples'] == [9]
+        assert record.keys() == {'BitsPerSample', 'AppliedCorrections', 'Beams'}
+        assert (record['BitsPerSample'], record['AppliedCorrections']) == (8, 0)
+        assert record['Beams'].loc[0, 'Samples'] == [9]
         assert consumed == len(payload)
 
     def test_klein5410bss_imagery_preamble_decoded(self):
         imagery = struct.pack('>7H', 1, 2, 10, 11, 12, 13, 14) + b"\x00" * 4
         payload = self._preamble(8, sensor_imagery=imagery) + self._beam(1, 0, 0, [9], '>B')
 
-        header, beam_rows, consumed = _decode_brb_intensity(
+        record, consumed = _decode_brb_intensity(
             payload, 0, num_beams=1, sensor_id=_SUBRECORD_KLEIN_5410_BSS_SPECIFIC)
 
-        assert header['ResMode'] == 1
-        assert header['TvgPage'] == 2
-        assert header['BeamID'] == [10, 11, 12, 13, 14]
-        assert beam_rows[0]['Samples'] == [9]
+        assert record['ResMode'] == 1
+        assert record['TvgPage'] == 2
+        assert record['BeamID'] == [10, 11, 12, 13, 14]
+        assert record['Beams'].loc[0, 'Samples'] == [9]
         assert consumed == len(payload)
 
     @pytest.mark.parametrize("sensor_id", sorted(_SUBRECORD_R2SONIC_IMAGERY_IDS))
@@ -2095,16 +2099,16 @@ class TestDecodeBRBIntensitySynthetic:
             + struct.pack('>6i', 1000000, 2000000, -3000000, 0, 0, 0) + b"\x00" * 32
         payload = self._preamble(8, sensor_imagery=imagery) + self._beam(1, 0, 0, [9], '>B')
 
-        header, beam_rows, consumed = _decode_brb_intensity(payload, 0, num_beams=1, sensor_id=sensor_id)
+        record, consumed = _decode_brb_intensity(payload, 0, num_beams=1, sensor_id=sensor_id)
 
-        assert header['ModelNumber'] == "2024"
-        assert header['SerialNumber'] == "SN123"
-        assert header['PingNumber'] == 7
-        assert header['SoundSpeed_mps'] == pytest.approx(1500.0)
-        assert header['Frequency_Hz'] == pytest.approx(300000.0)
-        assert header['NumBeams'] == 5
-        assert header['MoreInfo'] == [pytest.approx(1.0), pytest.approx(2.0), pytest.approx(-3.0), 0.0, 0.0, 0.0]
-        assert beam_rows[0]['Samples'] == [9]
+        assert record['ModelNumber'] == "2024"
+        assert record['SerialNumber'] == "SN123"
+        assert record['PingNumber'] == 7
+        assert record['SoundSpeed_mps'] == pytest.approx(1500.0)
+        assert record['Frequency_Hz'] == pytest.approx(300000.0)
+        assert record['NumBeams'] == 5
+        assert record['MoreInfo'] == [pytest.approx(1.0), pytest.approx(2.0), pytest.approx(-3.0), 0.0, 0.0, 0.0]
+        assert record['Beams'].loc[0, 'Samples'] == [9]
         assert consumed == len(payload)
 
 
@@ -2134,6 +2138,36 @@ class TestPrintIntensitySeriesRealData:
                 continue
             _beam, sample_count, _detect, _start, *samples = line.split(",")
             assert int(sample_count) == len(samples)
+
+    def test_real_intensity_series_re_encodes_byte_for_byte(self):
+        # Every per-beam intensity series subrecord in a real, gsflib-
+        # written file must re-encode to exactly the bytes it was decoded
+        # from, identifier word included -- that word's size field counts
+        # the word itself (gsf_enc.c's EncodeBRBIntensity()), unlike every
+        # other ping subrecord. The subrecord is always last in the ping,
+        # followed only by the record's 0-3 bytes of 4-byte-alignment
+        # padding.
+        G = gsf(str(SMALL_SAMPLE))
+        G.index_file()
+        ping_offsets = G.Index.loc[
+            G.Index['RecordType'] == 'GSF_RECORD_SWATH_BATHYMETRY_PING', 'ByteOffset']
+
+        scale_factors = {}
+        for offset in ping_offsets:
+            G.FID.seek(int(offset))
+            dataSize, _readSize, data_id = G.read_record_header()
+            if data_id.checksumFlag:
+                G.FID.seek(4, 1)
+            payload = G.FID.read(dataSize)
+
+            record = _decode_swath_bathymetry_ping(
+                payload, major_version=3, scale_factors=scale_factors, decode_intensity=True)
+
+            assert record['Notes'] == []
+            encoded = _encode_brb_intensity(record['IntensityTimeSeries'], record['SensorSpecificID'])
+            start = payload.rfind(encoded)
+            assert start > 0
+            assert len(payload) - (start + len(encoded)) < 4
 
 
 # ---------------------------------------------------------------------------

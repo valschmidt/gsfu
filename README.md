@@ -21,10 +21,17 @@ Python loop, which was measured to be roughly one hundred times faster
 than a naive per-beam approach on real, multi-hundred-beam pings.
 
 The record framing, naming, and constants used here are ported from the
-reference C implementation of the GSF library ("gsflib"), copyright 2019
-Leidos, Inc., distributed under the LGPL 2.1:
-<https://github.com/Spatialnetics/gsflib> (`source/gsf/gsf.h`,
-`source/gsf/gsf.c`). No gsflib source code is reused. `gsfu.py` is an
+reference C implementation of the GSF library ("gsflib"), version 3.11,
+distributed by Leidos, Inc. under the LGPL 2.1 from the Leidos product
+page: <https://www.leidos.com/products/ocean-marine>. GSF v3.11 was
+released in 2025, but the copyright notices in its source files were not
+updated and still read "Copyright 2019 Leidos, Inc.". That distribution
+unpacks to a single `GSF_03-11/` directory, and the source files cited
+throughout this project (`gsf.h`, `gsf.c`, `gsf_dec.c`, `gsf_enc.c`, and
+so on) are named relative to that directory's top level. It is the only
+copy of gsflib this project was written against; other copies found
+online (such as GitHub mirrors) may or may not be identical, and are not
+authoritative. No gsflib source code is reused. `gsfu.py` is an
 independent re-implementation, with constant names (`GSF_RECORD_HEADER`,
 `RecordType`, `gsfDataID`, and so on) and comments chosen to match
 gsflib, so that the code is recognizable to anyone already familiar with
@@ -108,7 +115,7 @@ after `-p` restricts the output to just that type:
       Latitude_deg       : -14.2062916
       NumberBeams        : 400
       ...
-      # IntensityTimeSeries (21, 13291 bytes) not decoded here: use gsf.print_intensity_series() / -I
+      # IntensityTimeSeries (21, 13287 bytes) not decoded here: use gsf.print_intensity_series() / -I
     -- Beams --
            Depth_m  AcrossTrack_m  AlongTrack_m  TravelTime_s  BeamAngle_deg  ...
     Beam
@@ -187,7 +194,14 @@ as `PingTime`, `Latitude_deg`, and `Longitude_deg`, sit directly at the
 top level. Its per-beam arrays sit under `Beams`, as a `pandas.DataFrame`
 with one row per beam. If the ping carries a vendor-specific subrecord,
 its fields sit under `SensorSpecific`, alongside `SensorSpecificID`
-naming which vendor format it is.
+naming which vendor format it is. If the ping carries a per-beam
+backscatter intensity time series and `decode_intensity=True` is passed,
+it sits under `IntensityTimeSeries`, as a dictionary of that subrecord's
+header fields (plus any vendor-specific imagery fields) with its own
+`Beams` `pandas.DataFrame` holding each beam's list of samples. A decoded
+ping, intensity series included, can be passed straight back to
+`_encode_swath_bathymetry_ping()` or `gsf.write_swath_bathymetry_ping()`
+with no conversion.
 
 This example calls `_decode_swath_bathymetry_ping()` directly, since
 `gsfu.py` does not yet have a public convenience method for decoding a
@@ -211,10 +225,6 @@ This library does not decode gsflib's optional run-length-encoded beam
 array compression. A compressed array's compression flag is read and
 reported, but the array itself is left undecoded, since none of the
 sample GSF files used to build and test this library are compressed.
-
-The per-beam backscatter intensity time series (the
-`INTENSITY_SERIES_ARRAY` subrecord) can be decoded but not yet written;
-there is no encoder for it in the `write_*` API yet.
 
 ## Scale factors
 
@@ -342,3 +352,13 @@ rounds `vertical_error` with a plain `+/- 0.5` instead of the `+/- 0.501` used
 for `horizontal_error` right next to it in the same function -- functionally
 identical to `_gsf_round()` except exactly on a 0.5 fractional boundary, so
 treated the same way for consistency.
+
+One wire-format quirk is replicated rather than corrected, since
+correcting it would make the written files differ from gsflib's own:
+`EncodeBRBIntensity()` counts its own four-byte identifier word in the
+size field of the per-beam intensity time series subrecord, while every
+other ping subrecord's size field counts only the bytes that follow the
+identifier word. `gsf_dec.c` never reads that size field, so gsflib never
+notices; `gsfu.py` writes the size the same way gsflib does, and allows
+for it when reading. Re-encoding the intensity time series subrecords in
+the EM712 sample files reproduces the original bytes exactly.

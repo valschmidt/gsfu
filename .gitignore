@@ -71,3 +71,7 @@ workingdir/*
 
 # Local sample/test data (large binary .gsf files; not tracked in git history)
 data/
+
+# Reference gsflib v3.11 C source, downloaded from the Leidos product page
+# (https://www.leidos.com/products/ocean-marine); not redistributed here.
+GSF_03-11/

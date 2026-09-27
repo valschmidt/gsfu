@@ -38,9 +38,17 @@ from GSFU.gsfu import (
     GSF_NULL_TIDE_CORRECTOR,
     GSF_VERSION,
     RecordType,
+    _SUBRECORD_EM3_IMAGERY_IDS,
+    _SUBRECORD_EM4_IMAGERY_IDS,
+    _SUBRECORD_KLEIN_5410_BSS_SPECIFIC,
+    _SUBRECORD_KMALL_SPECIFIC,
+    _SUBRECORD_R2SONIC_IMAGERY_IDS,
+    _SUBRECORD_RESON_8100_IMAGERY_IDS,
+    _SUBRECORD_RESON_SIZE_SPARE_IMAGERY_IDS,
     _PING_SENSOR_SPECIFIC_CODECS,
     _decode_attitude,
     _decode_bdb_specific,
+    _decode_brb_intensity,
     _decode_cmp_sass_specific,
     _decode_comment,
     _decode_delta_t_specific,
@@ -87,6 +95,7 @@ from GSFU.gsfu import (
     _decode_swath_bathymetry_ping,
     _encode_attitude,
     _encode_bdb_specific,
+    _encode_brb_intensity,
     _encode_cmp_sass_specific,
     _encode_comment,
     _encode_delta_t_specific,
@@ -138,6 +147,8 @@ from GSFU.gsfu import (
     _solve_scale_factor,
     gsf,
     gsf_checksum,
+    new_intensity_time_series_beam,
+    new_intensity_time_series_header,
     new_kmall_specific,
     new_kmall_tx_sector,
     new_swath_bathymetry_ping_scalars,
@@ -1837,6 +1848,172 @@ class TestEncodeKmallSpecific:
 
 
 # ---------------------------------------------------------------------------
+# _encode_brb_intensity
+# ---------------------------------------------------------------------------
+
+#: A non-default value for every field of each sensor-imagery preamble
+#: template, chosen to survive that preamble's wire scaling exactly (or
+#: within pytest.approx), keyed by the template's own sensor-id set.
+_IMAGERY_VALUES = {
+    'em3': {
+        'RangeNorm_samples': 100, 'StartTvgRamp_samples': 5, 'StopTvgRamp_samples': 200,
+        'BSNormal_dB': 12, 'BSOblique_dB': 34, 'MeanAbsorption_dBkm': 50.25,
+        'Offset': -10, 'Scale': 2,
+    },
+    'em4': {
+        'SamplingFrequency_Hz': 191.125, 'MeanAbsorption_dBkm': 30.0, 'TxPulseLength_us': 150,
+        'RangeNorm_samples': 100, 'StartTvgRamp_samples': 5, 'StopTvgRamp_samples': 200,
+        'BSNormal_dB': -5.0, 'BSOblique_dB': 12.0, 'TxBeamWidth_deg': 0.7,
+        'TvgCrossOver_deg': 25.0, 'Offset': -10, 'Scale': 10,
+    },
+    'reson_size_spare': {'Size': 42},
+    'klein': {'ResMode': 1, 'TvgPage': 2, 'BeamID': [10, 11, 12, 13, 14]},
+    'r2sonic': {
+        'ModelNumber': "2024", 'SerialNumber': "SN123",
+        'PingTime': datetime.datetime(2023, 11, 14, 22, 13, 20, 500000, tzinfo=datetime.timezone.utc),
+        'PingNumber': 7, 'PingPeriod_s': 0.1, 'SoundSpeed_mps': 1500.0,
+        'Frequency_Hz': 300000.0, 'TxPower_dB': 200.0, 'TxPulseWidth_s': 0.0005,
+        'TxBeamwidthVert_deg': 0.8, 'TxBeamwidthHoriz_deg': 0.9,
+        'TxSteeringVert_deg': -0.1, 'TxSteeringHoriz_deg': -0.2, 'TxMiscInfo': 3,
+        'RxBandwidth_Hz': 50000.0, 'RxSampleRate_Hz': 400000.0, 'RxRange_m': 120.0,
+        'RxGain_dB': 1.0, 'RxSpreading': 2.0, 'RxAbsorption_dBkm': 1.5,
+        'RxMountTilt_deg': -0.3, 'RxMiscInfo': 4, 'Reserved': 0, 'NumBeams': 5,
+        'MoreInfo': [1.0, 2.0, -3.0, 0.0, 0.0, 0.0],
+    },
+}
+
+_IMAGERY_FAMILIES = (
+    [(sid, 'em3') for sid in sorted(_SUBRECORD_EM3_IMAGERY_IDS)]
+    + [(sid, 'em4') for sid in sorted(_SUBRECORD_EM4_IMAGERY_IDS)]
+    + [(sid, 'reson_size_spare') for sid in sorted(_SUBRECORD_RESON_SIZE_SPARE_IMAGERY_IDS)]
+    + [(_SUBRECORD_KLEIN_5410_BSS_SPECIFIC, 'klein')]
+    + [(sid, 'r2sonic') for sid in sorted(_SUBRECORD_R2SONIC_IMAGERY_IDS)]
+)
+
+#: Sensors whose preamble is pure spare (no fields), plus one sensor id
+#: gsflib gives no preamble at all.
+_FIELDLESS_SENSOR_IDS = [_SUBRECORD_KMALL_SPECIFIC, *sorted(_SUBRECORD_RESON_8100_IMAGERY_IDS), 999]
+
+
+class TestEncodeBRBIntensity:
+    @staticmethod
+    def _record(bits_per_sample, beams, sensor_id=None, **fields):
+        record = new_intensity_time_series_header(sensor_id)
+        record.update(BitsPerSample=bits_per_sample, **fields)
+        rows = []
+        for detect, start, samples in beams:
+            row = new_intensity_time_series_beam()
+            row.update(SampleCount=len(samples), DetectSample=detect,
+                       StartRangeSamples=start, Samples=samples)
+            rows.append(row)
+        record['Beams'] = pd.DataFrame(rows)
+        return record
+
+    @staticmethod
+    def _round_trip(record, sensor_id):
+        payload = _encode_brb_intensity(record, sensor_id)
+        word, = struct.unpack_from('>I', payload, 0)
+        assert word >> 24 == 21
+        # gsf_enc.c's EncodeBRBIntensity() counts its own 4-byte
+        # identifier word in the size field, unlike every other subrecord.
+        assert word & 0xFFFFFF == len(payload)
+        decoded, consumed = _decode_brb_intensity(payload, 4, len(record['Beams']), sensor_id)
+        assert consumed == len(payload) - 4
+        return payload, decoded
+
+    @pytest.mark.parametrize("bits_per_sample", [8, 16, 32])
+    def test_whole_byte_samples_round_trip(self, bits_per_sample):
+        top = 2 ** bits_per_sample - 1
+        record = self._record(bits_per_sample, [(1, 100, [0, 1, top]), (0, 50, [top, 7])],
+                              AppliedCorrections=0x12345678)
+
+        _payload, decoded = self._round_trip(record, sensor_id=999)
+
+        assert decoded['BitsPerSample'] == bits_per_sample
+        assert decoded['AppliedCorrections'] == 0x12345678
+        assert decoded['Beams'].loc[0].to_dict() == {
+            'SampleCount': 3, 'DetectSample': 1, 'StartRangeSamples': 100, 'Samples': [0, 1, top]}
+        assert decoded['Beams'].loc[1, 'Samples'] == [top, 7]
+
+    def test_12_bit_samples_packed_with_gsflib_bit_layout(self):
+        # Same bytes TestDecodeBRBIntensitySynthetic decodes: 0xABC, 0x123
+        # pack to 0xAB 0xC1 0x23.
+        record = self._record(12, [(0, 0, [0xABC, 0x123])])
+
+        payload, decoded = self._round_trip(record, sensor_id=999)
+
+        assert payload.endswith(bytes([0xAB, 0xC1, 0x23]))
+        assert decoded['Beams'].loc[0, 'Samples'] == [0xABC, 0x123]
+
+    def test_12_bit_odd_sample_count_pads_trailing_half_sample(self):
+        record = self._record(12, [(0, 0, [0xABC, 0x123, 0xFFF])])
+
+        payload, decoded = self._round_trip(record, sensor_id=999)
+
+        assert payload.endswith(bytes([0xAB, 0xC1, 0x23, 0xFF, 0xF0, 0x00]))
+        assert decoded['Beams'].loc[0, 'SampleCount'] == 3
+        assert decoded['Beams'].loc[0, 'Samples'] == [0xABC, 0x123, 0xFFF]
+
+    def test_sample_count_taken_from_samples_not_stored_count(self):
+        record = self._record(8, [(0, 0, [1, 2, 3])])
+        record['Beams'].loc[0, 'SampleCount'] = 99
+
+        _payload, decoded = self._round_trip(record, sensor_id=999)
+
+        assert decoded['Beams'].loc[0, 'SampleCount'] == 3
+
+    @pytest.mark.parametrize("bits_per_sample", [0, 4, 24, 64])
+    def test_unsupported_bits_per_sample_raises(self, bits_per_sample):
+        with pytest.raises(ValueError):
+            _encode_brb_intensity(self._record(bits_per_sample, [(0, 0, [1])]), sensor_id=999)
+
+    @pytest.mark.parametrize("sensor_id,family", _IMAGERY_FAMILIES)
+    def test_imagery_preamble_round_trips(self, sensor_id, family):
+        values = _IMAGERY_VALUES[family]
+        record = self._record(16, [(3, 4, [500, 600])], sensor_id=sensor_id, **values)
+
+        payload, decoded = self._round_trip(record, sensor_id)
+
+        assert set(decoded) == set(record)
+        for key, value in values.items():
+            if isinstance(value, datetime.datetime):
+                assert decoded[key] == value, key
+            else:
+                assert decoded[key] == pytest.approx(value), key
+        assert decoded['Beams'].loc[0, 'Samples'] == [500, 600]
+        # Re-encoding the decoded record reproduces the same bytes.
+        assert _encode_brb_intensity(decoded, sensor_id) == payload
+
+    @pytest.mark.parametrize("sensor_id", _FIELDLESS_SENSOR_IDS)
+    def test_fieldless_preamble_round_trips(self, sensor_id):
+        record = self._record(8, [(0, 0, [9])], sensor_id=sensor_id)
+
+        payload, decoded = self._round_trip(record, sensor_id)
+
+        assert set(decoded) == {'BitsPerSample', 'AppliedCorrections', 'Beams'}
+        assert _encode_brb_intensity(decoded, sensor_id) == payload
+
+    @pytest.mark.parametrize("sensor_id,preamble_size", [
+        (_SUBRECORD_KMALL_SPECIFIC, 64),
+        (min(_SUBRECORD_RESON_8100_IMAGERY_IDS), 8),
+        (min(_SUBRECORD_EM3_IMAGERY_IDS), 18),
+        (min(_SUBRECORD_EM4_IMAGERY_IDS), 50),
+        (min(_SUBRECORD_RESON_SIZE_SPARE_IMAGERY_IDS), 66),
+        (999, 0),
+    ])
+    def test_preamble_sizes_match_gsflib(self, sensor_id, preamble_size):
+        # 4 id word + 21 fixed header + preamble + one beam (12 + 1 sample).
+        payload = _encode_brb_intensity(self._record(8, [(0, 0, [9])], sensor_id=sensor_id), sensor_id)
+        assert len(payload) == 4 + 21 + preamble_size + 13
+
+    @pytest.mark.parametrize("sensor_id", [s for s, _f in _IMAGERY_FAMILIES] + _FIELDLESS_SENSOR_IDS)
+    def test_header_template_matches_decoded_keys(self, sensor_id):
+        payload = _encode_brb_intensity(self._record(8, [(0, 0, [9])], sensor_id=sensor_id), sensor_id)
+        decoded, _consumed = _decode_brb_intensity(payload, 4, 1, sensor_id)
+        assert set(decoded) - {'Beams'} == set(new_intensity_time_series_header(sensor_id))
+
+
+# ---------------------------------------------------------------------------
 # _encode_swath_bathymetry_ping
 # ---------------------------------------------------------------------------
 
@@ -2197,6 +2374,35 @@ class TestEncodeSwathBathymetryPing:
 
         # 10.03 rounds to the nearest 0.1m under the coarser override.
         assert list(decoded['Beams']['Depth_m']) == pytest.approx([10.0])
+
+    def test_intensity_time_series_round_trips_after_sensor_specific(self):
+        intensity = TestEncodeBRBIntensity._record(
+            16, [(1, 2, [10, 20]), (0, 0, [30]), (5, 6, [])], sensor_id=_SUBRECORD_KMALL_SPECIFIC)
+        record = self._record(
+            SensorSpecificID=_SUBRECORD_KMALL_SPECIFIC, SensorSpecific=new_kmall_specific(),
+            IntensityTimeSeries=intensity)
+
+        payload = _encode_swath_bathymetry_ping(record)
+        decoded = _decode_swath_bathymetry_ping(
+            payload, major_version=3, scale_factors={}, decode_intensity=True)
+
+        assert decoded['Notes'] == []
+        assert decoded['SensorSpecificID'] == _SUBRECORD_KMALL_SPECIFIC
+        series = decoded['IntensityTimeSeries']
+        assert series['BitsPerSample'] == 16
+        assert list(series['Beams']['Samples']) == [[10, 20], [30], []]
+        # Decoded ping goes straight back into the encoder unchanged.
+        assert _encode_swath_bathymetry_ping(decoded) == payload
+
+    def test_intensity_time_series_note_reports_body_size(self):
+        intensity = TestEncodeBRBIntensity._record(8, [(0, 0, [1]), (0, 0, [2]), (0, 0, [3])])
+        payload = _encode_swath_bathymetry_ping(self._record(IntensityTimeSeries=intensity))
+
+        decoded = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
+
+        # 21 fixed header + 3 beams x (12 + 1 sample); no preamble.
+        assert decoded['Notes'] == [
+            "IntensityTimeSeries (21, 60 bytes) not decoded here: use gsf.print_intensity_series() / -I"]
 
 
 # ---------------------------------------------------------------------------
