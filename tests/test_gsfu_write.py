@@ -25,6 +25,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import GSFU.gsfu as gsfu_module
 from GSFU.gsfu import (
     DEFAULT_PING_SCALE_FACTORS,
     GSF_NULL_COURSE,
@@ -47,6 +48,7 @@ from GSFU.gsfu import (
     _SUBRECORD_RESON_8100_IMAGERY_IDS,
     _SUBRECORD_RESON_SIZE_SPARE_IMAGERY_IDS,
     _PING_SENSOR_SPECIFIC_CODECS,
+    _SINGLE_BEAM_SENSOR_SPECIFIC_CODECS,
     _decode_attitude,
     _decode_bdb_specific,
     _decode_brb_intensity,
@@ -150,18 +152,23 @@ from GSFU.gsfu import (
     gsf_checksum,
     new_attitude,
     new_comment,
+    new_em3_run_time,
+    new_em3raw_tx_sector,
+    new_em4_tx_sector,
     new_header,
     new_history,
     new_hv_navigation_error,
     new_intensity_time_series_beam,
     new_intensity_time_series_header,
+    new_intensity_time_series_sample,
     new_kmall_specific,
     new_kmall_tx_sector,
     new_name_value_parameters,
     new_navigation_error,
+    new_single_beam_ping,
     new_sound_velocity_profile,
     new_swath_bathy_summary,
-    new_swath_bathymetry_ping_scalars,
+    new_swath_bathymetry_ping,
 )
 
 
@@ -173,9 +180,8 @@ def _nrows(table):
 
 def _beam_samples(intensity_record, beam):
     """One beam's samples, as a list, from a decoded intensity time series record."""
-    counts = list(intensity_record['Beams']['SampleCount'])
-    start = sum(counts[:beam])
-    return list(intensity_record['Samples'][start:start + counts[beam]])
+    samples = intensity_record['Samples']
+    return [value for b, value in zip(samples['Beam'], samples['Value']) if b == beam]
 
 # ---------------------------------------------------------------------------
 # _gsf_round / _gsf_epoch
@@ -303,6 +309,72 @@ class TestSingleDictionaryRecords:
         del incomplete[field]
         with pytest.raises(ValueError, match=field):
             encode(incomplete)
+
+
+def _family_templates():
+    """(label, subrecord id, template function, decoder, encoder) per vendor family."""
+    families = {}
+    for registry in (_PING_SENSOR_SPECIFIC_CODECS, _SINGLE_BEAM_SENSOR_SPECIFIC_CODECS):
+        for subrecord_id, (label, decode_fn, encode_fn) in registry.items():
+            families.setdefault(decode_fn, (label, subrecord_id, decode_fn, encode_fn))
+    return [
+        (label, subrecord_id, getattr(gsfu_module, 'new_' + decode_fn.__name__[len('_decode_'):]),
+         decode_fn, encode_fn)
+        for label, subrecord_id, decode_fn, encode_fn in families.values()]
+
+
+class TestSensorSpecificTemplates:
+    @pytest.mark.parametrize("label, subrecord_id, template, decode_fn, encode_fn", _family_templates(),
+                             ids=lambda v: v if isinstance(v, str) else "")
+    def test_template_keys_and_order_match_decoder(self, label, subrecord_id, template, decode_fn, encode_fn):
+        decoded, _consumed = decode_fn(bytes(4096), 0)
+        assert list(decoded) == list(template())
+
+    @pytest.mark.parametrize("label, subrecord_id, template, decode_fn, encode_fn", _family_templates(),
+                             ids=lambda v: v if isinstance(v, str) else "")
+    def test_unfilled_template_encodes_and_decodes_back(self, label, subrecord_id, template, decode_fn, encode_fn):
+        record = template()
+        payload = encode_fn(dict(record, SubrecordID=subrecord_id))
+        decoded, _consumed = decode_fn(payload, 4)
+        for key, value in record.items():
+            if value is not None and key not in ('GSFKMALLVersion', 'NumBytesPerTxSector', 'NumBytesPerClass'):
+                assert decoded[key] == pytest.approx(value), key
+
+    @pytest.mark.parametrize("template, decode_fn, table", [
+        (new_em4_tx_sector, _decode_em4_specific, 'TxSectors'),
+        (new_em3raw_tx_sector, _decode_em3raw_specific, 'TxSectors'),
+        (new_kmall_tx_sector, _decode_kmall_specific, 'TxSectors'),
+    ], ids=["em4", "em3raw", "kmall"])
+    def test_row_templates_match_decoded_table_columns(self, template, decode_fn, table):
+        record = {'SubrecordID': 156 if decode_fn is _decode_kmall_specific else None, table: {
+            key: [value] for key, value in template().items()}}
+        encode_fn = {_decode_em4_specific: _encode_em4_specific, _decode_em3raw_specific: _encode_em3raw_specific,
+                     _decode_kmall_specific: _encode_kmall_specific}[decode_fn]
+        if record['SubrecordID'] is None:
+            del record['SubrecordID']
+        decoded, _consumed = decode_fn(encode_fn(record), 4)
+        assert list(decoded[table]) == list(template())
+
+    def test_em3_run_time_row_template_matches_decoded_table_columns(self):
+        head0 = new_em3_run_time()
+        decoded, _consumed = _decode_em3_specific(_encode_em3_specific({'RunTime': {
+            key: [value if value is not None else 1700000000.0] for key, value in head0.items()}}), 4)
+        assert list(decoded['RunTime']) == list(head0)
+
+
+class TestPingTemplates:
+    def test_swath_ping_decoder_builds_from_template(self):
+        record = new_swath_bathymetry_ping()
+        record.update(PingTime=1700000000.0, Longitude_deg=-70.5, Latitude_deg=43.1, NumberBeams=1,
+                      Beams={'Depth_m': [10.0]})
+        decoded = _decode_swath_bathymetry_ping(_encode_swath_bathymetry_ping(record), 3, {})
+        assert list(decoded) == list(new_swath_bathymetry_ping())
+
+    def test_single_beam_decoder_builds_from_template(self):
+        record = new_single_beam_ping()
+        record.update({name: 1.0 for name in record if record[name] is None})
+        decoded = _decode_single_beam_ping(_encode_single_beam_ping(record))
+        assert list(decoded) == list(new_single_beam_ping())
 
 
 class TestEncodeHeader:
@@ -608,10 +680,11 @@ class TestEncodeBdbSpecific:
         assert decoded == fields
         assert consumed == len(payload) - 4
 
-    def test_missing_flags_default_to_nul(self):
+    def test_missing_flags_written_as_nul_and_decoded_as_empty(self):
         payload = _encode_bdb_specific({'DocNo': 1})
+        assert payload[8:14] == b'\x00' * 6  # after the 4-byte header word and DocNo
         decoded, _consumed = _decode_bdb_specific(payload, 4)
-        assert decoded['Eval'] == '\x00'
+        assert decoded['Eval'] == ''
 
     def test_subrecord_header_word_correct(self):
         payload = _encode_bdb_specific({})
@@ -1976,15 +2049,18 @@ class TestEncodeBRBIntensity:
     def _record(bits_per_sample, beams, sensor_id=None, **fields):
         record = new_intensity_time_series_header(sensor_id)
         record.update(BitsPerSample=bits_per_sample, **fields)
-        columns = {key: [] for key in new_intensity_time_series_beam()}
-        samples = []
-        for detect, start, beam_samples in beams:
-            columns['SampleCount'].append(len(beam_samples))
-            columns['DetectSample'].append(detect)
-            columns['StartRangeSamples'].append(start)
-            samples.extend(beam_samples)
-        record['Beams'] = {key: np.array(values, dtype=np.int64) for key, values in columns.items()}
-        record['Samples'] = np.array(samples, dtype=np.int64)
+        # Each beam is (detect position, start range, samples), as the file
+        # stores it.
+        detect_ranges, beam_numbers, range_samples, values = [], [], [], []
+        for number, (detect, start, beam_samples) in enumerate(beams):
+            detect_ranges.append(start + detect)
+            beam_numbers += [number] * len(beam_samples)
+            range_samples += range(start, start + len(beam_samples))
+            values += beam_samples
+        record['Beams'] = {'DetectRangeSample': np.array(detect_ranges, dtype=np.int64)}
+        record['Samples'] = {'Beam': np.array(beam_numbers, dtype=np.int64),
+                             'RangeSample': np.array(range_samples, dtype=np.int64),
+                             'Value': np.array(values, dtype=np.int64)}
         return record
 
     @staticmethod
@@ -1995,7 +2071,7 @@ class TestEncodeBRBIntensity:
         # gsf_enc.c's EncodeBRBIntensity() counts its own 4-byte
         # identifier word in the size field, unlike every other subrecord.
         assert word & 0xFFFFFF == len(payload)
-        decoded, consumed = _decode_brb_intensity(payload, 4, _nrows(record['Beams']), sensor_id)
+        decoded, consumed = _decode_brb_intensity(payload, 4, len(record['Beams']['DetectRangeSample']), sensor_id)
         assert consumed == len(payload) - 4
         return payload, decoded
 
@@ -2010,8 +2086,8 @@ class TestEncodeBRBIntensity:
         assert decoded['BitsPerSample'] == bits_per_sample
         assert decoded['AppliedCorrections'] == 0x12345678
         assert {k: list(v) for k, v in decoded['Beams'].items()} == {
-            'SampleCount': [3, 2], 'DetectSample': [1, 0], 'StartRangeSamples': [100, 50]}
-        assert list(decoded['Samples']) == [0, 1, top, top, 7]
+            'DetectRangeSample': [101, 50]}
+        assert list(decoded['Samples']['Value']) == [0, 1, top, top, 7]
 
     def test_12_bit_samples_packed_with_gsflib_bit_layout(self):
         # Same bytes TestDecodeBRBIntensitySynthetic decodes: 0xABC, 0x123
@@ -2029,20 +2105,50 @@ class TestEncodeBRBIntensity:
         payload, decoded = self._round_trip(record, sensor_id=999)
 
         assert payload.endswith(bytes([0xAB, 0xC1, 0x23, 0xFF, 0xF0, 0x00]))
-        assert decoded['Beams']['SampleCount'][0] == 3
+        assert list(decoded['Samples']['Beam']) == [0, 0, 0]
         assert _beam_samples(decoded, 0) == [0xABC, 0x123, 0xFFF]
 
-    def test_sample_counts_not_matching_samples_raises(self):
-        record = self._record(8, [(0, 0, [1, 2, 3])])
-        record['Beams']['SampleCount'][0] = 99
-
-        with pytest.raises(ValueError):
+    def test_samples_out_of_beam_order_raises(self):
+        record = self._record(8, [(0, 0, [1, 2]), (0, 10, [3])])
+        record['Samples']['Beam'] = record['Samples']['Beam'][::-1].copy()
+        with pytest.raises(ValueError, match="beam order"):
             _encode_brb_intensity(record, sensor_id=999)
+
+    def test_non_consecutive_range_samples_raise(self):
+        record = self._record(8, [(0, 100, [1, 2, 3])])
+        record['Samples']['RangeSample'][2] = 105  # a gap the file can't store
+        with pytest.raises(ValueError, match="consecutive"):
+            _encode_brb_intensity(record, sensor_id=999)
+
+    def test_detect_range_too_far_from_start_raises(self):
+        record = self._record(8, [(0, 100, [1])])
+        record['Beams']['DetectRangeSample'][0] = 100 + 70000  # detect position > 16 bits
+        with pytest.raises(ValueError, match="detect position"):
+            _encode_brb_intensity(record, sensor_id=999)
+
+    def test_beam_with_no_samples_keeps_its_detect_range(self):
+        record = self._record(16, [(2, 500, [7, 8]), (4, 900, []), (1, 700, [9])])
+        decoded, _consumed = _decode_brb_intensity(_encode_brb_intensity(record, 999), 4, 3, 999)
+        assert list(decoded['Beams']['DetectRangeSample']) == [502, 904, 701]
+        assert list(decoded['Samples']['Beam']) == [0, 0, 2]
+        assert list(decoded['Samples']['RangeSample']) == [500, 501, 700]
 
     def test_beams_given_as_dataframe_encode_the_same(self):
         record = self._record(16, [(1, 2, [10, 20]), (0, 0, [30])])
-        as_frame = dict(record, Beams=pd.DataFrame(record['Beams']))
+        as_frame = dict(record, Beams=pd.DataFrame(record['Beams']), Samples=pd.DataFrame(record['Samples']))
         assert _encode_brb_intensity(as_frame, 999) == _encode_brb_intensity(record, 999)
+
+    def test_samples_table_columns_match_template_and_re_encode(self):
+        record = self._record(16, [(1, 7, [10, 20, 30]), (0, 3, [40])])
+        payload = _encode_brb_intensity(record, 999)
+        decoded, _consumed = _decode_brb_intensity(payload, 4, 2, 999)
+
+        assert list(decoded['Samples']) == list(new_intensity_time_series_sample())
+        assert list(decoded['Beams']) == list(new_intensity_time_series_beam())
+        assert list(decoded['Samples']['Beam']) == [0, 0, 0, 1]
+        assert list(decoded['Samples']['RangeSample']) == [7, 8, 9, 3]
+        assert list(decoded['Beams']['DetectRangeSample']) == [8, 3]
+        assert _encode_brb_intensity(decoded, 999) == payload
 
     @pytest.mark.parametrize("bits_per_sample", [0, 4, 24, 64])
     def test_unsupported_bits_per_sample_raises(self, bits_per_sample):
@@ -2136,8 +2242,12 @@ class TestEncodeSwathBathymetryPing:
 
         decoded_v2 = _decode_swath_bathymetry_ping(payload_v2, major_version=2, scale_factors={})
         decoded_v3 = _decode_swath_bathymetry_ping(payload_v3, major_version=3, scale_factors={})
-        assert 'Height_m' not in decoded_v2
-        assert 'Height_m' in decoded_v3
+        # Both have every template field; a v2 ping simply has no stored
+        # value for these three, so they keep their "not available" defaults.
+        assert list(decoded_v2) == list(decoded_v3)
+        assert decoded_v2['Height_m'] == GSF_NULL_HEIGHT
+        assert decoded_v2['SEP_m'] == GSF_NULL_SEP
+        assert decoded_v2['Notes'] == [] and decoded_v3['Notes'] == []
 
     def test_missing_required_scalar_raises_valueerror(self):
         incomplete = self._record()
@@ -2146,11 +2256,11 @@ class TestEncodeSwathBathymetryPing:
             _encode_swath_bathymetry_ping(incomplete)
 
     def test_required_scalar_left_as_none_raises_valueerror(self):
-        # new_swath_bathymetry_ping_scalars() sets required fields to None
+        # new_swath_bathymetry_ping() sets required fields to None
         # as a placeholder -- forgetting to overwrite one must not
         # silently encode None (a struct.pack TypeError deep in the
         # encoder) or a nonsense value.
-        record = new_swath_bathymetry_ping_scalars()
+        record = new_swath_bathymetry_ping()
         record.update(Longitude_deg=-70.5, Latitude_deg=43.1, NumberBeams=1)
         record['Beams'] = {'Depth_m': [10.0]}
         # PingTime deliberately left None.
@@ -2488,18 +2598,18 @@ class TestEncodeSwathBathymetryPing:
 
 
 # ---------------------------------------------------------------------------
-# new_swath_bathymetry_ping_scalars() / new_kmall_specific() /
+# new_swath_bathymetry_ping() / new_kmall_specific() /
 # new_kmall_tx_sector() -- template-dict helpers
 # ---------------------------------------------------------------------------
 
 class TestTemplateHelpers:
     def test_ping_scalars_template_has_required_fields_as_none(self):
-        scalars = new_swath_bathymetry_ping_scalars()
+        scalars = new_swath_bathymetry_ping()
         for key in ('PingTime', 'Longitude_deg', 'Latitude_deg', 'NumberBeams'):
             assert scalars[key] is None
 
     def test_ping_scalars_template_optional_fields_are_null_sentinels(self):
-        scalars = new_swath_bathymetry_ping_scalars()
+        scalars = new_swath_bathymetry_ping()
         assert scalars['Speed_kn'] == GSF_NULL_SPEED
         assert scalars['Course_deg'] == GSF_NULL_COURSE
         assert scalars['TideCorrector_m'] == GSF_NULL_TIDE_CORRECTOR
@@ -2517,7 +2627,7 @@ class TestTemplateHelpers:
     def test_ping_scalars_template_populated_and_used_directly(self):
         # The whole point: fill in the required fields plus whatever you
         # know, leave the rest, and pass it straight to the encoder.
-        record = new_swath_bathymetry_ping_scalars()
+        record = new_swath_bathymetry_ping()
         record.update(
             PingTime=1700000000.0, Longitude_deg=-70.5, Latitude_deg=43.1,
             NumberBeams=1, Speed_kn=5.0)
@@ -2716,8 +2826,11 @@ class TestGsfWriteMethods:
         G2.FID.seek(ping_offset)
         dataSize, _readSize, _data_id = G2.read_record_header()
         payload = G2.FID.read(dataSize)
+        # Decoding with the v2 layout only lines up if the v3-only fields
+        # were left out when writing.
         decoded = _decode_swath_bathymetry_ping(payload, major_version=2, scale_factors={})
-        assert 'Height_m' not in decoded
+        assert decoded['Notes'] == []
+        assert list(decoded['Beams']['Depth_m']) == pytest.approx([10.0])
 
     def test_previously_unimplemented_record_types_round_trip(self, tmp_path, capsys):
         # write_swath_bathy_summary/write_comment/write_history/

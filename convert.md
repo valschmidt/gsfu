@@ -169,14 +169,14 @@ most moving parts: fixed scalar fields, a table of per-beam arrays, and an
 optional vendor-specific block. It also has by far the most scalar field
 names to keep straight (17, plus ~65 more if you add the KMALL
 vendor-specific block below) -- rather than writing that dict out by hand
-from memory, start from `new_swath_bathymetry_ping_scalars()`, which
+from memory, start from `new_swath_bathymetry_ping()`, which
 returns every valid key name already present, so there's nothing to look
 up and no name to mistype:
 
 ```python
-from GSFU.gsfu import new_swath_bathymetry_ping_scalars
+from GSFU.gsfu import new_swath_bathymetry_ping
 
-record = new_swath_bathymetry_ping_scalars()
+record = new_swath_bathymetry_ping()
 record.update(
     PingTime=1724650073.719285,
     Longitude_deg=-129.981855,
@@ -202,7 +202,7 @@ record["Beams"] = {
 G.write_swath_bathymetry_ping(record)
 ```
 
-`new_swath_bathymetry_ping_scalars()` sets the four required fields
+`new_swath_bathymetry_ping()` sets the four required fields
 (`PingTime`, `Longitude_deg`, `Latitude_deg`, `NumberBeams`) to `None` as a
 placeholder -- `write_swath_bathymetry_ping()` raises `ValueError` naming
 whichever one you forget to overwrite -- and pre-fills every optional
@@ -323,7 +323,7 @@ extreme, implausible edge of) the field's valid range:
 | `SEP_m` | `GSF_NULL_SEP` | 9999.99 |
 
 All are importable from `GSFU.gsfu` (`from GSFU.gsfu import GSF_NULL_SPEED`,
-etc.), and `new_swath_bathymetry_ping_scalars()` (above) already fills in
+etc.), and `new_swath_bathymetry_ping()` (above) already fills in
 every one of them for you -- if you build `record` that way, a field you
 never overwrite is automatically "not available", not `0`/`0.0`. Building
 `record` as a plain dict instead? Set the constant explicitly rather than
@@ -381,7 +381,7 @@ G.closeFile()
 ## Putting it together
 
 ```python
-from GSFU.gsfu import gsf, new_swath_bathymetry_ping_scalars
+from GSFU.gsfu import gsf, new_swath_bathymetry_ping
 
 G = gsf("my_survey.gsf")
 G.write_header()
@@ -393,7 +393,7 @@ G.write_sound_velocity_profile({
 
 for ping_time, lat, lon, beams in my_pings:
     G.write_attitude(...)  # or batch these separately, see above
-    record = new_swath_bathymetry_ping_scalars()
+    record = new_swath_bathymetry_ping()
     record.update(
         PingTime=ping_time, Latitude_deg=lat, Longitude_deg=lon,
         NumberBeams=len(beams["Depth_m"]))

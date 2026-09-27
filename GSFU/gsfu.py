@@ -445,6 +445,27 @@ _SENSOR_SPECIFIC_SUBRECORD_NAMES = {
 _PING_SENSOR_SPECIFIC_CODECS = {}
 
 
+def new_elac_mkii_specific():
+    """
+    Return a new dictionary with every ElacMkII sensor-specific subrecord
+    field name present, in the same shape _decode_elac_mkii_specific()
+    returns, each pre-set to 0 or 0.0. gsf.h defines no "not available"
+    value for these vendor-specific fields, so these are the only defaults
+    available. _decode_elac_mkii_specific() builds its result starting from
+    this same template, so the two can never define a different set of field
+    names. To write one, fill it in and set it as a ping record's
+    'SensorSpecific', with 'SensorSpecificID' set to this family's subrecord
+    id (117).
+
+    :return: a dictionary with every ElacMkII sensor-specific field name as
+        a key, pre-set to its default.
+    """
+    return {
+        'Mode': 0, 'PingNumber': 0, 'SoundVelocity_mps': 0, 'PulseLength_hundredth_ms': 0,
+        'ReceiverGainStbd_dB': 0, 'ReceiverGainPort_dB': 0, 'Reserved': 0,
+    }
+
+
 def _decode_elac_mkii_specific(payload, pos):
     """
     Decode a GSF_SWATH_BATHY_SUBRECORD_ELAC_MKII_SPECIFIC subrecord (id
@@ -473,15 +494,14 @@ def _decode_elac_mkii_specific(payload, pos):
     receiver_gain_port = payload[pos]; pos += 1
     (reserved,) = struct.unpack_from('>H', payload, pos); pos += 2
 
-    record = {
-        'Mode': mode,
-        'PingNumber': ping_num,
-        'SoundVelocity_mps': sound_vel,
-        'PulseLength_hundredth_ms': pulse_length,
-        'ReceiverGainStbd_dB': receiver_gain_stbd,
-        'ReceiverGainPort_dB': receiver_gain_port,
-        'Reserved': reserved,
-    }
+    record = new_elac_mkii_specific()
+    record['Mode'] = mode
+    record['PingNumber'] = ping_num
+    record['SoundVelocity_mps'] = sound_vel
+    record['PulseLength_hundredth_ms'] = pulse_length
+    record['ReceiverGainStbd_dB'] = receiver_gain_stbd
+    record['ReceiverGainPort_dB'] = receiver_gain_port
+    record['Reserved'] = reserved
     return record, pos - start
 
 
@@ -514,6 +534,26 @@ def _encode_elac_mkii_specific(record):
 _PING_SENSOR_SPECIFIC_CODECS[117] = ("ElacMkII", _decode_elac_mkii_specific, _encode_elac_mkii_specific)
 
 
+def new_seabeam_specific():
+    """
+    Return a new dictionary with every SeaBeam sensor-specific subrecord
+    field name present, in the same shape _decode_seabeam_specific()
+    returns, each pre-set to 0 or 0.0. gsf.h defines no "not available"
+    value for these vendor-specific fields, so these are the only defaults
+    available. _decode_seabeam_specific() builds its result starting from
+    this same template, so the two can never define a different set of field
+    names. To write one, fill it in and set it as a ping record's
+    'SensorSpecific', with 'SensorSpecificID' set to this family's subrecord
+    id (102).
+
+    :return: a dictionary with every SeaBeam sensor-specific field name as a
+        key, pre-set to its default.
+    """
+    return {
+        'EclipseTime_tenths_s': 0,
+    }
+
+
 def _decode_seabeam_specific(payload, pos):
     """
     Decode a GSF_SWATH_BATHY_SUBRECORD_SEABEAM_SPECIFIC subrecord (id
@@ -535,7 +575,8 @@ def _decode_seabeam_specific(payload, pos):
     start = pos
     (eclipse_time,) = struct.unpack_from('>H', payload, pos); pos += 2
 
-    fields = {'EclipseTime_tenths_s': eclipse_time}
+    fields = new_seabeam_specific()
+    fields['EclipseTime_tenths_s'] = eclipse_time
     return fields, pos - start
 
 
@@ -559,6 +600,26 @@ def _encode_seabeam_specific(record):
 
 
 _PING_SENSOR_SPECIFIC_CODECS[102] = ("SeaBeam", _decode_seabeam_specific, _encode_seabeam_specific)
+
+
+def new_em12_specific():
+    """
+    Return a new dictionary with every EM12 sensor-specific subrecord field
+    name present, in the same shape _decode_em12_specific() returns, each
+    pre-set to 0 or 0.0. gsf.h defines no "not available" value for these
+    vendor-specific fields, so these are the only defaults available.
+    _decode_em12_specific() builds its result starting from this same
+    template, so the two can never define a different set of field names. To
+    write one, fill it in and set it as a ping record's 'SensorSpecific',
+    with 'SensorSpecificID' set to this family's subrecord id (103).
+
+    :return: a dictionary with every EM12 sensor-specific field name as a
+        key, pre-set to its default.
+    """
+    return {
+        'PingNumber': 0, 'Resolution': 0, 'PingQuality': 0, 'SoundVelocity_mps': 0.0,
+        'Mode': 0,
+    }
 
 
 def _decode_em12_specific(payload, pos):
@@ -587,13 +648,12 @@ def _decode_em12_specific(payload, pos):
     mode = payload[pos]; pos += 1
     pos += 32  # spare
 
-    fields = {
-        'PingNumber': ping_number,
-        'Resolution': resolution,
-        'PingQuality': ping_quality,
-        'SoundVelocity_mps': sound_velocity_raw / 10.0,
-        'Mode': mode,
-    }
+    fields = new_em12_specific()
+    fields['PingNumber'] = ping_number
+    fields['Resolution'] = resolution
+    fields['PingQuality'] = ping_quality
+    fields['SoundVelocity_mps'] = sound_velocity_raw / 10.0
+    fields['Mode'] = mode
     return fields, pos - start
 
 
@@ -624,6 +684,26 @@ def _encode_em12_specific(record):
 _PING_SENSOR_SPECIFIC_CODECS[103] = ("EM12", _decode_em12_specific, _encode_em12_specific)
 
 
+def new_em100_specific():
+    """
+    Return a new dictionary with every EM100 sensor-specific subrecord field
+    name present, in the same shape _decode_em100_specific() returns, each
+    pre-set to 0 or 0.0. gsf.h defines no "not available" value for these
+    vendor-specific fields, so these are the only defaults available.
+    _decode_em100_specific() builds its result starting from this same
+    template, so the two can never define a different set of field names. To
+    write one, fill it in and set it as a ping record's 'SensorSpecific',
+    with 'SensorSpecificID' set to this family's subrecord id (104).
+
+    :return: a dictionary with every EM100 sensor-specific field name as a
+        key, pre-set to its default.
+    """
+    return {
+        'ShipPitch_deg': 0.0, 'TransducerPitch_deg': 0.0, 'Mode': 0, 'Power': 0,
+        'Attenuation': 0, 'TVG': 0, 'PulseLength': 0, 'Counter': 0,
+    }
+
+
 def _decode_em100_specific(payload, pos):
     """
     Decode a GSF_SWATH_BATHY_SUBRECORD_EM100_SPECIFIC subrecord (id 104),
@@ -652,16 +732,15 @@ def _decode_em100_specific(payload, pos):
     pulse_length = payload[pos]; pos += 1
     (counter,) = struct.unpack_from('>H', payload, pos); pos += 2
 
-    fields = {
-        'ShipPitch_deg': ship_pitch_raw / 100.0,
-        'TransducerPitch_deg': transducer_pitch_raw / 100.0,
-        'Mode': mode,
-        'Power': power,
-        'Attenuation': attenuation,
-        'TVG': tvg,
-        'PulseLength': pulse_length,
-        'Counter': counter,
-    }
+    fields = new_em100_specific()
+    fields['ShipPitch_deg'] = ship_pitch_raw / 100.0
+    fields['TransducerPitch_deg'] = transducer_pitch_raw / 100.0
+    fields['Mode'] = mode
+    fields['Power'] = power
+    fields['Attenuation'] = attenuation
+    fields['TVG'] = tvg
+    fields['PulseLength'] = pulse_length
+    fields['Counter'] = counter
     return fields, pos - start
 
 
@@ -694,6 +773,26 @@ def _encode_em100_specific(record):
 _PING_SENSOR_SPECIFIC_CODECS[104] = ("EM100", _decode_em100_specific, _encode_em100_specific)
 
 
+def new_cmp_sass_specific():
+    """
+    Return a new dictionary with every CmpSass sensor-specific subrecord
+    field name present, in the same shape _decode_cmp_sass_specific()
+    returns, each pre-set to 0 or 0.0. gsf.h defines no "not available"
+    value for these vendor-specific fields, so these are the only defaults
+    available. _decode_cmp_sass_specific() builds its result starting from
+    this same template, so the two can never define a different set of field
+    names. To write one, fill it in and set it as a ping record's
+    'SensorSpecific', with 'SensorSpecificID' set to this family's subrecord
+    id (121).
+
+    :return: a dictionary with every CmpSass sensor-specific field name as a
+        key, pre-set to its default.
+    """
+    return {
+        'SurfaceSoundVelocity_ftps': 0.0, 'Heave_ftps': 0.0,
+    }
+
+
 def _decode_cmp_sass_specific(payload, pos):
     """
     Decode a GSF_SWATH_BATHY_SUBRECORD_CMP_SASS_SPECIFIC subrecord (id
@@ -717,10 +816,9 @@ def _decode_cmp_sass_specific(payload, pos):
     (lfreq_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
     (lntens_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
 
-    fields = {
-        'SurfaceSoundVelocity_ftps': lfreq_raw / 10.0,
-        'Heave_ftps': lntens_raw / 10.0,
-    }
+    fields = new_cmp_sass_specific()
+    fields['SurfaceSoundVelocity_ftps'] = lfreq_raw / 10.0
+    fields['Heave_ftps'] = lntens_raw / 10.0
     return fields, pos - start
 
 
@@ -746,6 +844,26 @@ def _encode_cmp_sass_specific(record):
 
 
 _PING_SENSOR_SPECIFIC_CODECS[121] = ("CmpSass", _decode_cmp_sass_specific, _encode_cmp_sass_specific)
+
+
+def new_em950_specific():
+    """
+    Return a new dictionary with every EM950 sensor-specific subrecord field
+    name present, in the same shape _decode_em950_specific() returns, each
+    pre-set to 0 or 0.0. gsf.h defines no "not available" value for these
+    vendor-specific fields, so these are the only defaults available.
+    _decode_em950_specific() builds its result starting from this same
+    template, so the two can never define a different set of field names. To
+    write one, fill it in and set it as a ping record's 'SensorSpecific',
+    with 'SensorSpecificID' set to this family's subrecord ids (105, 111).
+
+    :return: a dictionary with every EM950 sensor-specific field name as a
+        key, pre-set to its default.
+    """
+    return {
+        'PingNumber': 0, 'Mode': 0, 'PingQuality': 0, 'ShipPitch_deg': 0.0,
+        'TransducerPitch_deg': 0.0, 'SurfaceVelocity_mps': 0.0,
+    }
 
 
 def _decode_em950_specific(payload, pos):
@@ -778,14 +896,13 @@ def _decode_em950_specific(payload, pos):
     (transducer_pitch_raw,) = struct.unpack_from('>h', payload, pos); pos += 2
     (surface_velocity_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
 
-    fields = {
-        'PingNumber': ping_number,
-        'Mode': mode,
-        'PingQuality': ping_quality,
-        'ShipPitch_deg': ship_pitch_raw / 100.0,
-        'TransducerPitch_deg': transducer_pitch_raw / 100.0,
-        'SurfaceVelocity_mps': surface_velocity_raw / 10.0,
-    }
+    fields = new_em950_specific()
+    fields['PingNumber'] = ping_number
+    fields['Mode'] = mode
+    fields['PingQuality'] = ping_quality
+    fields['ShipPitch_deg'] = ship_pitch_raw / 100.0
+    fields['TransducerPitch_deg'] = transducer_pitch_raw / 100.0
+    fields['SurfaceVelocity_mps'] = surface_velocity_raw / 10.0
     return fields, pos - start
 
 
@@ -823,6 +940,26 @@ _PING_SENSOR_SPECIFIC_CODECS[105] = ("EM950", _decode_em950_specific, _encode_em
 _PING_SENSOR_SPECIFIC_CODECS[111] = ("EM1000", _decode_em950_specific, _encode_em950_specific)
 
 
+def new_em121a_specific():
+    """
+    Return a new dictionary with every EM121A sensor-specific subrecord
+    field name present, in the same shape _decode_em121a_specific() returns,
+    each pre-set to 0 or 0.0. gsf.h defines no "not available" value for
+    these vendor-specific fields, so these are the only defaults available.
+    _decode_em121a_specific() builds its result starting from this same
+    template, so the two can never define a different set of field names. To
+    write one, fill it in and set it as a ping record's 'SensorSpecific',
+    with 'SensorSpecificID' set to this family's subrecord ids (106, 107).
+
+    :return: a dictionary with every EM121A sensor-specific field name as a
+        key, pre-set to its default.
+    """
+    return {
+        'PingNumber': 0, 'Mode': 0, 'ValidBeams': 0, 'PulseLength': 0, 'BeamWidth': 0,
+        'TxPower': 0, 'TxStatus': 0, 'RxStatus': 0, 'SurfaceVelocity_mps': 0.0,
+    }
+
+
 def _decode_em121a_specific(payload, pos):
     """
     Decode a GSF_SWATH_BATHY_SUBRECORD_EM121A_SPECIFIC or
@@ -856,17 +993,16 @@ def _decode_em121a_specific(payload, pos):
     rx_status = payload[pos]; pos += 1
     (surface_velocity_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
 
-    fields = {
-        'PingNumber': ping_number,
-        'Mode': mode,
-        'ValidBeams': valid_beams,
-        'PulseLength': pulse_length,
-        'BeamWidth': beam_width,
-        'TxPower': tx_power,
-        'TxStatus': tx_status,
-        'RxStatus': rx_status,
-        'SurfaceVelocity_mps': surface_velocity_raw / 10.0,
-    }
+    fields = new_em121a_specific()
+    fields['PingNumber'] = ping_number
+    fields['Mode'] = mode
+    fields['ValidBeams'] = valid_beams
+    fields['PulseLength'] = pulse_length
+    fields['BeamWidth'] = beam_width
+    fields['TxPower'] = tx_power
+    fields['TxStatus'] = tx_status
+    fields['RxStatus'] = rx_status
+    fields['SurfaceVelocity_mps'] = surface_velocity_raw / 10.0
     return fields, pos - start
 
 
@@ -905,6 +1041,27 @@ def _encode_em121a_specific(record):
 
 _PING_SENSOR_SPECIFIC_CODECS[106] = ("EM121A", _decode_em121a_specific, _encode_em121a_specific)
 _PING_SENSOR_SPECIFIC_CODECS[107] = ("EM121", _decode_em121a_specific, _encode_em121a_specific)
+
+
+def new_seamap_specific():
+    """
+    Return a new dictionary with every SeaMap sensor-specific subrecord
+    field name present, in the same shape _decode_seamap_specific() returns,
+    each pre-set to 0 or 0.0. gsf.h defines no "not available" value for
+    these vendor-specific fields, so these are the only defaults available.
+    _decode_seamap_specific() builds its result starting from this same
+    template, so the two can never define a different set of field names. To
+    write one, fill it in and set it as a ping record's 'SensorSpecific',
+    with 'SensorSpecificID' set to this family's subrecord id (109).
+
+    :return: a dictionary with every SeaMap sensor-specific field name as a
+        key, pre-set to its default.
+    """
+    return {
+        'PortTransmitter0': 0.0, 'PortTransmitter1': 0.0, 'StbdTransmitter0': 0.0,
+        'StbdTransmitter1': 0.0, 'PortGain': 0.0, 'StbdGain': 0.0, 'PortPulseLength': 0.0,
+        'StbdPulseLength': 0.0, 'PressureDepth': 0.0, 'Altitude': 0.0, 'Temperature': 0.0,
+    }
 
 
 def _decode_seamap_specific(payload, pos):
@@ -954,7 +1111,8 @@ def _decode_seamap_specific(payload, pos):
         'PortGain', 'StbdGain', 'PortPulseLength', 'StbdPulseLength',
         'PressureDepth', 'Altitude', 'Temperature',
     )
-    fields = {key: value / 10.0 for key, value in zip(keys, values)}
+    fields = new_seamap_specific()
+    fields.update((key, value / 10.0) for key, value in zip(keys, values))
     return fields, pos - start
 
 
@@ -988,6 +1146,26 @@ def _encode_seamap_specific(record):
 _PING_SENSOR_SPECIFIC_CODECS[109] = ("SeaMap", _decode_seamap_specific, _encode_seamap_specific)
 
 
+def new_seabat_specific():
+    """
+    Return a new dictionary with every SeaBat sensor-specific subrecord
+    field name present, in the same shape _decode_seabat_specific() returns,
+    each pre-set to 0 or 0.0. gsf.h defines no "not available" value for
+    these vendor-specific fields, so these are the only defaults available.
+    _decode_seabat_specific() builds its result starting from this same
+    template, so the two can never define a different set of field names. To
+    write one, fill it in and set it as a ping record's 'SensorSpecific',
+    with 'SensorSpecificID' set to this family's subrecord id (110).
+
+    :return: a dictionary with every SeaBat sensor-specific field name as a
+        key, pre-set to its default.
+    """
+    return {
+        'PingNumber': 0, 'SurfaceVelocity_mps': 0.0, 'Mode': 0, 'SonarRange_m': 0,
+        'TransmitPower': 0, 'ReceiveGain': 0,
+    }
+
+
 def _decode_seabat_specific(payload, pos):
     """
     Decode a GSF_SWATH_BATHY_SUBRECORD_SEABAT_SPECIFIC subrecord (id
@@ -1014,14 +1192,13 @@ def _decode_seabat_specific(payload, pos):
     transmit_power = payload[pos]; pos += 1
     receive_gain = payload[pos]; pos += 1
 
-    fields = {
-        'PingNumber': ping_number,
-        'SurfaceVelocity_mps': surface_velocity_raw / 10.0,
-        'Mode': mode,
-        'SonarRange_m': sonar_range,
-        'TransmitPower': transmit_power,
-        'ReceiveGain': receive_gain,
-    }
+    fields = new_seabat_specific()
+    fields['PingNumber'] = ping_number
+    fields['SurfaceVelocity_mps'] = surface_velocity_raw / 10.0
+    fields['Mode'] = mode
+    fields['SonarRange_m'] = sonar_range
+    fields['TransmitPower'] = transmit_power
+    fields['ReceiveGain'] = receive_gain
     return fields, pos - start
 
 
@@ -1053,6 +1230,26 @@ def _encode_seabat_specific(record):
 _PING_SENSOR_SPECIFIC_CODECS[110] = ("SeaBat", _decode_seabat_specific, _encode_seabat_specific)
 
 
+def new_sb_amp_specific():
+    """
+    Return a new dictionary with every SBAmp sensor-specific subrecord field
+    name present, in the same shape _decode_sb_amp_specific() returns, each
+    pre-set to 0 or 0.0. gsf.h defines no "not available" value for these
+    vendor-specific fields, so these are the only defaults available.
+    _decode_sb_amp_specific() builds its result starting from this same
+    template, so the two can never define a different set of field names. To
+    write one, fill it in and set it as a ping record's 'SensorSpecific',
+    with 'SensorSpecificID' set to this family's subrecord id (113).
+
+    :return: a dictionary with every SBAmp sensor-specific field name as a
+        key, pre-set to its default.
+    """
+    return {
+        'Hour': 0, 'Minute': 0, 'Second': 0, 'Hundredths': 0, 'BlockNumber': 0,
+        'AvgGateDepth': 0,
+    }
+
+
 def _decode_sb_amp_specific(payload, pos):
     """
     Decode a GSF_SWATH_BATHY_SUBRECORD_SB_AMP_SPECIFIC subrecord (id
@@ -1079,14 +1276,13 @@ def _decode_sb_amp_specific(payload, pos):
     (block_number,) = struct.unpack_from('>I', payload, pos); pos += 4
     (avg_gate_depth,) = struct.unpack_from('>h', payload, pos); pos += 2
 
-    fields = {
-        'Hour': hour,
-        'Minute': minute,
-        'Second': second,
-        'Hundredths': hundredths,
-        'BlockNumber': block_number,
-        'AvgGateDepth': avg_gate_depth,
-    }
+    fields = new_sb_amp_specific()
+    fields['Hour'] = hour
+    fields['Minute'] = minute
+    fields['Second'] = second
+    fields['Hundredths'] = hundredths
+    fields['BlockNumber'] = block_number
+    fields['AvgGateDepth'] = avg_gate_depth
     return fields, pos - start
 
 
@@ -1116,6 +1312,27 @@ def _encode_sb_amp_specific(record):
 
 
 _PING_SENSOR_SPECIFIC_CODECS[113] = ("SBAmp", _decode_sb_amp_specific, _encode_sb_amp_specific)
+
+
+def new_seabat_ii_specific():
+    """
+    Return a new dictionary with every SeaBatII sensor-specific subrecord
+    field name present, in the same shape _decode_seabat_ii_specific()
+    returns, each pre-set to 0 or 0.0. gsf.h defines no "not available"
+    value for these vendor-specific fields, so these are the only defaults
+    available. _decode_seabat_ii_specific() builds its result starting from
+    this same template, so the two can never define a different set of field
+    names. To write one, fill it in and set it as a ping record's
+    'SensorSpecific', with 'SensorSpecificID' set to this family's subrecord
+    id (114).
+
+    :return: a dictionary with every SeaBatII sensor-specific field name as
+        a key, pre-set to its default.
+    """
+    return {
+        'PingNumber': 0, 'SurfaceVelocity_mps': 0.0, 'Mode': 0, 'SonarRange_m': 0,
+        'TransmitPower': 0, 'ReceiveGain': 0, 'ForeAftBW_deg': 0.0, 'AthwartBW_deg': 0.0,
+    }
 
 
 def _decode_seabat_ii_specific(payload, pos):
@@ -1149,16 +1366,15 @@ def _decode_seabat_ii_specific(payload, pos):
     athwart_bw = payload[pos]; pos += 1
     pos += 4  # spare
 
-    fields = {
-        'PingNumber': ping_number,
-        'SurfaceVelocity_mps': surface_velocity_raw / 10.0,
-        'Mode': mode,
-        'SonarRange_m': sonar_range,
-        'TransmitPower': transmit_power,
-        'ReceiveGain': receive_gain,
-        'ForeAftBW_deg': fore_aft_bw / 10.0,
-        'AthwartBW_deg': athwart_bw / 10.0,
-    }
+    fields = new_seabat_ii_specific()
+    fields['PingNumber'] = ping_number
+    fields['SurfaceVelocity_mps'] = surface_velocity_raw / 10.0
+    fields['Mode'] = mode
+    fields['SonarRange_m'] = sonar_range
+    fields['TransmitPower'] = transmit_power
+    fields['ReceiveGain'] = receive_gain
+    fields['ForeAftBW_deg'] = fore_aft_bw / 10.0
+    fields['AthwartBW_deg'] = athwart_bw / 10.0
     return fields, pos - start
 
 
@@ -1191,6 +1407,30 @@ def _encode_seabat_ii_specific(record):
 
 
 _PING_SENSOR_SPECIFIC_CODECS[114] = ("SeaBatII", _decode_seabat_ii_specific, _encode_seabat_ii_specific)
+
+
+def new_seabeam_2112_specific():
+    """
+    Return a new dictionary with every SeaBeam2112 sensor-specific subrecord
+    field name present, in the same shape _decode_seabeam_2112_specific()
+    returns, each pre-set to 0 or 0.0, or an empty string. gsf.h defines no
+    "not available" value for these vendor-specific fields, so these are the
+    only defaults available. _decode_seabeam_2112_specific() builds its
+    result starting from this same template, so the two can never define a
+    different set of field names. To write one, fill it in and set it as a
+    ping record's 'SensorSpecific', with 'SensorSpecificID' set to this
+    family's subrecord id (116). SurfaceVelocity_mps is stored on the wire
+    as an unsigned offset from 1300 m/s, so its default is 1300.0, the
+    lowest value it can hold, rather than 0.0.
+
+    :return: a dictionary with every SeaBeam2112 sensor-specific field name
+        as a key, pre-set to its default.
+    """
+    return {
+        'Mode': 0, 'SurfaceVelocity_mps': 1300.0, 'SsvSource': 0, 'PingGain_dB': 0,
+        'PulseWidth_ms': 0, 'TransmitterAttenuation_dB': 0, 'NumberAlgorithms': 0,
+        'AlgorithmOrder': '',
+    }
 
 
 def _decode_seabeam_2112_specific(payload, pos):
@@ -1229,16 +1469,15 @@ def _decode_seabeam_2112_specific(payload, pos):
     algorithm_order = payload[pos:pos + 4].decode('ascii', 'replace').rstrip('\x00'); pos += 4
     pos += 2  # spare
 
-    fields = {
-        'Mode': mode,
-        'SurfaceVelocity_mps': (surface_velocity_raw + 130000) / 100.0,
-        'SsvSource': ssv_source,
-        'PingGain_dB': ping_gain,
-        'PulseWidth_ms': pulse_width,
-        'TransmitterAttenuation_dB': transmitter_attenuation,
-        'NumberAlgorithms': number_algorithms,
-        'AlgorithmOrder': algorithm_order,
-    }
+    fields = new_seabeam_2112_specific()
+    fields['Mode'] = mode
+    fields['SurfaceVelocity_mps'] = (surface_velocity_raw + 130000) / 100.0
+    fields['SsvSource'] = ssv_source
+    fields['PingGain_dB'] = ping_gain
+    fields['PulseWidth_ms'] = pulse_width
+    fields['TransmitterAttenuation_dB'] = transmitter_attenuation
+    fields['NumberAlgorithms'] = number_algorithms
+    fields['AlgorithmOrder'] = algorithm_order
     return fields, pos - start
 
 
@@ -1271,6 +1510,29 @@ def _encode_seabeam_2112_specific(record):
 
 
 _PING_SENSOR_SPECIFIC_CODECS[116] = ("SeaBeam2112", _decode_seabeam_2112_specific, _encode_seabeam_2112_specific)
+
+
+def new_seabat8101_specific():
+    """
+    Return a new dictionary with every SeaBat8101 sensor-specific subrecord
+    field name present, in the same shape _decode_seabat8101_specific()
+    returns, each pre-set to 0 or 0.0. gsf.h defines no "not available"
+    value for these vendor-specific fields, so these are the only defaults
+    available. _decode_seabat8101_specific() builds its result starting from
+    this same template, so the two can never define a different set of field
+    names. To write one, fill it in and set it as a ping record's
+    'SensorSpecific', with 'SensorSpecificID' set to this family's subrecord
+    id (115).
+
+    :return: a dictionary with every SeaBat8101 sensor-specific field name
+        as a key, pre-set to its default.
+    """
+    return {
+        'PingNumber': 0, 'SurfaceVelocity_mps': 0.0, 'Mode': 0, 'Range_m': 0, 'Power': 0,
+        'Gain': 0, 'PulseWidth_us': 0, 'TvgSpreading': 0, 'TvgAbsorption': 0,
+        'ForeAftBW_deg': 0.0, 'AthwartBW_deg': 0.0, 'RangeFiltMin': 0, 'RangeFiltMax': 0,
+        'DepthFiltMin': 0, 'DepthFiltMax': 0, 'Projector': 0,
+    }
 
 
 def _decode_seabat8101_specific(payload, pos):
@@ -1311,24 +1573,23 @@ def _decode_seabat8101_specific(payload, pos):
     projector = payload[pos]; pos += 1
     pos += 4  # spare
 
-    fields = {
-        'PingNumber': ping_number,
-        'SurfaceVelocity_mps': surface_velocity_raw / 10.0,
-        'Mode': mode,
-        'Range_m': rng,
-        'Power': power,
-        'Gain': gain,
-        'PulseWidth_us': pulse_width,
-        'TvgSpreading': tvg_spreading,
-        'TvgAbsorption': tvg_absorption,
-        'ForeAftBW_deg': fore_aft_bw_raw / 10.0,
-        'AthwartBW_deg': athwart_bw_raw / 10.0,
-        'RangeFiltMin': range_filt_min,
-        'RangeFiltMax': range_filt_max,
-        'DepthFiltMin': depth_filt_min,
-        'DepthFiltMax': depth_filt_max,
-        'Projector': projector,
-    }
+    fields = new_seabat8101_specific()
+    fields['PingNumber'] = ping_number
+    fields['SurfaceVelocity_mps'] = surface_velocity_raw / 10.0
+    fields['Mode'] = mode
+    fields['Range_m'] = rng
+    fields['Power'] = power
+    fields['Gain'] = gain
+    fields['PulseWidth_us'] = pulse_width
+    fields['TvgSpreading'] = tvg_spreading
+    fields['TvgAbsorption'] = tvg_absorption
+    fields['ForeAftBW_deg'] = fore_aft_bw_raw / 10.0
+    fields['AthwartBW_deg'] = athwart_bw_raw / 10.0
+    fields['RangeFiltMin'] = range_filt_min
+    fields['RangeFiltMax'] = range_filt_max
+    fields['DepthFiltMin'] = depth_filt_min
+    fields['DepthFiltMax'] = depth_filt_max
+    fields['Projector'] = projector
     return fields, pos - start
 
 
@@ -1377,6 +1638,32 @@ def _encode_seabat8101_specific(record):
 
 
 _PING_SENSOR_SPECIFIC_CODECS[115] = ("SeaBat8101", _decode_seabat8101_specific, _encode_seabat8101_specific)
+
+
+def new_reson8100_specific():
+    """
+    Return a new dictionary with every Reson8100 sensor-specific subrecord
+    field name present, in the same shape _decode_reson8100_specific()
+    returns, each pre-set to 0 or 0.0. gsf.h defines no "not available"
+    value for these vendor-specific fields, so these are the only defaults
+    available. _decode_reson8100_specific() builds its result starting from
+    this same template, so the two can never define a different set of field
+    names. To write one, fill it in and set it as a ping record's
+    'SensorSpecific', with 'SensorSpecificID' set to this family's subrecord
+    ids (122, 123, 124, 125, 126, 127).
+
+    :return: a dictionary with every Reson8100 sensor-specific field name as
+        a key, pre-set to its default.
+    """
+    return {
+        'Latency_ms': 0, 'PingNumber': 0, 'SonarID': 0, 'SonarModel': 0, 'Frequency_kHz': 0,
+        'SurfaceVelocity_mps': 0.0, 'SampleRate_Hz': 0, 'PingRate_mHz': 0, 'Mode': 0,
+        'Range_m': 0, 'Power': 0, 'Gain': 0, 'PulseWidth_us': 0, 'TvgSpreading': 0,
+        'TvgAbsorption': 0, 'ForeAftBW_deg': 0.0, 'AthwartBW_deg': 0.0, 'ProjectorType': 0,
+        'ProjectorAngle': 0, 'RangeFiltMin': 0, 'RangeFiltMax': 0, 'DepthFiltMin': 0,
+        'DepthFiltMax': 0, 'FiltersActive': 0, 'Temperature_tenth_degC': 0,
+        'BeamSpacing_deg': 0.0,
+    }
 
 
 def _decode_reson8100_specific(payload, pos):
@@ -1442,34 +1729,33 @@ def _decode_reson8100_specific(payload, pos):
     (beam_spacing_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
     pos += 2  # spare
 
-    fields = {
-        'Latency_ms': latency,
-        'PingNumber': ping_number,
-        'SonarID': sonar_id,
-        'SonarModel': sonar_model,
-        'Frequency_kHz': frequency,
-        'SurfaceVelocity_mps': surface_velocity_raw / 10.0,
-        'SampleRate_Hz': sample_rate,
-        'PingRate_mHz': ping_rate,
-        'Mode': mode,
-        'Range_m': rng,
-        'Power': power,
-        'Gain': gain,
-        'PulseWidth_us': pulse_width,
-        'TvgSpreading': tvg_spreading,
-        'TvgAbsorption': tvg_absorption,
-        'ForeAftBW_deg': fore_aft_bw_raw / 10.0,
-        'AthwartBW_deg': athwart_bw_raw / 10.0,
-        'ProjectorType': projector_type,
-        'ProjectorAngle': projector_angle,
-        'RangeFiltMin': range_filt_min,
-        'RangeFiltMax': range_filt_max,
-        'DepthFiltMin': depth_filt_min,
-        'DepthFiltMax': depth_filt_max,
-        'FiltersActive': filters_active,
-        'Temperature_tenth_degC': temperature,
-        'BeamSpacing_deg': beam_spacing_raw / 10000.0,
-    }
+    fields = new_reson8100_specific()
+    fields['Latency_ms'] = latency
+    fields['PingNumber'] = ping_number
+    fields['SonarID'] = sonar_id
+    fields['SonarModel'] = sonar_model
+    fields['Frequency_kHz'] = frequency
+    fields['SurfaceVelocity_mps'] = surface_velocity_raw / 10.0
+    fields['SampleRate_Hz'] = sample_rate
+    fields['PingRate_mHz'] = ping_rate
+    fields['Mode'] = mode
+    fields['Range_m'] = rng
+    fields['Power'] = power
+    fields['Gain'] = gain
+    fields['PulseWidth_us'] = pulse_width
+    fields['TvgSpreading'] = tvg_spreading
+    fields['TvgAbsorption'] = tvg_absorption
+    fields['ForeAftBW_deg'] = fore_aft_bw_raw / 10.0
+    fields['AthwartBW_deg'] = athwart_bw_raw / 10.0
+    fields['ProjectorType'] = projector_type
+    fields['ProjectorAngle'] = projector_angle
+    fields['RangeFiltMin'] = range_filt_min
+    fields['RangeFiltMax'] = range_filt_max
+    fields['DepthFiltMin'] = depth_filt_min
+    fields['DepthFiltMax'] = depth_filt_max
+    fields['FiltersActive'] = filters_active
+    fields['Temperature_tenth_degC'] = temperature
+    fields['BeamSpacing_deg'] = beam_spacing_raw / 10000.0
     return fields, pos - start
 
 
@@ -1529,6 +1815,40 @@ def _encode_reson8100_specific(record):
 for _id in (122, 123, 124, 125, 126, 127):
     _PING_SENSOR_SPECIFIC_CODECS[_id] = ("Reson8100", _decode_reson8100_specific, _encode_reson8100_specific)
 del _id
+
+
+def new_reson7125_specific():
+    """
+    Return a new dictionary with every Reson7125 sensor-specific subrecord
+    field name present, in the same shape _decode_reson7125_specific()
+    returns, each pre-set to 0 or 0.0. gsf.h defines no "not available"
+    value for these vendor-specific fields, so these are the only defaults
+    available. _decode_reson7125_specific() builds its result starting from
+    this same template, so the two can never define a different set of field
+    names. To write one, fill it in and set it as a ping record's
+    'SensorSpecific', with 'SensorSpecificID' set to this family's subrecord
+    id (138).
+
+    :return: a dictionary with every Reson7125 sensor-specific field name as
+        a key, pre-set to its default.
+    """
+    return {
+        'ProtocolVersion': 0, 'DeviceID': 0, 'MajorSerialNumber': 0, 'MinorSerialNumber': 0,
+        'PingNumber': 0, 'MultiPingSeq': 0, 'Frequency_Hz': 0.0, 'SampleRate_Hz': 0.0,
+        'ReceiverBandwidth_Hz': 0.0, 'TxPulseWidth_s': 0.0, 'TxPulseTypeID': 0,
+        'TxPulseEnvelopeID': 0, 'TxPulseEnvelopeParam': 0.0, 'TxPulseReserved': 0,
+        'MaxPingRate_pps': 0.0, 'PingPeriod_s': 0.0, 'Range_m': 0.0, 'Power_dB': 0.0,
+        'Gain_dB': 0.0, 'ControlFlags': 0, 'ProjectorID': 0,
+        'ProjectorSteerAnglVert_deg': 0.0, 'ProjectorSteerAnglHoriz_deg': 0.0,
+        'ProjectorBeamWidthVert_deg': 0.0, 'ProjectorBeamWidthHoriz_deg': 0.0,
+        'ProjectorBeamFocalPt_m': 0.0, 'ProjectorBeamWeightingWindowType': 0,
+        'ProjectorBeamWeightingWindowParam': 0, 'TransmitFlags': 0, 'HydrophoneID': 0,
+        'ReceivingBeamWeightingWindowType': 0, 'ReceivingBeamWeightingWindowParam': 0,
+        'ReceiveFlags': 0, 'ReceiveBeamWidth_deg': 0.0, 'RangeFiltMin_m': 0.0,
+        'RangeFiltMax_m': 0.0, 'DepthFiltMin_m': 0.0, 'DepthFiltMax_m': 0.0,
+        'Absorption_dBkm': 0.0, 'SoundVelocity_mps': 0.0, 'Spreading_dB': 0.0,
+        'RawDataFrom7027': 0, 'SvSource': 0, 'LayerCompFlag': 0,
+    }
 
 
 def _decode_reson7125_specific(payload, pos):
@@ -1613,52 +1933,51 @@ def _decode_reson7125_specific(payload, pos):
     layer_comp_flag = payload[pos]; pos += 1
     pos += 8  # reserved_3
 
-    fields = {
-        'ProtocolVersion': protocol_version,
-        'DeviceID': device_id,
-        'MajorSerialNumber': major_serial_number,
-        'MinorSerialNumber': minor_serial_number,
-        'PingNumber': ping_number,
-        'MultiPingSeq': multi_ping_seq,
-        'Frequency_Hz': frequency_raw / 1.0e3,
-        'SampleRate_Hz': sample_rate_raw / 1.0e4,
-        'ReceiverBandwidth_Hz': receiver_bandwidth_raw / 1.0e4,
-        'TxPulseWidth_s': tx_pulse_width_raw / 1.0e7,
-        'TxPulseTypeID': tx_pulse_type_id,
-        'TxPulseEnvelopeID': tx_pulse_envlp_id,
-        'TxPulseEnvelopeParam': tx_pulse_envlp_param_raw / 1.0e2,
-        'TxPulseReserved': tx_pulse_reserved,
-        'MaxPingRate_pps': max_ping_rate_raw / 1.0e6,
-        'PingPeriod_s': ping_period_raw / 1.0e6,
-        'Range_m': range_raw / 1.0e2,
-        'Power_dB': power_raw / 1.0e2,
-        'Gain_dB': gain_raw / 1.0e2,
-        'ControlFlags': control_flags,
-        'ProjectorID': projector_id,
-        'ProjectorSteerAnglVert_deg': projector_steer_vert_raw / 1.0e3,
-        'ProjectorSteerAnglHoriz_deg': projector_steer_horz_raw / 1.0e3,
-        'ProjectorBeamWidthVert_deg': projector_bw_vert_raw / 1.0e2,
-        'ProjectorBeamWidthHoriz_deg': projector_bw_horz_raw / 1.0e2,
-        'ProjectorBeamFocalPt_m': projector_focal_pt_raw / 1.0e2,
-        'ProjectorBeamWeightingWindowType': projector_weight_window_type,
-        'ProjectorBeamWeightingWindowParam': projector_weight_window_param,
-        'TransmitFlags': transmit_flags,
-        'HydrophoneID': hydrophone_id,
-        'ReceivingBeamWeightingWindowType': rx_weight_window_type,
-        'ReceivingBeamWeightingWindowParam': rx_weight_window_param,
-        'ReceiveFlags': receive_flags,
-        'ReceiveBeamWidth_deg': rx_beam_width_raw / 1.0e2,
-        'RangeFiltMin_m': range_filt_min_raw / 1.0e1,
-        'RangeFiltMax_m': range_filt_max_raw / 1.0e1,
-        'DepthFiltMin_m': depth_filt_min_raw / 1.0e1,
-        'DepthFiltMax_m': depth_filt_max_raw / 1.0e1,
-        'Absorption_dBkm': absorption_raw / 1.0e3,
-        'SoundVelocity_mps': sound_velocity_raw / 1.0e1,
-        'Spreading_dB': spreading_raw / 1.0e3,
-        'RawDataFrom7027': raw_data_from_7027,
-        'SvSource': sv_source,
-        'LayerCompFlag': layer_comp_flag,
-    }
+    fields = new_reson7125_specific()
+    fields['ProtocolVersion'] = protocol_version
+    fields['DeviceID'] = device_id
+    fields['MajorSerialNumber'] = major_serial_number
+    fields['MinorSerialNumber'] = minor_serial_number
+    fields['PingNumber'] = ping_number
+    fields['MultiPingSeq'] = multi_ping_seq
+    fields['Frequency_Hz'] = frequency_raw / 1.0e3
+    fields['SampleRate_Hz'] = sample_rate_raw / 1.0e4
+    fields['ReceiverBandwidth_Hz'] = receiver_bandwidth_raw / 1.0e4
+    fields['TxPulseWidth_s'] = tx_pulse_width_raw / 1.0e7
+    fields['TxPulseTypeID'] = tx_pulse_type_id
+    fields['TxPulseEnvelopeID'] = tx_pulse_envlp_id
+    fields['TxPulseEnvelopeParam'] = tx_pulse_envlp_param_raw / 1.0e2
+    fields['TxPulseReserved'] = tx_pulse_reserved
+    fields['MaxPingRate_pps'] = max_ping_rate_raw / 1.0e6
+    fields['PingPeriod_s'] = ping_period_raw / 1.0e6
+    fields['Range_m'] = range_raw / 1.0e2
+    fields['Power_dB'] = power_raw / 1.0e2
+    fields['Gain_dB'] = gain_raw / 1.0e2
+    fields['ControlFlags'] = control_flags
+    fields['ProjectorID'] = projector_id
+    fields['ProjectorSteerAnglVert_deg'] = projector_steer_vert_raw / 1.0e3
+    fields['ProjectorSteerAnglHoriz_deg'] = projector_steer_horz_raw / 1.0e3
+    fields['ProjectorBeamWidthVert_deg'] = projector_bw_vert_raw / 1.0e2
+    fields['ProjectorBeamWidthHoriz_deg'] = projector_bw_horz_raw / 1.0e2
+    fields['ProjectorBeamFocalPt_m'] = projector_focal_pt_raw / 1.0e2
+    fields['ProjectorBeamWeightingWindowType'] = projector_weight_window_type
+    fields['ProjectorBeamWeightingWindowParam'] = projector_weight_window_param
+    fields['TransmitFlags'] = transmit_flags
+    fields['HydrophoneID'] = hydrophone_id
+    fields['ReceivingBeamWeightingWindowType'] = rx_weight_window_type
+    fields['ReceivingBeamWeightingWindowParam'] = rx_weight_window_param
+    fields['ReceiveFlags'] = receive_flags
+    fields['ReceiveBeamWidth_deg'] = rx_beam_width_raw / 1.0e2
+    fields['RangeFiltMin_m'] = range_filt_min_raw / 1.0e1
+    fields['RangeFiltMax_m'] = range_filt_max_raw / 1.0e1
+    fields['DepthFiltMin_m'] = depth_filt_min_raw / 1.0e1
+    fields['DepthFiltMax_m'] = depth_filt_max_raw / 1.0e1
+    fields['Absorption_dBkm'] = absorption_raw / 1.0e3
+    fields['SoundVelocity_mps'] = sound_velocity_raw / 1.0e1
+    fields['Spreading_dB'] = spreading_raw / 1.0e3
+    fields['RawDataFrom7027'] = raw_data_from_7027
+    fields['SvSource'] = sv_source
+    fields['LayerCompFlag'] = layer_comp_flag
     return fields, pos - start
 
 
@@ -1738,6 +2057,48 @@ def _encode_reson7125_specific(record):
 
 
 _PING_SENSOR_SPECIFIC_CODECS[138] = ("Reson7125", _decode_reson7125_specific, _encode_reson7125_specific)
+
+
+def new_reson_tseries_specific():
+    """
+    Return a new dictionary with every ResonTSeries sensor-specific
+    subrecord field name present, in the same shape
+    _decode_reson_tseries_specific() returns, each pre-set to 0 or 0.0, or
+    an empty string. gsf.h defines no "not available" value for these
+    vendor-specific fields, so these are the only defaults available.
+    _decode_reson_tseries_specific() builds its result starting from this
+    same template, so the two can never define a different set of field
+    names. To write one, fill it in and set it as a ping record's
+    'SensorSpecific', with 'SensorSpecificID' set to this family's subrecord
+    id (155).
+
+    :return: a dictionary with every ResonTSeries sensor-specific field name
+        as a key, pre-set to its default.
+    """
+    return {
+        'ProtocolVersion': 0, 'DeviceID': 0, 'NumberDevices': 0, 'SystemEnumerator': 0,
+        'MajorSerialNumber': 0, 'MinorSerialNumber': 0, 'PingNumber': 0, 'MultiPingSeq': 0,
+        'Frequency_Hz': 0.0, 'SampleRate_Hz': 0.0, 'ReceiverBandwidth_Hz': 0.0,
+        'TxPulseWidth_s': 0.0, 'TxPulseTypeID': 0, 'TxPulseEnvelopeID': 0,
+        'TxPulseEnvelopeParam': 0.0, 'TxPulseMode': 0, 'TxPulseReserved': 0,
+        'MaxPingRate_pps': 0.0, 'PingPeriod_s': 0.0, 'Range_m': 0.0, 'Power_dB': 0.0,
+        'Gain_dB': 0.0, 'ControlFlags': 0, 'ProjectorID': 0,
+        'ProjectorSteerAnglVert_deg': 0.0, 'ProjectorSteerAnglHoriz_deg': 0.0,
+        'ProjectorBeamWidthVert_deg': 0.0, 'ProjectorBeamWidthHoriz_deg': 0.0,
+        'ProjectorBeamFocalPt_m': 0.0, 'ProjectorBeamWeightingWindowType': 0,
+        'ProjectorBeamWeightingWindowParam': 0, 'TransmitFlags': 0, 'HydrophoneID': 0,
+        'ReceivingBeamWeightingWindowType': 0, 'ReceivingBeamWeightingWindowParam': 0,
+        'ReceiveFlags': 0, 'ReceiveBeamWidth_deg': 0.0, 'RangeFiltMin_m': 0.0,
+        'RangeFiltMax_m': 0.0, 'DepthFiltMin_m': 0.0, 'DepthFiltMax_m': 0.0,
+        'Absorption_dBkm': 0.0, 'SoundVelocity_mps': 0.0, 'SvSource': 0, 'Spreading_dB': 0.0,
+        'BeamSpacingMode': 0, 'SonarSourceMode': 0, 'CoverageMode': 0,
+        'CoverageAngle_deg': 0.0, 'HorizontalReceiverSteeringAngle_deg': 0.0,
+        'UncertaintyType': 0, 'TransmitterSteeringAngle_rad': 0.0, 'AppliedRoll_rad': 0.0,
+        'DetectionAlgorithm': 0, 'DetectionFlags': 0, 'DeviceDescription': '',
+        'MatchFilterControl': 0, 'MatchFilterStartFreq_Hz': 0.0, 'MatchFilterEndFreq_Hz': 0.0,
+        'MatchFilterWindowType': 0, 'MatchFilterShadingValue': 0.0,
+        'MatchFilterEffectivePulseWidth_s': 0.0,
+    }
 
 
 def _decode_reson_tseries_specific(payload, pos):
@@ -1871,70 +2232,69 @@ def _decode_reson_tseries_specific(payload, pos):
     if sound_velocity_hp_raw > 0:
         sound_velocity_mps = sound_velocity_hp_raw / 1.0e6
 
-    fields = {
-        'ProtocolVersion': protocol_version,
-        'DeviceID': device_id,
-        'NumberDevices': number_devices,
-        'SystemEnumerator': system_enumerator,
-        'MajorSerialNumber': major_serial_number,
-        'MinorSerialNumber': minor_serial_number,
-        'PingNumber': ping_number,
-        'MultiPingSeq': multi_ping_seq,
-        'Frequency_Hz': frequency_raw / 1.0e3,
-        'SampleRate_Hz': sample_rate_raw / 1.0e4,
-        'ReceiverBandwidth_Hz': receiver_bandwidth_raw / 1.0e4,
-        'TxPulseWidth_s': tx_pulse_width_raw / 1.0e7,
-        'TxPulseTypeID': tx_pulse_type_id,
-        'TxPulseEnvelopeID': tx_pulse_envlp_id,
-        'TxPulseEnvelopeParam': tx_pulse_envlp_param_raw / 1.0e2,
-        'TxPulseMode': tx_pulse_mode,
-        'TxPulseReserved': tx_pulse_reserved,
-        'MaxPingRate_pps': max_ping_rate_raw / 1.0e6,
-        'PingPeriod_s': ping_period_raw / 1.0e6,
-        'Range_m': range_raw / 1.0e2,
-        'Power_dB': power_raw / 1.0e2,
-        'Gain_dB': gain_raw / 1.0e2,
-        'ControlFlags': control_flags,
-        'ProjectorID': projector_id,
-        'ProjectorSteerAnglVert_deg': projector_steer_vert_raw / 1.0e3,
-        'ProjectorSteerAnglHoriz_deg': projector_steer_horz_raw / 1.0e3,
-        'ProjectorBeamWidthVert_deg': projector_bw_vert_raw / 1.0e2,
-        'ProjectorBeamWidthHoriz_deg': projector_bw_horz_raw / 1.0e2,
-        'ProjectorBeamFocalPt_m': projector_focal_pt_raw / 1.0e2,
-        'ProjectorBeamWeightingWindowType': projector_weight_window_type,
-        'ProjectorBeamWeightingWindowParam': projector_weight_window_param,
-        'TransmitFlags': transmit_flags,
-        'HydrophoneID': hydrophone_id,
-        'ReceivingBeamWeightingWindowType': rx_weight_window_type,
-        'ReceivingBeamWeightingWindowParam': rx_weight_window_param,
-        'ReceiveFlags': receive_flags,
-        'ReceiveBeamWidth_deg': rx_beam_width_raw / 1.0e2,
-        'RangeFiltMin_m': range_filt_min_raw / 1.0e1,
-        'RangeFiltMax_m': range_filt_max_raw / 1.0e1,
-        'DepthFiltMin_m': depth_filt_min_raw / 1.0e1,
-        'DepthFiltMax_m': depth_filt_max_raw / 1.0e1,
-        'Absorption_dBkm': absorption_raw / 1.0e3,
-        'SoundVelocity_mps': sound_velocity_mps,
-        'SvSource': sv_source,
-        'Spreading_dB': spreading_raw / 1.0e3,
-        'BeamSpacingMode': beam_spacing_mode,
-        'SonarSourceMode': sonar_source_mode,
-        'CoverageMode': coverage_mode,
-        'CoverageAngle_deg': coverage_angle_raw / 1.0e2,
-        'HorizontalReceiverSteeringAngle_deg': horiz_rx_steer_raw / 1.0e2,
-        'UncertaintyType': uncertainty_type,
-        'TransmitterSteeringAngle_rad': tx_steering_angle_raw / 1.0e5,
-        'AppliedRoll_rad': applied_roll_raw / 1.0e5,
-        'DetectionAlgorithm': detection_algorithm,
-        'DetectionFlags': detection_flags,
-        'DeviceDescription': device_description,
-        'MatchFilterControl': match_filter_control,
-        'MatchFilterStartFreq_Hz': match_filter_start_freq_raw / 1.0e2,
-        'MatchFilterEndFreq_Hz': match_filter_end_freq_raw / 1.0e2,
-        'MatchFilterWindowType': match_filter_window_type,
-        'MatchFilterShadingValue': match_filter_shading_raw / 1.0e4,
-        'MatchFilterEffectivePulseWidth_s': match_filter_pulse_width_raw / 1.0e11,
-    }
+    fields = new_reson_tseries_specific()
+    fields['ProtocolVersion'] = protocol_version
+    fields['DeviceID'] = device_id
+    fields['NumberDevices'] = number_devices
+    fields['SystemEnumerator'] = system_enumerator
+    fields['MajorSerialNumber'] = major_serial_number
+    fields['MinorSerialNumber'] = minor_serial_number
+    fields['PingNumber'] = ping_number
+    fields['MultiPingSeq'] = multi_ping_seq
+    fields['Frequency_Hz'] = frequency_raw / 1.0e3
+    fields['SampleRate_Hz'] = sample_rate_raw / 1.0e4
+    fields['ReceiverBandwidth_Hz'] = receiver_bandwidth_raw / 1.0e4
+    fields['TxPulseWidth_s'] = tx_pulse_width_raw / 1.0e7
+    fields['TxPulseTypeID'] = tx_pulse_type_id
+    fields['TxPulseEnvelopeID'] = tx_pulse_envlp_id
+    fields['TxPulseEnvelopeParam'] = tx_pulse_envlp_param_raw / 1.0e2
+    fields['TxPulseMode'] = tx_pulse_mode
+    fields['TxPulseReserved'] = tx_pulse_reserved
+    fields['MaxPingRate_pps'] = max_ping_rate_raw / 1.0e6
+    fields['PingPeriod_s'] = ping_period_raw / 1.0e6
+    fields['Range_m'] = range_raw / 1.0e2
+    fields['Power_dB'] = power_raw / 1.0e2
+    fields['Gain_dB'] = gain_raw / 1.0e2
+    fields['ControlFlags'] = control_flags
+    fields['ProjectorID'] = projector_id
+    fields['ProjectorSteerAnglVert_deg'] = projector_steer_vert_raw / 1.0e3
+    fields['ProjectorSteerAnglHoriz_deg'] = projector_steer_horz_raw / 1.0e3
+    fields['ProjectorBeamWidthVert_deg'] = projector_bw_vert_raw / 1.0e2
+    fields['ProjectorBeamWidthHoriz_deg'] = projector_bw_horz_raw / 1.0e2
+    fields['ProjectorBeamFocalPt_m'] = projector_focal_pt_raw / 1.0e2
+    fields['ProjectorBeamWeightingWindowType'] = projector_weight_window_type
+    fields['ProjectorBeamWeightingWindowParam'] = projector_weight_window_param
+    fields['TransmitFlags'] = transmit_flags
+    fields['HydrophoneID'] = hydrophone_id
+    fields['ReceivingBeamWeightingWindowType'] = rx_weight_window_type
+    fields['ReceivingBeamWeightingWindowParam'] = rx_weight_window_param
+    fields['ReceiveFlags'] = receive_flags
+    fields['ReceiveBeamWidth_deg'] = rx_beam_width_raw / 1.0e2
+    fields['RangeFiltMin_m'] = range_filt_min_raw / 1.0e1
+    fields['RangeFiltMax_m'] = range_filt_max_raw / 1.0e1
+    fields['DepthFiltMin_m'] = depth_filt_min_raw / 1.0e1
+    fields['DepthFiltMax_m'] = depth_filt_max_raw / 1.0e1
+    fields['Absorption_dBkm'] = absorption_raw / 1.0e3
+    fields['SoundVelocity_mps'] = sound_velocity_mps
+    fields['SvSource'] = sv_source
+    fields['Spreading_dB'] = spreading_raw / 1.0e3
+    fields['BeamSpacingMode'] = beam_spacing_mode
+    fields['SonarSourceMode'] = sonar_source_mode
+    fields['CoverageMode'] = coverage_mode
+    fields['CoverageAngle_deg'] = coverage_angle_raw / 1.0e2
+    fields['HorizontalReceiverSteeringAngle_deg'] = horiz_rx_steer_raw / 1.0e2
+    fields['UncertaintyType'] = uncertainty_type
+    fields['TransmitterSteeringAngle_rad'] = tx_steering_angle_raw / 1.0e5
+    fields['AppliedRoll_rad'] = applied_roll_raw / 1.0e5
+    fields['DetectionAlgorithm'] = detection_algorithm
+    fields['DetectionFlags'] = detection_flags
+    fields['DeviceDescription'] = device_description
+    fields['MatchFilterControl'] = match_filter_control
+    fields['MatchFilterStartFreq_Hz'] = match_filter_start_freq_raw / 1.0e2
+    fields['MatchFilterEndFreq_Hz'] = match_filter_end_freq_raw / 1.0e2
+    fields['MatchFilterWindowType'] = match_filter_window_type
+    fields['MatchFilterShadingValue'] = match_filter_shading_raw / 1.0e4
+    fields['MatchFilterEffectivePulseWidth_s'] = match_filter_pulse_width_raw / 1.0e11
     return fields, pos - start
 
 
@@ -2037,6 +2397,33 @@ def _encode_reson_tseries_specific(record):
 _PING_SENSOR_SPECIFIC_CODECS[155] = ("ResonTSeries", _decode_reson_tseries_specific, _encode_reson_tseries_specific)
 
 
+def new_geoswath_plus_specific():
+    """
+    Return a new dictionary with every GeoSwathPlus sensor-specific
+    subrecord field name present, in the same shape
+    _decode_geoswath_plus_specific() returns, each pre-set to 0 or 0.0.
+    gsf.h defines no "not available" value for these vendor-specific fields,
+    so these are the only defaults available.
+    _decode_geoswath_plus_specific() builds its result starting from this
+    same template, so the two can never define a different set of field
+    names. To write one, fill it in and set it as a ping record's
+    'SensorSpecific', with 'SensorSpecificID' set to this family's subrecord
+    id (136).
+
+    :return: a dictionary with every GeoSwathPlus sensor-specific field name
+        as a key, pre-set to its default.
+    """
+    return {
+        'DataSource': 0, 'Side': 0, 'ModelNumber': 0, 'Frequency_Hz': 0.0,
+        'EchosounderType': 0, 'PingNumber': 0, 'NumNavSamples': 0, 'NumAttitudeSamples': 0,
+        'NumHeadingSamples': 0, 'NumMiniSVSSamples': 0, 'NumEchosounderSamples': 0,
+        'NumRaaSamples': 0, 'MeanSV_mps': 0.0, 'SurfaceVelocity_mps': 0.0, 'ValidBeams': 0,
+        'SampleRate_Hz': 0.0, 'PulseLength_us': 0.0, 'PingLength_m': 0, 'TransmitPower': 0,
+        'SidescanGainChannel': 0, 'Stabilization': 0, 'GpsQuality': 0,
+        'RangeUncertainty_m': 0.0, 'AngleUncertainty_deg': 0.0,
+    }
+
+
 def _decode_geoswath_plus_specific(payload, pos):
     """
     Decode a GSF_SWATH_BATHY_SUBRECORD_GEOSWATH_PLUS_SPECIFIC subrecord
@@ -2084,32 +2471,31 @@ def _decode_geoswath_plus_specific(payload, pos):
     (angle_uncertainty_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
     pos += 32  # spare
 
-    fields = {
-        'DataSource': data_source,
-        'Side': side,
-        'ModelNumber': model_number,
-        'Frequency_Hz': frequency_raw * 10.0,
-        'EchosounderType': echosounder_type,
-        'PingNumber': ping_number,
-        'NumNavSamples': num_nav_samples,
-        'NumAttitudeSamples': num_attitude_samples,
-        'NumHeadingSamples': num_heading_samples,
-        'NumMiniSVSSamples': num_minisvs_samples,
-        'NumEchosounderSamples': num_echosounder_samples,
-        'NumRaaSamples': num_raa_samples,
-        'MeanSV_mps': mean_sv_raw / 20.0,
-        'SurfaceVelocity_mps': surface_velocity_raw / 20.0,
-        'ValidBeams': valid_beams,
-        'SampleRate_Hz': sample_rate_raw * 10.0,
-        'PulseLength_us': float(pulse_length),
-        'PingLength_m': ping_length,
-        'TransmitPower': transmit_power,
-        'SidescanGainChannel': sidescan_gain_channel,
-        'Stabilization': stabilization,
-        'GpsQuality': gps_quality,
-        'RangeUncertainty_m': range_uncertainty_raw / 1000.0,
-        'AngleUncertainty_deg': angle_uncertainty_raw / 100.0,
-    }
+    fields = new_geoswath_plus_specific()
+    fields['DataSource'] = data_source
+    fields['Side'] = side
+    fields['ModelNumber'] = model_number
+    fields['Frequency_Hz'] = frequency_raw * 10.0
+    fields['EchosounderType'] = echosounder_type
+    fields['PingNumber'] = ping_number
+    fields['NumNavSamples'] = num_nav_samples
+    fields['NumAttitudeSamples'] = num_attitude_samples
+    fields['NumHeadingSamples'] = num_heading_samples
+    fields['NumMiniSVSSamples'] = num_minisvs_samples
+    fields['NumEchosounderSamples'] = num_echosounder_samples
+    fields['NumRaaSamples'] = num_raa_samples
+    fields['MeanSV_mps'] = mean_sv_raw / 20.0
+    fields['SurfaceVelocity_mps'] = surface_velocity_raw / 20.0
+    fields['ValidBeams'] = valid_beams
+    fields['SampleRate_Hz'] = sample_rate_raw * 10.0
+    fields['PulseLength_us'] = float(pulse_length)
+    fields['PingLength_m'] = ping_length
+    fields['TransmitPower'] = transmit_power
+    fields['SidescanGainChannel'] = sidescan_gain_channel
+    fields['Stabilization'] = stabilization
+    fields['GpsQuality'] = gps_quality
+    fields['RangeUncertainty_m'] = range_uncertainty_raw / 1000.0
+    fields['AngleUncertainty_deg'] = angle_uncertainty_raw / 100.0
     return fields, pos - start
 
 
@@ -2162,6 +2548,29 @@ def _encode_geoswath_plus_specific(record):
 
 _PING_SENSOR_SPECIFIC_CODECS[136] = (
     "GeoSwathPlus", _decode_geoswath_plus_specific, _encode_geoswath_plus_specific)
+
+
+def new_klein5410bss_specific():
+    """
+    Return a new dictionary with every Klein5410Bss sensor-specific
+    subrecord field name present, in the same shape
+    _decode_klein5410bss_specific() returns, each pre-set to 0 or 0.0. gsf.h
+    defines no "not available" value for these vendor-specific fields, so
+    these are the only defaults available. _decode_klein5410bss_specific()
+    builds its result starting from this same template, so the two can never
+    define a different set of field names. To write one, fill it in and set
+    it as a ping record's 'SensorSpecific', with 'SensorSpecificID' set to
+    this family's subrecord id (137).
+
+    :return: a dictionary with every Klein5410Bss sensor-specific field name
+        as a key, pre-set to its default.
+    """
+    return {
+        'DataSource': 0, 'Side': 0, 'ModelNumber': 0, 'AcousticFrequency_Hz': 0.0,
+        'SamplingFrequency_Hz': 0.0, 'PingNumber': 0, 'NumSamples': 0, 'NumRaaSamples': 0,
+        'ErrorFlags': 0, 'Range': 0, 'FishDepth_V': 0.0, 'FishAltitude_m': 0.0,
+        'SoundSpeed_mps': 0.0, 'TxWaveform': 0, 'Altimeter': 0, 'RawDataConfig': 0,
+    }
 
 
 def _decode_klein5410bss_specific(payload, pos):
@@ -2217,24 +2626,23 @@ def _decode_klein5410bss_specific(payload, pos):
     (raw_data_config,) = struct.unpack_from('>I', payload, pos); pos += 4
     pos += 32  # spare
 
-    fields = {
-        'DataSource': data_source,
-        'Side': side,
-        'ModelNumber': model_number,
-        'AcousticFrequency_Hz': acoustic_frequency_raw / 1000.0,
-        'SamplingFrequency_Hz': sampling_frequency_raw / 1000.0,
-        'PingNumber': ping_number,
-        'NumSamples': num_samples,
-        'NumRaaSamples': num_raa_samples,
-        'ErrorFlags': error_flags,
-        'Range': rng,
-        'FishDepth_V': fish_depth_raw / 1000.0,
-        'FishAltitude_m': fish_altitude_raw / 1000.0,
-        'SoundSpeed_mps': sound_speed_raw / 1000.0,
-        'TxWaveform': tx_waveform,
-        'Altimeter': altimeter,
-        'RawDataConfig': raw_data_config,
-    }
+    fields = new_klein5410bss_specific()
+    fields['DataSource'] = data_source
+    fields['Side'] = side
+    fields['ModelNumber'] = model_number
+    fields['AcousticFrequency_Hz'] = acoustic_frequency_raw / 1000.0
+    fields['SamplingFrequency_Hz'] = sampling_frequency_raw / 1000.0
+    fields['PingNumber'] = ping_number
+    fields['NumSamples'] = num_samples
+    fields['NumRaaSamples'] = num_raa_samples
+    fields['ErrorFlags'] = error_flags
+    fields['Range'] = rng
+    fields['FishDepth_V'] = fish_depth_raw / 1000.0
+    fields['FishAltitude_m'] = fish_altitude_raw / 1000.0
+    fields['SoundSpeed_mps'] = sound_speed_raw / 1000.0
+    fields['TxWaveform'] = tx_waveform
+    fields['Altimeter'] = altimeter
+    fields['RawDataConfig'] = raw_data_config
     return fields, pos - start
 
 
@@ -2292,6 +2700,26 @@ _PING_SENSOR_SPECIFIC_CODECS[137] = (
     "Klein5410Bss", _decode_klein5410bss_specific, _encode_klein5410bss_specific)
 
 
+def new_sass_specific():
+    """
+    Return a new dictionary with every SASS sensor-specific subrecord field
+    name present, in the same shape _decode_sass_specific() returns, each
+    pre-set to 0 or 0.0. gsf.h defines no "not available" value for these
+    vendor-specific fields, so these are the only defaults available.
+    _decode_sass_specific() builds its result starting from this same
+    template, so the two can never define a different set of field names. To
+    write one, fill it in and set it as a ping record's 'SensorSpecific',
+    with 'SensorSpecificID' set to this family's subrecord ids (108, 112).
+
+    :return: a dictionary with every SASS sensor-specific field name as a
+        key, pre-set to its default.
+    """
+    return {
+        'LeftmostBeam': 0, 'RightmostBeam': 0, 'TotalBeams': 0, 'NavMode': 0, 'PingNumber': 0,
+        'MissionNumber': 0,
+    }
+
+
 def _decode_sass_specific(payload, pos):
     """
     Decode a GSF_SWATH_BATHY_SUBRECORD_SASS_SPECIFIC (id 108) or
@@ -2327,14 +2755,13 @@ def _decode_sass_specific(payload, pos):
     (ping_number,) = struct.unpack_from('>H', payload, pos); pos += 2
     (mission_number,) = struct.unpack_from('>H', payload, pos); pos += 2
 
-    fields = {
-        'LeftmostBeam': leftmost_beam,
-        'RightmostBeam': rightmost_beam,
-        'TotalBeams': total_beams,
-        'NavMode': nav_mode,
-        'PingNumber': ping_number,
-        'MissionNumber': mission_number,
-    }
+    fields = new_sass_specific()
+    fields['LeftmostBeam'] = leftmost_beam
+    fields['RightmostBeam'] = rightmost_beam
+    fields['TotalBeams'] = total_beams
+    fields['NavMode'] = nav_mode
+    fields['PingNumber'] = ping_number
+    fields['MissionNumber'] = mission_number
     return fields, pos - start
 
 
@@ -2369,6 +2796,34 @@ def _encode_sass_specific(record):
 
 _PING_SENSOR_SPECIFIC_CODECS[108] = ("SASS", _decode_sass_specific, _encode_sass_specific)
 _PING_SENSOR_SPECIFIC_CODECS[112] = ("TypeIIISeaBeam", _decode_sass_specific, _encode_sass_specific)
+
+
+def new_delta_t_specific():
+    """
+    Return a new dictionary with every DeltaT sensor-specific subrecord
+    field name present, in the same shape _decode_delta_t_specific()
+    returns, each pre-set to 0 or 0.0, an empty string, or None (for a
+    time). gsf.h defines no "not available" value for these vendor-specific
+    fields, so these are the only defaults available.
+    _decode_delta_t_specific() builds its result starting from this same
+    template, so the two can never define a different set of field names. To
+    write one, fill it in and set it as a ping record's 'SensorSpecific',
+    with 'SensorSpecificID' set to this family's subrecord id (150).
+
+    :return: a dictionary with every DeltaT sensor-specific field name as a
+        key, pre-set to its default.
+    """
+    return {
+        'DecodeFileType': '', 'Version': 0, 'PingByteSize': 0, 'InterrogationTime': None,
+        'SamplesPerBeam': 0, 'SectorSize_deg': 0.0, 'StartAngle_deg': 0.0,
+        'AngleIncrement_deg': 0.0, 'AcousticRange_m': 0, 'AcousticFrequency_kHz': 0,
+        'SoundVelocity_mps': 0.0, 'RangeResolution_cm': 0.0, 'ProfileTiltAngle_deg': 0.0,
+        'RepetitionRate_ms': 0.0, 'PingNumber': 0, 'IntensityFlag': 0, 'PingLatency_s': 0.0,
+        'DataLatency_s': 0.0, 'SampleRateFlag': 0, 'OptionFlags': 0, 'NumPingsAvg': 0,
+        'CenterPingTimeOffset_s': 0.0, 'UserDefinedByte': 0, 'Altitude_m': 0.0,
+        'ExternalSensorFlags': 0, 'PulseLength_s': 0.0, 'ForeAftBeamwidth_deg': 0.0,
+        'AthwartshipsBeamwidth_deg': 0.0,
+    }
 
 
 def _decode_delta_t_specific(payload, pos):
@@ -2428,36 +2883,35 @@ def _decode_delta_t_specific(payload, pos):
     athwartships_beamwidth_raw = payload[pos]; pos += 1
     pos += 32  # spare
 
-    fields = {
-        'DecodeFileType': decode_file_type,
-        'Version': version,
-        'PingByteSize': ping_byte_size,
-        'InterrogationTime': _gsf_timestamp(sec, nsec),
-        'SamplesPerBeam': samples_per_beam,
-        'SectorSize_deg': float(sector_size_raw),
-        'StartAngle_deg': start_angle_raw / 100.0 - 180.0,
-        'AngleIncrement_deg': angle_increment_raw / 100.0,
-        'AcousticRange_m': acoustic_range,
-        'AcousticFrequency_kHz': acoustic_frequency,
-        'SoundVelocity_mps': sound_velocity_raw / 10.0,
-        'RangeResolution_cm': float(range_resolution_raw),
-        'ProfileTiltAngle_deg': profile_tilt_angle_raw - 180.0,
-        'RepetitionRate_ms': float(repetition_rate_raw),
-        'PingNumber': ping_number,
-        'IntensityFlag': intensity_flag,
-        'PingLatency_s': ping_latency_raw / 10000.0,
-        'DataLatency_s': data_latency_raw / 10000.0,
-        'SampleRateFlag': sample_rate_flag,
-        'OptionFlags': option_flags,
-        'NumPingsAvg': num_pings_avg,
-        'CenterPingTimeOffset_s': center_ping_time_offset_raw / 10000.0,
-        'UserDefinedByte': user_defined_byte,
-        'Altitude_m': altitude_raw / 100.0,
-        'ExternalSensorFlags': external_sensor_flags,
-        'PulseLength_s': pulse_length_raw / 1.0e6,
-        'ForeAftBeamwidth_deg': fore_aft_beamwidth_raw / 10.0,
-        'AthwartshipsBeamwidth_deg': athwartships_beamwidth_raw / 10.0,
-    }
+    fields = new_delta_t_specific()
+    fields['DecodeFileType'] = decode_file_type
+    fields['Version'] = version
+    fields['PingByteSize'] = ping_byte_size
+    fields['InterrogationTime'] = _gsf_timestamp(sec, nsec)
+    fields['SamplesPerBeam'] = samples_per_beam
+    fields['SectorSize_deg'] = float(sector_size_raw)
+    fields['StartAngle_deg'] = start_angle_raw / 100.0 - 180.0
+    fields['AngleIncrement_deg'] = angle_increment_raw / 100.0
+    fields['AcousticRange_m'] = acoustic_range
+    fields['AcousticFrequency_kHz'] = acoustic_frequency
+    fields['SoundVelocity_mps'] = sound_velocity_raw / 10.0
+    fields['RangeResolution_cm'] = float(range_resolution_raw)
+    fields['ProfileTiltAngle_deg'] = profile_tilt_angle_raw - 180.0
+    fields['RepetitionRate_ms'] = float(repetition_rate_raw)
+    fields['PingNumber'] = ping_number
+    fields['IntensityFlag'] = intensity_flag
+    fields['PingLatency_s'] = ping_latency_raw / 10000.0
+    fields['DataLatency_s'] = data_latency_raw / 10000.0
+    fields['SampleRateFlag'] = sample_rate_flag
+    fields['OptionFlags'] = option_flags
+    fields['NumPingsAvg'] = num_pings_avg
+    fields['CenterPingTimeOffset_s'] = center_ping_time_offset_raw / 10000.0
+    fields['UserDefinedByte'] = user_defined_byte
+    fields['Altitude_m'] = altitude_raw / 100.0
+    fields['ExternalSensorFlags'] = external_sensor_flags
+    fields['PulseLength_s'] = pulse_length_raw / 1.0e6
+    fields['ForeAftBeamwidth_deg'] = fore_aft_beamwidth_raw / 10.0
+    fields['AthwartshipsBeamwidth_deg'] = athwartships_beamwidth_raw / 10.0
     return fields, pos - start
 
 
@@ -2481,7 +2935,8 @@ def _encode_delta_t_specific(record):
     body = decode_file_type
     body += struct.pack('>B', int(g('Version', 0)) & 0xFF)
     body += struct.pack('>H', int(g('PingByteSize', 0)))
-    sec, nsec = _gsf_epoch(g('InterrogationTime', 0))
+    interrogation_time = g('InterrogationTime')
+    sec, nsec = _gsf_epoch(interrogation_time) if interrogation_time is not None else (0, 0)
     body += struct.pack('>2I', sec, nsec)
     body += struct.pack('>H', int(g('SamplesPerBeam', 0)))
     body += struct.pack('>H', _gsf_round(g('SectorSize_deg', 0.0)))
@@ -2513,6 +2968,35 @@ def _encode_delta_t_specific(record):
 
 
 _PING_SENSOR_SPECIFIC_CODECS[150] = ("DeltaT", _decode_delta_t_specific, _encode_delta_t_specific)
+
+
+def new_r2sonic_specific():
+    """
+    Return a new dictionary with every R2Sonic sensor-specific subrecord
+    field name present, in the same shape _decode_r2sonic_specific()
+    returns, each pre-set to 0 or 0.0, an empty string, or None (for a
+    time). gsf.h defines no "not available" value for these vendor-specific
+    fields, so these are the only defaults available.
+    _decode_r2sonic_specific() builds its result starting from this same
+    template, so the two can never define a different set of field names. To
+    write one, fill it in and set it as a ping record's 'SensorSpecific',
+    with 'SensorSpecificID' set to this family's subrecord ids (151, 152,
+    153).
+
+    :return: a dictionary with every R2Sonic sensor-specific field name as a
+        key, pre-set to its default.
+    """
+    return {
+        'ModelNumber': '', 'SerialNumber': '', 'PingTime': None, 'PingNumber': 0,
+        'PingPeriod_s': 0.0, 'SoundSpeed_mps': 0.0, 'Frequency_Hz': 0.0, 'TxPower_dB': 0.0,
+        'TxPulseWidth_s': 0.0, 'TxBeamwidthVert_deg': 0.0, 'TxBeamwidthHoriz_deg': 0.0,
+        'TxSteeringVert_deg': 0.0, 'TxSteeringHoriz_deg': 0.0, 'TxMiscInfo': 0,
+        'RxBandwidth_Hz': 0.0, 'RxSampleRate_Hz': 0.0, 'RxRange_m': 0.0, 'RxGain_dB': 0.0,
+        'RxSpreading': 0.0, 'RxAbsorption_dBkm': 0.0, 'RxMountTilt_deg': 0.0, 'RxMiscInfo': 0,
+        'Reserved': 0, 'NumBeams': 0, 'A0MoreInfo': [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        'A2MoreInfo': [0.0, 0.0, 0.0, 0.0, 0.0, 0.0], 'G0DepthGateMin_s': 0.0,
+        'G0DepthGateMax_s': 0.0, 'G0DepthGateSlope_deg': 0.0,
+    }
 
 
 def _decode_r2sonic_specific(payload, pos):
@@ -2570,37 +3054,36 @@ def _decode_r2sonic_specific(payload, pos):
     (g0_depth_gate_slope_raw,) = struct.unpack_from('>i', payload, pos); pos += 4
     pos += 32  # spare
 
-    fields = {
-        'ModelNumber': model_number,
-        'SerialNumber': serial_number,
-        'PingTime': _gsf_timestamp(sec, nsec),
-        'PingNumber': ping_number,
-        'PingPeriod_s': ping_period_raw / 1.0e6,
-        'SoundSpeed_mps': sound_speed_raw / 1.0e2,
-        'Frequency_Hz': frequency_raw / 1.0e3,
-        'TxPower_dB': tx_power_raw / 1.0e2,
-        'TxPulseWidth_s': tx_pulse_width_raw / 1.0e7,
-        'TxBeamwidthVert_deg': tx_beamwidth_vert_raw / 1.0e6,
-        'TxBeamwidthHoriz_deg': tx_beamwidth_horiz_raw / 1.0e6,
-        'TxSteeringVert_deg': tx_steering_vert_raw / 1.0e6,
-        'TxSteeringHoriz_deg': tx_steering_horiz_raw / 1.0e6,
-        'TxMiscInfo': tx_misc_info,
-        'RxBandwidth_Hz': rx_bandwidth_raw / 1.0e4,
-        'RxSampleRate_Hz': rx_sample_rate_raw / 1.0e3,
-        'RxRange_m': rx_range_raw / 1.0e5,
-        'RxGain_dB': rx_gain_raw / 1.0e2,
-        'RxSpreading': rx_spreading_raw / 1.0e3,
-        'RxAbsorption_dBkm': rx_absorption_raw / 1.0e3,
-        'RxMountTilt_deg': rx_mount_tilt_raw / 1.0e6,
-        'RxMiscInfo': rx_misc_info,
-        'Reserved': reserved,
-        'NumBeams': num_beams,
-        'A0MoreInfo': a0_more_info,
-        'A2MoreInfo': a2_more_info,
-        'G0DepthGateMin_s': g0_depth_gate_min_raw / 1.0e6,
-        'G0DepthGateMax_s': g0_depth_gate_max_raw / 1.0e6,
-        'G0DepthGateSlope_deg': g0_depth_gate_slope_raw / 1.0e6,
-    }
+    fields = new_r2sonic_specific()
+    fields['ModelNumber'] = model_number
+    fields['SerialNumber'] = serial_number
+    fields['PingTime'] = _gsf_timestamp(sec, nsec)
+    fields['PingNumber'] = ping_number
+    fields['PingPeriod_s'] = ping_period_raw / 1.0e6
+    fields['SoundSpeed_mps'] = sound_speed_raw / 1.0e2
+    fields['Frequency_Hz'] = frequency_raw / 1.0e3
+    fields['TxPower_dB'] = tx_power_raw / 1.0e2
+    fields['TxPulseWidth_s'] = tx_pulse_width_raw / 1.0e7
+    fields['TxBeamwidthVert_deg'] = tx_beamwidth_vert_raw / 1.0e6
+    fields['TxBeamwidthHoriz_deg'] = tx_beamwidth_horiz_raw / 1.0e6
+    fields['TxSteeringVert_deg'] = tx_steering_vert_raw / 1.0e6
+    fields['TxSteeringHoriz_deg'] = tx_steering_horiz_raw / 1.0e6
+    fields['TxMiscInfo'] = tx_misc_info
+    fields['RxBandwidth_Hz'] = rx_bandwidth_raw / 1.0e4
+    fields['RxSampleRate_Hz'] = rx_sample_rate_raw / 1.0e3
+    fields['RxRange_m'] = rx_range_raw / 1.0e5
+    fields['RxGain_dB'] = rx_gain_raw / 1.0e2
+    fields['RxSpreading'] = rx_spreading_raw / 1.0e3
+    fields['RxAbsorption_dBkm'] = rx_absorption_raw / 1.0e3
+    fields['RxMountTilt_deg'] = rx_mount_tilt_raw / 1.0e6
+    fields['RxMiscInfo'] = rx_misc_info
+    fields['Reserved'] = reserved
+    fields['NumBeams'] = num_beams
+    fields['A0MoreInfo'] = a0_more_info
+    fields['A2MoreInfo'] = a2_more_info
+    fields['G0DepthGateMin_s'] = g0_depth_gate_min_raw / 1.0e6
+    fields['G0DepthGateMax_s'] = g0_depth_gate_max_raw / 1.0e6
+    fields['G0DepthGateSlope_deg'] = g0_depth_gate_slope_raw / 1.0e6
     return fields, pos - start
 
 
@@ -2970,6 +3453,62 @@ def _table_rows(table, limit=None):
         yield {key: values[i] for key, values in columns.items()}
 
 
+def new_em4_specific():
+    """
+    Return a new dictionary with every EM4 sensor-specific subrecord field
+    name present, in the same shape _decode_em4_specific() returns, each
+    pre-set to 0 or 0.0, or None (for a time). gsf.h defines no "not
+    available" value for these vendor-specific fields, so these are the only
+    defaults available. _decode_em4_specific() builds its result starting
+    from this same template, so the two can never define a different set of
+    field names. To write one, fill it in and set it as a ping record's
+    'SensorSpecific', with 'SensorSpecificID' set to this family's subrecord
+    ids (133, 134, 135, 149, 157).
+
+    :return: a dictionary with every EM4 sensor-specific field name as a
+        key, pre-set to its default.
+    """
+    return {
+        'ModelNumber': 0, 'PingCounter': 0, 'SerialNumber': 0, 'SurfaceVelocity_mps': 0.0,
+        'TransducerDepth_m': 0.0, 'ValidDetections': 0, 'SamplingFrequency_Hz': 0.0,
+        'DopplerCorrScale': 0, 'VehicleDepth_m': 0.0, 'RunTime.ModelNumber': 0,
+        'RunTime.PingTime': None, 'RunTime.PingCounter': 0, 'RunTime.SerialNumber': 0,
+        'RunTime.OperatorStationStatus': 0, 'RunTime.ProcessingUnitStatus': 0,
+        'RunTime.BspStatus': 0, 'RunTime.HeadTransceiverStatus': 0, 'RunTime.Mode': 0,
+        'RunTime.FilterID': 0, 'RunTime.MinDepth_m': 0.0, 'RunTime.MaxDepth_m': 0.0,
+        'RunTime.Absorption_dBkm': 0.0, 'RunTime.TxPulseLength_us': 0.0,
+        'RunTime.TxBeamWidth_deg': 0.0, 'RunTime.TxPowerReMax_dB': 0.0,
+        'RunTime.RxBeamWidth_deg': 0.0, 'RunTime.RxBandwidth_Hz': 0.0,
+        'RunTime.RxFixedGain_dB': 0.0, 'RunTime.TvgCrossOverAngle_deg': 0.0,
+        'RunTime.SsvSource': 0, 'RunTime.MaxPortSwathWidth_m': 0, 'RunTime.BeamSpacing': 0,
+        'RunTime.MaxPortCoverage_deg': 0, 'RunTime.Stabilization': 0,
+        'RunTime.MaxStbdCoverage_deg': 0, 'RunTime.MaxStbdSwathWidth_m': 0,
+        'RunTime.TxAlongTilt_deg': 0.0, 'RunTime.FilterID2': 0, 'PuStatus.PuCpuLoad_pct': 0.0,
+        'PuStatus.SensorStatus': 0, 'PuStatus.AchievedPortCoverage_deg': 0,
+        'PuStatus.AchievedStbdCoverage_deg': 0, 'PuStatus.YawStabilization_deg': 0.0,
+    }
+
+
+def new_em4_tx_sector():
+    """
+    Return a new dictionary with every per-row field name of the EM4
+    sensor-specific subrecord's 'TxSectors' table present, each pre-set to its
+    default: one row of that table. _decode_em4_specific() builds each row
+    starting from this same template, so the two can never define a
+    different set of field names. A caller building the table can fill in
+    one of these per row and assign pd.DataFrame([row, ...]) (or the
+    equivalent dictionary of column name -> array) to
+    record['SensorSpecific']['TxSectors'].
+
+    :return: a dictionary with every 'TxSectors' column name as a key.
+    """
+    return {
+        'TiltAngle_deg': 0.0, 'FocusRange_m': 0.0, 'SignalLength_sec': 0.0,
+        'TransmitDelay_sec': 0.0, 'CenterFrequency_Hz': 0.0, 'MeanAbsorption_dBkm': 0.0,
+        'WaveformID': 0, 'SectorNumber': 0, 'SignalBandwidth_Hz': 0.0,
+    }
+
+
 def _decode_em4_specific(payload, pos):
     """
     Decode a GSF_SWATH_BATHY_SUBRECORD_EM4_SPECIFIC subrecord (one of ids
@@ -3017,7 +3556,7 @@ def _decode_em4_specific(payload, pos):
 
     sector_rows = []
     for _ in range(transmit_sectors):
-        row = {}
+        row = new_em4_tx_sector()
         (tilt_angle_raw,) = struct.unpack_from('>h', payload, pos); pos += 2
         row['TiltAngle_deg'] = tilt_angle_raw / 100.0
         (focus_range_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
@@ -3044,17 +3583,16 @@ def _decode_em4_specific(payload, pos):
     pu_status_fields, consumed = _decode_em_pu_status(payload, pos)
     pos += consumed
 
-    record = {
-        'ModelNumber': model_number,
-        'PingCounter': ping_counter,
-        'SerialNumber': serial_number,
-        'SurfaceVelocity_mps': surface_velocity_raw / 10.0,
-        'TransducerDepth_m': transducer_depth_raw / 20000.0,
-        'ValidDetections': valid_detections,
-        'SamplingFrequency_Hz': sampling_frequency,
-        'DopplerCorrScale': doppler_corr_scale,
-        'VehicleDepth_m': vehicle_depth_raw / 1000.0,
-    }
+    record = new_em4_specific()
+    record['ModelNumber'] = model_number
+    record['PingCounter'] = ping_counter
+    record['SerialNumber'] = serial_number
+    record['SurfaceVelocity_mps'] = surface_velocity_raw / 10.0
+    record['TransducerDepth_m'] = transducer_depth_raw / 20000.0
+    record['ValidDetections'] = valid_detections
+    record['SamplingFrequency_Hz'] = sampling_frequency
+    record['DopplerCorrScale'] = doppler_corr_scale
+    record['VehicleDepth_m'] = vehicle_depth_raw / 1000.0
     record.update({'RunTime.' + k: v for k, v in run_time_fields.items()})
     record.update({'PuStatus.' + k: v for k, v in pu_status_fields.items()})
 
@@ -3140,6 +3678,63 @@ _PING_SENSOR_SPECIFIC_CODECS[149] = ("EM4", _decode_em4_specific, _encode_em4_sp
 _PING_SENSOR_SPECIFIC_CODECS[157] = ("EM4", _decode_em4_specific, _encode_em4_specific)
 
 
+def new_em3raw_specific():
+    """
+    Return a new dictionary with every EM3Raw sensor-specific subrecord
+    field name present, in the same shape _decode_em3raw_specific() returns,
+    each pre-set to 0 or 0.0, or None (for a time). gsf.h defines no "not
+    available" value for these vendor-specific fields, so these are the only
+    defaults available. _decode_em3raw_specific() builds its result starting
+    from this same template, so the two can never define a different set of
+    field names. To write one, fill it in and set it as a ping record's
+    'SensorSpecific', with 'SensorSpecificID' set to this family's subrecord
+    ids (140, 141, 142, 143, 144, 145, 146, 147, 148).
+
+    :return: a dictionary with every EM3Raw sensor-specific field name as a
+        key, pre-set to its default.
+    """
+    return {
+        'ModelNumber': 0, 'PingCounter': 0, 'SerialNumber': 0, 'SurfaceVelocity_mps': 0.0,
+        'TransducerDepth_m': 0.0, 'ValidDetections': 0, 'SamplingFrequency_Hz': 0.0,
+        'VehicleDepth_m': 0.0, 'DepthDifference_m': 0.0, 'OffsetMultiplier': 0,
+        'RunTime.ModelNumber': 0, 'RunTime.PingTime': None, 'RunTime.PingCounter': 0,
+        'RunTime.SerialNumber': 0, 'RunTime.OperatorStationStatus': 0,
+        'RunTime.ProcessingUnitStatus': 0, 'RunTime.BspStatus': 0,
+        'RunTime.HeadTransceiverStatus': 0, 'RunTime.Mode': 0, 'RunTime.FilterID': 0,
+        'RunTime.MinDepth_m': 0.0, 'RunTime.MaxDepth_m': 0.0, 'RunTime.Absorption_dBkm': 0.0,
+        'RunTime.TxPulseLength_us': 0.0, 'RunTime.TxBeamWidth_deg': 0.0,
+        'RunTime.TxPowerReMax_dB': 0.0, 'RunTime.RxBeamWidth_deg': 0.0,
+        'RunTime.RxBandwidth_Hz': 0.0, 'RunTime.RxFixedGain_dB': 0.0,
+        'RunTime.TvgCrossOverAngle_deg': 0.0, 'RunTime.SsvSource': 0,
+        'RunTime.MaxPortSwathWidth_m': 0, 'RunTime.BeamSpacing': 0,
+        'RunTime.MaxPortCoverage_deg': 0, 'RunTime.Stabilization': 0,
+        'RunTime.MaxStbdCoverage_deg': 0, 'RunTime.MaxStbdSwathWidth_m': 0,
+        'RunTime.TxAlongTilt_deg': 0.0, 'RunTime.FilterID2': 0, 'PuStatus.PuCpuLoad_pct': 0.0,
+        'PuStatus.SensorStatus': 0, 'PuStatus.AchievedPortCoverage_deg': 0,
+        'PuStatus.AchievedStbdCoverage_deg': 0, 'PuStatus.YawStabilization_deg': 0.0,
+    }
+
+
+def new_em3raw_tx_sector():
+    """
+    Return a new dictionary with every per-row field name of the EM3Raw
+    sensor-specific subrecord's 'TxSectors' table present, each pre-set to its
+    default: one row of that table. _decode_em3raw_specific() builds each row
+    starting from this same template, so the two can never define a
+    different set of field names. A caller building the table can fill in
+    one of these per row and assign pd.DataFrame([row, ...]) (or the
+    equivalent dictionary of column name -> array) to
+    record['SensorSpecific']['TxSectors'].
+
+    :return: a dictionary with every 'TxSectors' column name as a key.
+    """
+    return {
+        'TiltAngle_deg': 0.0, 'FocusRange_m': 0.0, 'SignalLength_sec': 0.0,
+        'TransmitDelay_sec': 0.0, 'CenterFrequency_Hz': 0.0, 'WaveformID': 0,
+        'SectorNumber': 0, 'SignalBandwidth_Hz': 0.0,
+    }
+
+
 def _decode_em3raw_specific(payload, pos):
     """
     Decode a GSF_SWATH_BATHY_SUBRECORD_EM3xxx_RAW_SPECIFIC subrecord (one
@@ -3202,7 +3797,7 @@ def _decode_em3raw_specific(payload, pos):
 
     sector_rows = []
     for _ in range(transmit_sectors):
-        row = {}
+        row = new_em3raw_tx_sector()
         (tilt_angle_raw,) = struct.unpack_from('>h', payload, pos); pos += 2
         row['TiltAngle_deg'] = tilt_angle_raw / 100.0
         (focus_range_raw,) = struct.unpack_from('>H', payload, pos); pos += 2
@@ -3227,18 +3822,17 @@ def _decode_em3raw_specific(payload, pos):
     pu_status_fields, consumed = _decode_em_pu_status(payload, pos)
     pos += consumed
 
-    record = {
-        'ModelNumber': model_number,
-        'PingCounter': ping_counter,
-        'SerialNumber': serial_number,
-        'SurfaceVelocity_mps': surface_velocity_raw / 10.0,
-        'TransducerDepth_m': transducer_depth_raw / 20000.0,
-        'ValidDetections': valid_detections,
-        'SamplingFrequency_Hz': sampling_frequency,
-        'VehicleDepth_m': vehicle_depth_raw / 1000.0,
-        'DepthDifference_m': depth_difference_raw / 100.0,
-        'OffsetMultiplier': offset_multiplier,
-    }
+    record = new_em3raw_specific()
+    record['ModelNumber'] = model_number
+    record['PingCounter'] = ping_counter
+    record['SerialNumber'] = serial_number
+    record['SurfaceVelocity_mps'] = surface_velocity_raw / 10.0
+    record['TransducerDepth_m'] = transducer_depth_raw / 20000.0
+    record['ValidDetections'] = valid_detections
+    record['SamplingFrequency_Hz'] = sampling_frequency
+    record['VehicleDepth_m'] = vehicle_depth_raw / 1000.0
+    record['DepthDifference_m'] = depth_difference_raw / 100.0
+    record['OffsetMultiplier'] = offset_multiplier
     record.update({'RunTime.' + k: v for k, v in run_time_fields.items()})
     record.update({'PuStatus.' + k: v for k, v in pu_status_fields.items()})
 
@@ -3492,6 +4086,54 @@ def _encode_em3_run_time(fields):
     return out
 
 
+def new_em3_specific():
+    """
+    Return a new dictionary with every EM3 sensor-specific subrecord field
+    name present, in the same shape _decode_em3_specific() returns, each
+    pre-set to 0 or 0.0. gsf.h defines no "not available" value for these
+    vendor-specific fields, so these are the only defaults available.
+    _decode_em3_specific() builds its result starting from this same
+    template, so the two can never define a different set of field names. To
+    write one, fill it in and set it as a ping record's 'SensorSpecific',
+    with 'SensorSpecificID' set to this family's subrecord ids (118, 119,
+    120, 128, 129, 130, 131, 132, 139).
+
+    :return: a dictionary with every EM3 sensor-specific field name as a
+        key, pre-set to its default.
+    """
+    return {
+        'ModelNumber': 0, 'PingNumber': 0, 'SerialNumber': 0, 'SurfaceVelocity_mps': 0.0,
+        'TransducerDepth_m': 0.0, 'ValidBeams': 0, 'SampleRate_Hz': 0,
+        'DepthDifference_m': 0.0, 'OffsetMultiplier': 0,
+    }
+
+
+def new_em3_run_time():
+    """
+    Return a new dictionary with every per-row field name of the EM3
+    sensor-specific subrecord's 'RunTime' table present, each pre-set to its
+    default: one row of that table. _decode_em3_specific() builds each row
+    starting from this same template, so the two can never define a
+    different set of field names. A caller building the table can fill in
+    one of these per row and assign pd.DataFrame([row, ...]) (or the
+    equivalent dictionary of column name -> array) to
+    record['SensorSpecific']['RunTime']. 'Head' (0 or 1) selects which
+    sonar head's run-time block the row is.
+
+    :return: a dictionary with every 'RunTime' column name as a key.
+    """
+    return {
+        'Head': 0, 'ModelNumber': 0, 'PingTime': None, 'PingNumber': 0, 'SerialNumber': 0,
+        'SystemStatus': 0, 'Mode': 0, 'FilterID': 0, 'MinDepth_m': 0.0, 'MaxDepth_m': 0.0,
+        'Absorption_dBkm': 0.0, 'PulseLength_us': 0.0, 'TransmitBeamWidth_deg': 0.0,
+        'PowerReduction_dB': 0, 'ReceiveBeamWidth_deg': 0.0, 'ReceiveBandwidth_Hz': 0,
+        'ReceiveGain_dB': 0, 'CrossOverAngle_deg': 0, 'SsvSource': 0, 'PortSwathWidth_m': 0,
+        'BeamSpacing': 0, 'PortCoverageSector_deg': 0, 'Stabilization': 0,
+        'StbdCoverageSector_deg': 0, 'StbdSwathWidth_m': 0, 'HiloFreqAbsorpRatio': 0,
+        'SwathWidth_m': 0, 'CoverageSector_deg': 0,
+    }
+
+
 def _decode_em3_specific(payload, pos):
     """
     Decode a GSF_SWATH_BATHY_SUBRECORD_EM3xxx_SPECIFIC subrecord (the
@@ -3540,28 +4182,27 @@ def _decode_em3_specific(payload, pos):
     (offset_multiplier,) = struct.unpack_from('>b', payload, pos); pos += 1
     (run_time_id,) = struct.unpack_from('>I', payload, pos); pos += 4
 
-    record = {
-        'ModelNumber': model_number,
-        'PingNumber': ping_number,
-        'SerialNumber': serial_number,
-        'SurfaceVelocity_mps': surface_velocity_raw / 10.0,
-        'TransducerDepth_m': transducer_depth_raw / 100.0,
-        'ValidBeams': valid_beams,
-        'SampleRate_Hz': sample_rate,
-        'DepthDifference_m': depth_difference_raw / 100.0,
-        'OffsetMultiplier': offset_multiplier,
-    }
+    record = new_em3_specific()
+    record['ModelNumber'] = model_number
+    record['PingNumber'] = ping_number
+    record['SerialNumber'] = serial_number
+    record['SurfaceVelocity_mps'] = surface_velocity_raw / 10.0
+    record['TransducerDepth_m'] = transducer_depth_raw / 100.0
+    record['ValidBeams'] = valid_beams
+    record['SampleRate_Hz'] = sample_rate
+    record['DepthDifference_m'] = depth_difference_raw / 100.0
+    record['OffsetMultiplier'] = offset_multiplier
 
     run_time_rows = []
     if run_time_id & 0x1:
         head0_fields, consumed = _decode_em3_run_time(payload, pos)
         pos += consumed
-        run_time_rows.append({'Head': 0, **head0_fields})
+        run_time_rows.append(dict(new_em3_run_time(), **head0_fields, Head=0))
 
         if run_time_id & 0x2:
             head1_fields, consumed = _decode_em3_run_time(payload, pos)
             pos += consumed
-            run_time_rows.append({'Head': 1, **head1_fields})
+            run_time_rows.append(dict(new_em3_run_time(), **head1_fields, Head=1))
 
     if run_time_rows:
         record['RunTime'] = _rows_to_table(run_time_rows)
@@ -3676,6 +4317,26 @@ _SINGLE_BEAM_SENSOR_SPECIFIC_NAMES = {
 }
 
 
+def new_echotrac_specific():
+    """
+    Return a new dictionary with every Echotrac sensor-specific subrecord
+    field name present, in the same shape _decode_echotrac_specific()
+    returns, each pre-set to 0 or 0.0. gsf.h defines no "not available"
+    value for these vendor-specific fields, so these are the only defaults
+    available. _decode_echotrac_specific() builds its result starting from
+    this same template, so the two can never define a different set of field
+    names. To write one, fill it in and set it as a single-beam ping
+    record's 'SensorSpecific', with 'SensorSpecificID' set to this family's
+    subrecord ids (201, 202).
+
+    :return: a dictionary with every Echotrac sensor-specific field name as
+        a key, pre-set to its default.
+    """
+    return {
+        'NavigationError': 0, 'MppSource': 0, 'TideSource': 0,
+    }
+
+
 def _decode_echotrac_specific(payload, pos):
     """
     Decode a GSF_SINGLE_BEAM_SUBRECORD_ECHOTRAC_SPECIFIC subrecord (id
@@ -3703,11 +4364,10 @@ def _decode_echotrac_specific(payload, pos):
     mpp_source = payload[pos]; pos += 1
     tide_source = payload[pos]; pos += 1
 
-    fields = {
-        'NavigationError': navigation_error,
-        'MppSource': mpp_source,
-        'TideSource': tide_source,
-    }
+    fields = new_echotrac_specific()
+    fields['NavigationError'] = navigation_error
+    fields['MppSource'] = mpp_source
+    fields['TideSource'] = tide_source
     return fields, pos - start
 
 
@@ -3741,6 +4401,27 @@ _SINGLE_BEAM_SENSOR_SPECIFIC_CODECS[201] = ("Echotrac", _decode_echotrac_specifi
 _SINGLE_BEAM_SENSOR_SPECIFIC_CODECS[202] = ("Bathy2000", _decode_echotrac_specific, _encode_echotrac_specific)
 
 
+def new_mgd77_specific():
+    """
+    Return a new dictionary with every MGD77 sensor-specific subrecord field
+    name present, in the same shape _decode_mgd77_specific() returns, each
+    pre-set to 0 or 0.0. gsf.h defines no "not available" value for these
+    vendor-specific fields, so these are the only defaults available.
+    _decode_mgd77_specific() builds its result starting from this same
+    template, so the two can never define a different set of field names. To
+    write one, fill it in and set it as a single-beam ping record's
+    'SensorSpecific', with 'SensorSpecificID' set to this family's subrecord
+    id (203).
+
+    :return: a dictionary with every MGD77 sensor-specific field name as a
+        key, pre-set to its default.
+    """
+    return {
+        'TimeZoneCorr': 0, 'PositionTypeCode': 0, 'CorrectionCode': 0, 'BathyTypeCode': 0,
+        'QualityCode': 0, 'TravelTime_sec': 0.0,
+    }
+
+
 def _decode_mgd77_specific(payload, pos):
     """
     Decode a GSF_SINGLE_BEAM_SUBRECORD_MGD77_SPECIFIC subrecord (id
@@ -3767,14 +4448,13 @@ def _decode_mgd77_specific(payload, pos):
     (quality_code,) = struct.unpack_from('>H', payload, pos); pos += 2
     (travel_time_raw,) = struct.unpack_from('>I', payload, pos); pos += 4
 
-    fields = {
-        'TimeZoneCorr': time_zone_corr,
-        'PositionTypeCode': position_type_code,
-        'CorrectionCode': correction_code,
-        'BathyTypeCode': bathy_type_code,
-        'QualityCode': quality_code,
-        'TravelTime_sec': travel_time_raw / 10000.0,
-    }
+    fields = new_mgd77_specific()
+    fields['TimeZoneCorr'] = time_zone_corr
+    fields['PositionTypeCode'] = position_type_code
+    fields['CorrectionCode'] = correction_code
+    fields['BathyTypeCode'] = bathy_type_code
+    fields['QualityCode'] = quality_code
+    fields['TravelTime_sec'] = travel_time_raw / 10000.0
     return fields, pos - start
 
 
@@ -3806,6 +4486,27 @@ def _encode_mgd77_specific(record):
 _SINGLE_BEAM_SENSOR_SPECIFIC_CODECS[203] = ("MGD77", _decode_mgd77_specific, _encode_mgd77_specific)
 
 
+def new_bdb_specific():
+    """
+    Return a new dictionary with every BDB sensor-specific subrecord field
+    name present, in the same shape _decode_bdb_specific() returns, each
+    pre-set to 0 or 0.0, or an empty string. gsf.h defines no "not
+    available" value for these vendor-specific fields, so these are the only
+    defaults available. _decode_bdb_specific() builds its result starting
+    from this same template, so the two can never define a different set of
+    field names. To write one, fill it in and set it as a single-beam ping
+    record's 'SensorSpecific', with 'SensorSpecificID' set to this family's
+    subrecord id (204).
+
+    :return: a dictionary with every BDB sensor-specific field name as a
+        key, pre-set to its default.
+    """
+    return {
+        'DocNo': 0, 'Eval': '', 'Classification': '', 'TrackAdjFlag': '', 'SourceFlag': '',
+        'PtOrTrackLn': '', 'DatumFlag': '',
+    }
+
+
 def _decode_bdb_specific(payload, pos):
     """
     Decode a GSF_SINGLE_BEAM_SUBRECORD_BDB_SPECIFIC subrecord (id 204),
@@ -3830,22 +4531,22 @@ def _decode_bdb_specific(payload, pos):
     """
     start = pos
     (doc_no,) = struct.unpack_from('>i', payload, pos); pos += 4
-    eval_flag = payload[pos:pos + 1].decode('ascii', 'replace'); pos += 1
-    classification = payload[pos:pos + 1].decode('ascii', 'replace'); pos += 1
-    track_adj_flag = payload[pos:pos + 1].decode('ascii', 'replace'); pos += 1
-    source_flag = payload[pos:pos + 1].decode('ascii', 'replace'); pos += 1
-    pt_or_track_ln = payload[pos:pos + 1].decode('ascii', 'replace'); pos += 1
-    datum_flag = payload[pos:pos + 1].decode('ascii', 'replace'); pos += 1
+    # An unset (NUL) flag byte decodes to '', as _encode_bdb_specific() writes it.
+    eval_flag = payload[pos:pos + 1].decode('ascii', 'replace').rstrip('\x00'); pos += 1
+    classification = payload[pos:pos + 1].decode('ascii', 'replace').rstrip('\x00'); pos += 1
+    track_adj_flag = payload[pos:pos + 1].decode('ascii', 'replace').rstrip('\x00'); pos += 1
+    source_flag = payload[pos:pos + 1].decode('ascii', 'replace').rstrip('\x00'); pos += 1
+    pt_or_track_ln = payload[pos:pos + 1].decode('ascii', 'replace').rstrip('\x00'); pos += 1
+    datum_flag = payload[pos:pos + 1].decode('ascii', 'replace').rstrip('\x00'); pos += 1
 
-    fields = {
-        'DocNo': doc_no,
-        'Eval': eval_flag,
-        'Classification': classification,
-        'TrackAdjFlag': track_adj_flag,
-        'SourceFlag': source_flag,
-        'PtOrTrackLn': pt_or_track_ln,
-        'DatumFlag': datum_flag,
-    }
+    fields = new_bdb_specific()
+    fields['DocNo'] = doc_no
+    fields['Eval'] = eval_flag
+    fields['Classification'] = classification
+    fields['TrackAdjFlag'] = track_adj_flag
+    fields['SourceFlag'] = source_flag
+    fields['PtOrTrackLn'] = pt_or_track_ln
+    fields['DatumFlag'] = datum_flag
     return fields, pos - start
 
 
@@ -3885,6 +4586,26 @@ def _encode_bdb_specific(record):
 _SINGLE_BEAM_SENSOR_SPECIFIC_CODECS[204] = ("BDB", _decode_bdb_specific, _encode_bdb_specific)
 
 
+def new_noshdb_specific():
+    """
+    Return a new dictionary with every NOSHDB sensor-specific subrecord
+    field name present, in the same shape _decode_noshdb_specific() returns,
+    each pre-set to 0 or 0.0. gsf.h defines no "not available" value for
+    these vendor-specific fields, so these are the only defaults available.
+    _decode_noshdb_specific() builds its result starting from this same
+    template, so the two can never define a different set of field names. To
+    write one, fill it in and set it as a single-beam ping record's
+    'SensorSpecific', with 'SensorSpecificID' set to this family's subrecord
+    id (205).
+
+    :return: a dictionary with every NOSHDB sensor-specific field name as a
+        key, pre-set to its default.
+    """
+    return {
+        'TypeCode': 0, 'CartoCode': 0,
+    }
+
+
 def _decode_noshdb_specific(payload, pos):
     """
     Decode a GSF_SINGLE_BEAM_SUBRECORD_NOSHDB_SPECIFIC subrecord (id
@@ -3907,10 +4628,9 @@ def _decode_noshdb_specific(payload, pos):
     (type_code,) = struct.unpack_from('>H', payload, pos); pos += 2
     (carto_code,) = struct.unpack_from('>H', payload, pos); pos += 2
 
-    fields = {
-        'TypeCode': type_code,
-        'CartoCode': carto_code,
-    }
+    fields = new_noshdb_specific()
+    fields['TypeCode'] = type_code
+    fields['CartoCode'] = carto_code
     return fields, pos - start
 
 
@@ -4677,7 +5397,7 @@ def _decode_kmall_specific(payload, pos):
         the number of bytes read from payload.
     """
     start = pos
-    s = {}
+    s = new_kmall_specific()
 
     s['GSFKMALLVersion'] = payload[pos]; pos += 1
     s['DgmType'] = payload[pos]; pos += 1
@@ -4829,15 +5549,33 @@ def new_intensity_time_series_beam():
     """
     Return a new dictionary with every per-beam field name used within a
     GSF_SWATH_BATHY_SUBRECORD_INTENSITY_SERIES_ARRAY subrecord's 'Beams'
-    table, each pre-set to 0: one row of that table. _decode_brb_intensity()
+    table, pre-set to 0: one row of that table. _decode_brb_intensity()
     returns exactly these columns, so the two can never define a different
-    set of field names. Each beam's samples are not part of its row; they
-    live in the subrecord's flat 'Samples' array, in beam order.
+    set of field names. 'DetectRangeSample' is the range of the beam's
+    bottom detection, counted in samples, in the same units as the
+    'Samples' table's 'RangeSample'. Each beam's samples are not part of
+    its row. They are rows of the subrecord's 'Samples' table, which
+    records the beam each sample belongs to.
 
-    :return: a dictionary with 'SampleCount', 'DetectSample', and
-        'StartRangeSamples' present, each pre-set to 0.
+    :return: a dictionary with 'DetectRangeSample' present, pre-set to 0.
     """
-    return {'SampleCount': 0, 'DetectSample': 0, 'StartRangeSamples': 0}
+    return {'DetectRangeSample': 0}
+
+
+def new_intensity_time_series_sample():
+    """
+    Return a new dictionary with every per-sample field name used within a
+    GSF_SWATH_BATHY_SUBRECORD_INTENSITY_SERIES_ARRAY subrecord's 'Samples'
+    table, each pre-set to 0: one row of that table.
+    _decode_brb_intensity() returns exactly these columns, so the two can
+    never define a different set of field names. 'Beam' is the number of
+    the beam the sample belongs to. 'RangeSample' is the sample's range,
+    counted in samples. 'Value' is the sample itself.
+
+    :return: a dictionary with 'Beam', 'RangeSample', and 'Value' present,
+        each pre-set to 0.
+    """
+    return {'Beam': 0, 'RangeSample': 0, 'Value': 0}
 
 
 #: The first 6 bytes of each beam's 12-byte header in a
@@ -4904,19 +5642,74 @@ def _gather_intensity_samples(payload, sample_starts, sample_counts, bits_per_sa
     return samples
 
 
+def _intensity_beam_layout(intensity_record):
+    """
+    Derive, for each beam of an intensity time series record, the three
+    values the file stores in that beam's header: its sample count, the
+    range of its first sample, and the position of its bottom detection
+    counted from that first sample. The record holds these implicitly: a
+    beam's count is how many 'Samples' rows name it, its start range is
+    the 'RangeSample' of its first sample, and its detect position is its
+    'DetectRangeSample' minus that start range. A beam with no samples has
+    no first sample, so its start range is taken to be 0.
+
+    :param intensity_record: a dictionary in the shape
+        _decode_brb_intensity() returns: a 'Beams' table with a
+        'DetectRangeSample' column, and a 'Samples' table with 'Beam',
+        'RangeSample', and 'Value' columns, its rows in beam order.
+
+    :return: a tuple of (sample_counts, start_ranges, detect_samples),
+        each a numpy int64 array with one element per beam.
+
+    :raises ValueError: the 'Samples' rows are not in beam order, name a
+        beam the 'Beams' table does not have, or a beam's 'RangeSample'
+        values are not consecutive, starting from its first sample; or a
+        derived value does not fit its unsigned 16-bit field.
+    """
+    beams = intensity_record.get('Beams')
+    num_beams = _table_length(beams)
+    detect_ranges = (np.asarray(beams['DetectRangeSample'], dtype=np.int64) if num_beams
+                     else np.zeros(0, dtype=np.int64))
+    sample_table = intensity_record.get('Samples')
+    if _table_length(sample_table):
+        beam = np.asarray(sample_table['Beam'], dtype=np.int64)
+        range_sample = np.asarray(sample_table['RangeSample'], dtype=np.int64)
+    else:
+        beam = range_sample = np.zeros(0, dtype=np.int64)
+
+    if len(beam) and (np.any(np.diff(beam) < 0) or beam[0] < 0 or beam[-1] >= num_beams):
+        raise ValueError("IntensityTimeSeries: Samples['Beam'] must be in beam order, "
+                         "and each beam must have a row in Beams")
+    sample_counts = np.bincount(beam, minlength=num_beams).astype(np.int64)
+    first = np.cumsum(sample_counts) - sample_counts
+    start_ranges = np.zeros(num_beams, dtype=np.int64)
+    has_samples = sample_counts > 0
+    start_ranges[has_samples] = range_sample[first[has_samples]]
+    position = np.arange(len(beam)) - first[beam]
+    if np.any(range_sample != start_ranges[beam] + position):
+        raise ValueError("IntensityTimeSeries: each beam's Samples['RangeSample'] values must be "
+                         "consecutive, one per sample, since that is how the file stores them")
+    detect_samples = detect_ranges - start_ranges
+    for name, values in (('sample count', sample_counts), ('start range', start_ranges),
+                         ('detect position', detect_samples)):
+        if len(values) and (values.min() < 0 or values.max() > 0xFFFF):
+            raise ValueError("IntensityTimeSeries: a beam's %s does not fit its 16-bit field" % name)
+    return sample_counts, start_ranges, detect_samples
+
+
 def _split_intensity_samples(intensity_record):
     """
-    Split an intensity time series record's flat 'Samples' array into one
-    array per beam, using its Beams['SampleCount'] column. Each returned
-    array is a view into 'Samples', not a copy.
+    Split an intensity time series record's sample values into one array
+    per beam. The 'Samples' table's rows are in beam order, and each
+    returned array is a view into its 'Value' column, not a copy.
 
     :param intensity_record: a dictionary in the shape
         _decode_brb_intensity() returns.
 
     :return: a list of numpy arrays, one per beam, in beam order.
     """
-    counts = np.asarray(intensity_record['Beams']['SampleCount'])
-    return np.split(np.asarray(intensity_record['Samples']), np.cumsum(counts)[:-1])
+    counts, _starts, _detects = _intensity_beam_layout(intensity_record)
+    return np.split(np.asarray(intensity_record['Samples']['Value']), np.cumsum(counts)[:-1])
 
 
 def _decode_brb_intensity(payload, pos, num_beams, sensor_id):
@@ -4941,8 +5734,9 @@ def _decode_brb_intensity(payload, pos, num_beams, sensor_id):
     fixes where the next begins, but every beam's samples are then
     gathered from the payload in one vectorized step. The result starts
     from new_intensity_time_series_header()'s template, and its 'Beams'
-    columns are those of new_intensity_time_series_beam(), so its field
-    names always match what _encode_brb_intensity() expects.
+    and 'Samples' columns are those of new_intensity_time_series_beam()
+    and new_intensity_time_series_sample(), so its field names always
+    match what _encode_brb_intensity() expects.
 
     :param payload: the raw bytes of the ping record.
     :param pos: the byte offset within payload where this subrecord's
@@ -4958,14 +5752,18 @@ def _decode_brb_intensity(payload, pos, num_beams, sensor_id):
         width. Otherwise, a tuple of (record, bytes_consumed). record is
         a dictionary with 'BitsPerSample', 'AppliedCorrections', any
         fields decoded from a sensor-imagery preamble, 'Beams', a table
-        (a dictionary of column name -> numpy array, one element per
-        beam) of 'SampleCount', 'DetectSample', and 'StartRangeSamples',
-        and 'Samples', one flat numpy array holding every beam's samples
-        in beam order: beam i's are the Beams['SampleCount'][i] entries
-        following those of the beams before it, so
-        np.split(Samples, np.cumsum(Beams['SampleCount'])[:-1]) gives one
-        array per beam. bytes_consumed is the number of bytes read from
-        payload.
+        (a dictionary of column name -> numpy array, one element per beam)
+        with one column, 'DetectRangeSample', the range of each beam's
+        bottom detection counted in samples, and 'Samples', a table with
+        one row per sample, in beam order. The 'Samples' table's 'Beam'
+        column is the number of the beam each sample belongs to. Its
+        'RangeSample' column is the sample's range, counted in samples.
+        Its 'Value' column is the sample itself. The file's per-beam
+        sample count, start range, and detect position are all implicit in
+        these columns (see _intensity_beam_layout()). The per-sample
+        columns let a beam-wise, sector-wise, or range-dependent correction
+        be applied to every sample in one vectorized operation. bytes_consumed is the number of bytes read
+        from payload.
     """
     if num_beams <= 0:
         return None
@@ -5027,13 +5825,22 @@ def _decode_brb_intensity(payload, pos, num_beams, sensor_id):
     headers = header_bytes.view('>u2').astype(np.int64)
     sample_counts = headers[:, 0]
 
+    start_ranges = headers[:, 2]
     record = header
-    record['Beams'] = {
-        'SampleCount': sample_counts,
-        'DetectSample': headers[:, 1],
-        'StartRangeSamples': headers[:, 2],
-    }
-    record['Samples'] = _gather_intensity_samples(payload, sample_starts, sample_counts, bits_per_sample)
+    beams = new_intensity_time_series_beam()
+    beams['DetectRangeSample'] = start_ranges + headers[:, 1]
+    record['Beams'] = beams
+
+    # Each sample's beam number, and its range: its beam's start range plus
+    # its position within the beam.
+    total = int(sample_counts.sum())
+    beam = np.repeat(np.arange(num_beams), sample_counts)
+    position = np.arange(total) - np.repeat(np.cumsum(sample_counts) - sample_counts, sample_counts)
+    samples = new_intensity_time_series_sample()
+    samples['Beam'] = beam
+    samples['RangeSample'] = start_ranges[beam] + position
+    samples['Value'] = _gather_intensity_samples(payload, sample_starts, sample_counts, bits_per_sample)
+    record['Samples'] = samples
     return record, pos - start
 
 
@@ -5095,11 +5902,13 @@ def _encode_brb_intensity(record, sensor_id):
     :param record: a dictionary in the same shape _decode_brb_intensity()
         returns: the header fields new_intensity_time_series_header()
         creates, plus a 'Beams' table (a dictionary of column name ->
-        array-like, or a pandas.DataFrame) with 'SampleCount',
-        'DetectSample', and 'StartRangeSamples' columns, one row per
-        beam, and 'Samples', a flat array-like of every beam's samples in
-        beam order. A header field that is missing from the dictionary is
-        written as zero.
+        array-like, or a pandas.DataFrame) with a 'DetectRangeSample'
+        column, one row per beam, and a 'Samples' table with 'Beam',
+        'RangeSample', and 'Value' columns, one row per sample, in beam
+        order. Each beam's sample count, start range, and detect position
+        are derived from these (see _intensity_beam_layout()); a beam with
+        no samples is written with a start range of 0. A header field
+        that is missing from the dictionary is written as zero.
     :param sensor_id: the vendor "_SPECIFIC" subrecord id for this ping,
         used to decide which sensor-imagery preamble format, if any,
         precedes the per-beam samples. This should be the same value
@@ -5113,8 +5922,9 @@ def _encode_brb_intensity(record, sensor_id):
 
     :raises ValueError: if record's 'BitsPerSample' is not 8, 12, 16, or
         32, matching the reference encoder's GSF_MB_PING_RECORD_ENCODE_FAILED
-        error for the same condition; or if Beams['SampleCount'] does not
-        total the length of 'Samples'.
+        error for the same condition; or if the 'Samples' rows cannot be
+        written as the file's per-beam runs (see
+        _intensity_beam_layout()).
     """
     bits_per_sample = int(record.get('BitsPerSample', 16))
     if bits_per_sample not in (8, 12, 16, 32):
@@ -5141,19 +5951,9 @@ def _encode_brb_intensity(record, sensor_id):
     # else: no sensor-imagery preamble precedes the per-beam samples for
     # this sensor_id (gsf_enc.c's switch default, sensor_size=0).
 
-    beams = record.get('Beams')
-    num_beams = _table_length(beams)
-    if num_beams:
-        sample_counts = np.asarray(beams['SampleCount'], dtype=np.int64)
-        detect_samples = np.asarray(beams['DetectSample'], dtype=np.int64)
-        start_ranges = np.asarray(beams['StartRangeSamples'], dtype=np.int64)
-    else:
-        sample_counts = detect_samples = start_ranges = np.zeros(0, dtype=np.int64)
-    samples = np.asarray(record.get('Samples', ()))
-    if int(sample_counts.sum()) != len(samples):
-        raise ValueError(
-            "IntensityTimeSeries: Beams['SampleCount'] totals %d, but 'Samples' holds %d"
-            % (int(sample_counts.sum()), len(samples)))
+    sample_counts, start_ranges, detect_samples = _intensity_beam_layout(record)
+    sample_table = record.get('Samples')
+    samples = np.asarray(sample_table['Value'] if _table_length(sample_table) else ())
 
     wire, beam_bytes = _pack_intensity_samples(samples, sample_counts, bits_per_sample)
     beam_ends = np.cumsum(beam_bytes).tolist()
@@ -5349,15 +6149,18 @@ def _decode_swath_bathymetry_ping(payload, major_version, scale_factors, decode_
         requested by gsf.print_intensity_series(), not by the default
         gsf.print_records() path.
 
-    :return: record, a dictionary. The fixed ping scalar fields (for
-        example 'PingTime', 'Longitude_deg', 'Latitude_deg',
-        'NumberBeams', 'CenterBeam', 'PingFlags', and 'Heading_deg') are
-        stored flat, unprefixed, at the top level. 'Beams' is present, as
-        a table (a dictionary of column name -> numpy array, one element
-        per beam, in beam order), whenever at least one per-beam array
-        subrecord was decoded for this ping. 'IntensityTimeSeries' is
+    :return: record, a dictionary built from new_swath_bathymetry_ping()'s
+        template. The fixed ping scalar fields (for example 'PingTime',
+        'Longitude_deg', 'Latitude_deg', 'NumberBeams', 'CenterBeam',
+        'PingFlags', and 'Heading_deg') are stored flat, unprefixed, at
+        the top level; Height_m, SEP_m, and GPSTideCorrector_m, which only
+        GSF major version 3 and later store, keep the template's "not
+        available" values for an older file. 'Beams' is a table (a
+        dictionary of column name -> numpy array, one element per beam, in
+        beam order) of every per-beam array subrecord decoded for this
+        ping, empty if there were none. 'IntensityTimeSeries' is
         present, as a dictionary in the shape _decode_brb_intensity()
-        returns (with its own 'Beams' table and flat 'Samples' array),
+        returns (with its own 'Beams' and 'Samples' tables),
         only when decode_intensity is True and the ping carried that
         subrecord. 'SensorSpecificID' (an int) and 'SensorSpecific' (a
         dictionary, which may itself contain tables in the same
@@ -5372,8 +6175,8 @@ def _decode_swath_bathymetry_ping(payload, major_version, scale_factors, decode_
         an unsupported encoding, beam-array data with no matching scale
         factors available, or an unrecognized subrecord id).
     """
-    record = {}
-    notes = []
+    record = new_swath_bathymetry_ping()
+    notes = record['Notes']
 
     (sec, nsec) = struct.unpack_from('>2I', payload, 0)
     record['PingTime'] = _gsf_timestamp(sec, nsec).isoformat()
@@ -5413,7 +6216,7 @@ def _decode_swath_bathymetry_ping(payload, major_version, scale_factors, decode_
         record['GPSTideCorrector_m'] = gps_tide_raw / 1000.0
         pos += 14  # 3 x 4-byte fields, plus 2 spare bytes
 
-    beam_columns = {}
+    beam_columns = record['Beams']
     sensor_id = None
     sensor_specific_id = None
     sensor_specific_record = None
@@ -5503,14 +6306,31 @@ def _decode_swath_bathymetry_ping(payload, major_version, scale_factors, decode_
 
         pos += subrecord_size
 
-    if beam_columns:
-        record['Beams'] = beam_columns
-
     if sensor_specific_id is not None:
         record['SensorSpecificID'] = sensor_specific_id
         record['SensorSpecific'] = sensor_specific_record
 
-    record['Notes'] = notes
+    return record
+
+
+def new_single_beam_ping():
+    """
+    Return a new dictionary with every GSF_RECORD_SINGLE_BEAM_PING field
+    name present, in the same shape _decode_single_beam_ping() returns:
+    every field in _REQUIRED_SINGLE_BEAM_PING_FIELDS set to None as a
+    placeholder that the caller must overwrite (gsf.h defines no "not
+    available" value for them), 'PositioningSystemType' pre-set to 0, and
+    'Notes' an empty list. _decode_single_beam_ping() builds its result
+    starting from this same template, adding 'SensorSpecificID' and
+    'SensorSpecific' only when the ping carries a sensor-specific
+    subrecord (see that family's new_*_specific() template).
+
+    :return: a dictionary with every single-beam-ping field name as a
+        key, pre-filled with a default value as described above.
+    """
+    record = {name: None for name in _REQUIRED_SINGLE_BEAM_PING_FIELDS}
+    record['PositioningSystemType'] = 0
+    record['Notes'] = []
     return record
 
 
@@ -5539,7 +6359,8 @@ def _decode_single_beam_ping(payload):
 
     :param payload: the raw bytes of the single-beam ping record.
 
-    :return: record, a dictionary. The fixed ping scalar fields (for
+    :return: record, a dictionary built from new_single_beam_ping()'s
+        template. The fixed ping scalar fields (for
         example 'PingTime', 'Longitude_deg', 'Latitude_deg', and
         'Depth_m') are stored flat, unprefixed, at the top level.
         'SensorSpecificID' (an int) and 'SensorSpecific' (a dictionary,
@@ -5550,7 +6371,7 @@ def _decode_single_beam_ping(payload):
         always present, as a list of strings describing anything that
         was not decoded.
     """
-    record = {}
+    record = new_single_beam_ping()
     (sec, nsec) = struct.unpack_from('>2I', payload, 0)
     record['PingTime'] = _gsf_timestamp(sec, nsec).isoformat()
 
@@ -5582,7 +6403,7 @@ def _decode_single_beam_ping(payload):
     record['PositioningSystemType'] = pos_type
 
     remaining = len(payload) - 38
-    notes = []
+    notes = record['Notes']
     if remaining > 4:
         word, = struct.unpack_from('>I', payload, 38)
         subrecord_id = (word >> 24) & 0xFF
@@ -5604,7 +6425,6 @@ def _decode_single_beam_ping(payload):
         else:
             notes.append("subrecord id %d (%d bytes) not decoded" % (subrecord_id, subrecord_size))
 
-    record['Notes'] = notes
     return record
 
 
@@ -7219,54 +8039,51 @@ def new_kmall_specific():
     that a caller building a KMALL ping to write doesn't have to remember
     every field name by hand. gsf.h defines no GSF_NULL_* "not available"
     sentinel for these vendor-specific fields, unlike the ping scalars
-    that new_swath_bathymetry_ping_scalars() fills in, so 0 is the only
+    that new_swath_bathymetry_ping() fills in, so 0 is the only
     "not specified" marker available here -- if 0 is itself a plausible
     value for a field you care about, be sure to actually set it in the
     returned dictionary rather than relying on this default. Field
     meanings are documented on _decode_kmall_specific(); convert.md
     points to real sample values.
 
-    Note that GSFKMALLVersion is always forced to 0 when the dictionary
-    is later encoded, regardless of what value is set here for it -- this
-    reproduces a quirk of the reference gsflib C library's encoder, see
-    _encode_kmall_specific() for detail. NumTxSectors and
-    NumExtraDetectionClasses are also omitted from this dictionary, since
-    they are always derived from len(record['TxSectors']) and
-    len(record['ExtraDetectionClasses']) respectively when encoding, not
-    read back out of this dictionary, so there is no point setting them
-    here.
+    Every field _decode_kmall_specific() returns is present, in the same
+    order, and _decode_kmall_specific() builds its result starting from
+    this same template. Three of them are present only for that reason:
+    GSFKMALLVersion is always forced to 0 when the dictionary is encoded,
+    reproducing a quirk of the reference gsflib C library's encoder (see
+    _encode_kmall_specific()), and NumTxSectors and
+    NumExtraDetectionClasses are always derived from the number of rows in
+    record['TxSectors'] and record['ExtraDetectionClasses'] when encoding,
+    so there is no point setting any of the three here.
 
     :return: a dictionary with every valid KMALL_SPECIFIC scalar field
         name as a key, pre-filled with a default value as described
         above.
     """
     return {
-        'DgmType': 0, 'DgmVersion': 0, 'SystemID': 0, 'EchoSounderID': 0,
-        'NumBytesCmnPart': 0, 'PingCnt': 0, 'RxFansPerPing': 0, 'RxFanIndex': 0,
-        'SwathsPerPing': 0, 'SwathAlongPosition': 0, 'TxTransducerInd': 0,
+        'GSFKMALLVersion': 0, 'DgmType': 0, 'DgmVersion': 0, 'SystemID': 0,
+        'EchoSounderID': 0, 'NumBytesCmnPart': 0, 'PingCnt': 0, 'RxFansPerPing': 0,
+        'RxFanIndex': 0, 'SwathsPerPing': 0, 'SwathAlongPosition': 0, 'TxTransducerInd': 0,
         'RxTransducerInd': 0, 'NumRxTransducers': 0, 'AlgorithmType': 0,
-        'NumBytesInfoData': 0, 'PingRate_Hz': 0.0, 'BeamSpacing': 0,
-        'DepthMode': 0, 'SubDepthMode': 0, 'DistanceBtwSwath': 0,
-        'DetectionMode': 0, 'PulseForm': 0, 'FrequencyMode_Hz': 0.0,
-        'FreqRangeLowLim_Hz': 0.0, 'FreqRangeHighLim_Hz': 0.0,
+        'NumBytesInfoData': 0, 'PingRate_Hz': 0.0, 'BeamSpacing': 0, 'DepthMode': 0,
+        'SubDepthMode': 0, 'DistanceBtwSwath': 0, 'DetectionMode': 0, 'PulseForm': 0,
+        'FrequencyMode_Hz': 0.0, 'FreqRangeLowLim_Hz': 0.0, 'FreqRangeHighLim_Hz': 0.0,
         'MaxTotalTxPulseLength_sec': 0.0, 'MaxEffTxPulseLength_sec': 0.0,
-        'MaxEffTxBandWidth_Hz': 0.0, 'AbsCoeff_dBPerkm': 0.0,
-        'PortSectorEdge_deg': 0.0, 'StarbSectorEdge_deg': 0.0,
-        'PortMeanCov_deg': 0.0, 'StarbMeanCov_deg': 0.0,
-        'PortMeanCov_m': 0.0, 'StarbMeanCov_m': 0.0,
-        'ModeAndStabilisation': 0, 'RuntimeFilter1': 0, 'RuntimeFilter2': 0,
-        'PipeTrackingStatus': 0, 'TransmitArraySizeUsed_deg': 0.0,
-        'ReceiveArraySizeUsed_deg': 0.0, 'TransmitPower_dB': 0.0,
-        'SLrampUpTimeRemaining': 0, 'YawAngle_deg': 0.0,
-        'NumBytesPerTxSector': 53, 'HeadingVessel_deg': 0.0,
+        'MaxEffTxBandWidth_Hz': 0.0, 'AbsCoeff_dBPerkm': 0.0, 'PortSectorEdge_deg': 0.0,
+        'StarbSectorEdge_deg': 0.0, 'PortMeanCov_deg': 0.0, 'StarbMeanCov_deg': 0.0,
+        'PortMeanCov_m': 0.0, 'StarbMeanCov_m': 0.0, 'ModeAndStabilisation': 0,
+        'RuntimeFilter1': 0, 'RuntimeFilter2': 0, 'PipeTrackingStatus': 0,
+        'TransmitArraySizeUsed_deg': 0.0, 'ReceiveArraySizeUsed_deg': 0.0,
+        'TransmitPower_dB': 0.0, 'SLrampUpTimeRemaining': 0, 'YawAngle_deg': 0.0,
+        'NumTxSectors': 0, 'NumBytesPerTxSector': 53, 'HeadingVessel_deg': 0.0,
         'SoundSpeedAtTxDepth_mPerSec': 0.0, 'TxTransducerDepth_m': 0.0,
         'ZWaterLevelReRefPoint_m': 0.0, 'XKmallToAll_m': 0.0, 'YKmallToAll_m': 0.0,
         'LatLongInfo': 0, 'PosSensorStatus': 0, 'AttitudeSensorStatus': 0,
         'Latitude_deg': 0.0, 'Longitude_deg': 0.0, 'EllipsoidHeightReRefPoint_m': 0.0,
         'NumBytesRxInfo': 0, 'NumSoundingsMaxMain': 0, 'NumSoundingsValidMain': 0,
         'NumBytesPerSounding': 0, 'WCSampleRate': 0.0, 'SeabedImageSampleRate': 0.0,
-        'BSnormal_dB': 0.0, 'BSoblique_dB': 0.0,
-        'ExtraDetectionAlarmFlag': 0, 'NumExtraDetections': 0, 'NumBytesPerClass': 35,
+        'BSnormal_dB': 0.0, 'BSoblique_dB': 0.0, 'ExtraDetectionAlarmFlag': 0,
+        'NumExtraDetections': 0, 'NumExtraDetectionClasses': 0, 'NumBytesPerClass': 35,
     }
 
 
@@ -7292,6 +8109,8 @@ def new_kmall_tx_sector():
         'TxNominalSourceLevel_dB': 0.0, 'TxFocusRange_m': 0.0,
         'CentreFreq_Hz': 0.0, 'SignalBandWidth_Hz': 0.0,
         'TotalSignalLength_sec': 0.0, 'PulseShading': 0, 'SignalWaveForm': 0,
+        'HighVoltageLevel_dB': 0.0, 'SectorTrackingCorr_dB': 0.0,
+        'EffectiveSignalLength_sec': 0.0,
     }
 
 
@@ -7475,29 +8294,36 @@ def _beam_array_subrecord_id(label):
     raise KeyError("no known ping array subrecord for beams column %r" % label)
 
 
-def new_swath_bathymetry_ping_scalars():
+def new_swath_bathymetry_ping():
     """
     Return a new dictionary with every GSF_RECORD_SWATH_BATHYMETRY_PING
-    scalar field name present: the four required fields (PingTime,
-    Longitude_deg, Latitude_deg, and NumberBeams) set to None as a
-    placeholder that the caller must overwrite, and every optional field
-    pre-set to its GSF_NULL_* "not available" sentinel (or, for
-    CenterBeam, PingFlags, and GPSTideCorrector_m, to 0 or 0.0, since
-    gsf.h defines no sentinel for those three fields). This function
-    exists so a caller building a ping to write doesn't have to remember
-    every field name or look up its correct "not available" sentinel by
-    hand: it can populate the returned dictionary with whatever it
-    actually knows, add a 'Beams' key (a dictionary of {column label:
-    array-like} or a pandas.DataFrame) and, optionally, 'SensorSpecificID'
-    and 'SensorSpecific' keys for a vendor sensor-specific subrecord, and
-    pass the result straight to write_swath_bathymetry_ping(). Every
-    scalar field the caller doesn't touch is then written as "not
-    available", rather than as a misleading 0 or 0.0. See convert.md's
-    "Marking a field as not available" section for more detail.
+    field name present, in the same shape _decode_swath_bathymetry_ping()
+    returns: the four required fields (PingTime, Longitude_deg,
+    Latitude_deg, and NumberBeams) set to None as a placeholder that the
+    caller must overwrite; every optional scalar field pre-set to its
+    GSF_NULL_* "not available" sentinel (or, for CenterBeam, PingFlags, and
+    GPSTideCorrector_m, to 0 or 0.0, since gsf.h defines no sentinel for
+    those three fields); 'Beams', an empty table (a dictionary of column
+    name -> array); and 'Notes', an empty list.
+    _decode_swath_bathymetry_ping() builds its result starting from this
+    same template, adding 'IntensityTimeSeries', 'SensorSpecificID', and
+    'SensorSpecific' only when the ping carries them.
 
-    :return: a dictionary with every valid swath-bathymetry-ping scalar
-        field name as a key, pre-filled with a default value as
-        described above.
+    This function exists so a caller building a ping to write doesn't
+    have to remember every field name or look up its correct "not
+    available" sentinel by hand: it can populate the returned dictionary
+    with whatever it actually knows, fill in 'Beams' (a dictionary of
+    {column label: array-like} or a pandas.DataFrame) and, optionally, add
+    'SensorSpecificID' and 'SensorSpecific' keys for a vendor
+    sensor-specific subrecord (see that family's new_*_specific()
+    template), and pass the result straight to
+    write_swath_bathymetry_ping(). Every scalar field the caller doesn't
+    touch is then written as "not available", rather than as a misleading
+    0 or 0.0. See convert.md's "Marking a field as not available" section
+    for more detail.
+
+    :return: a dictionary with every swath-bathymetry-ping field name as a
+        key, pre-filled with a default value as described above.
 
     :raises ValueError: raised later, by write_swath_bathymetry_ping()
         (via _encode_swath_bathymetry_ping()), not by this function
@@ -7523,7 +8349,10 @@ def new_swath_bathymetry_ping_scalars():
         'Height_m': GSF_NULL_HEIGHT,
         'SEP_m': GSF_NULL_SEP,
         'GPSTideCorrector_m': 0.0,
+        'Beams': {},
+        'Notes': [],
     }
+
 
 
 def _encode_swath_bathymetry_ping(record, scale_factors=None, major_version=3):
@@ -7541,7 +8370,7 @@ def _encode_swath_bathymetry_ping(record, scale_factors=None, major_version=3):
     :param record: a dictionary describing the ping to encode.
         PingTime, Longitude_deg, Latitude_deg, and NumberBeams are
         required: they must be present in `record` and not None.
-        Building this dictionary with new_swath_bathymetry_ping_scalars()
+        Building this dictionary with new_swath_bathymetry_ping()
         is recommended over assembling it by hand, since that function
         pre-fills every valid scalar key name, so there is nothing to
         look up and nothing to get wrong. CenterBeam, PingFlags, and, at
@@ -7583,9 +8412,9 @@ def _encode_swath_bathymetry_ping(record, scale_factors=None, major_version=3):
         record['IntensityTimeSeries'], if present, is a dictionary in
         the same shape _decode_brb_intensity() returns: the fields
         new_intensity_time_series_header() creates, plus a 'Beams' table
-        of each beam's 'SampleCount', 'DetectSample', and
-        'StartRangeSamples', and a flat 'Samples' array holding every
-        beam's samples in beam order. It is encoded
+        of each beam's 'DetectRangeSample', and a 'Samples' table of every
+        sample's 'Beam', 'RangeSample', and 'Value', in beam order. It is
+        encoded
         as a GSF_SWATH_BATHY_SUBRECORD_INTENSITY_SERIES_ARRAY subrecord,
         written after the sensor-specific subrecord, matching the
         reference gsflib C library's own subrecord ordering. Whichever
@@ -7629,7 +8458,7 @@ def _encode_swath_bathymetry_ping(record, scale_factors=None, major_version=3):
     if missing:
         raise ValueError(
             "record is missing required field(s): %s (see "
-            "new_swath_bathymetry_ping_scalars())" % ', '.join(missing))
+            "new_swath_bathymetry_ping())" % ', '.join(missing))
 
     g = record.get
     number_beams = int(record['NumberBeams'])
@@ -8643,10 +9472,9 @@ class gsf():
                         else:
                             print("# ping offset=%d ping_time=%s" % (offset, record.get('PingTime', '?')))
                             print("# Beam,SampleCount,DetectSample,StartRangeSamples,Sample0,Sample1,...")
-                            beams = intensity_record['Beams']
+                            counts, start_ranges, detects = _intensity_beam_layout(intensity_record)
                             for beam, (count, detect, start_range, samples) in enumerate(zip(
-                                    beams['SampleCount'].tolist(), beams['DetectSample'].tolist(),
-                                    beams['StartRangeSamples'].tolist(),
+                                    counts.tolist(), detects.tolist(), start_ranges.tolist(),
                                     _split_intensity_samples(intensity_record))):
                                 fields = [str(beam), str(count), str(detect), str(start_range)]
                                 fields.extend(str(v) for v in samples.tolist())

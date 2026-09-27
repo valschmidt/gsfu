@@ -103,9 +103,8 @@ def _nrows(table):
 
 def _beam_samples(intensity_record, beam):
     """One beam's samples, as a list, from a decoded intensity time series record."""
-    counts = list(intensity_record['Beams']['SampleCount'])
-    start = sum(counts[:beam])
-    return list(intensity_record['Samples'][start:start + counts[beam]])
+    samples = intensity_record['Samples']
+    return [value for b, value in zip(samples['Beam'], samples['Value']) if b == beam]
 
 requires_sample_data = pytest.mark.skipif(
     not SAMPLE_FILES, reason="no sample .gsf files found in data/GSF")
@@ -913,7 +912,7 @@ class TestDecodeSwathBathymetryPingSynthetic:
 
         record = _decode_swath_bathymetry_ping(payload, major_version=2, scale_factors={})
 
-        assert 'Beams' not in record
+        assert record['Beams'] == {}
         assert len(record['Notes']) == 1
         assert "no scale factors available" in record['Notes'][0]
 
@@ -927,7 +926,7 @@ class TestDecodeSwathBathymetryPingSynthetic:
 
         record = _decode_swath_bathymetry_ping(payload, major_version=2, scale_factors={})
 
-        assert 'Beams' not in record
+        assert record['Beams'] == {}
         assert len(record['Notes']) == 1
         assert "subrecord id 154 (4 bytes) not decoded" in record['Notes'][0]
 
@@ -939,7 +938,7 @@ class TestDecodeSwathBathymetryPingSynthetic:
 
         record = _decode_swath_bathymetry_ping(payload, major_version=2, scale_factors={})
 
-        assert 'Beams' not in record
+        assert record['Beams'] == {}
         assert len(record['Notes']) == 1
         assert "EM710_SPECIFIC (133, 4 bytes) not decoded" in record['Notes'][0]
 
@@ -2131,8 +2130,12 @@ class TestDecodeBRBIntensitySynthetic:
         assert record['BitsPerSample'] == 8
         assert _nrows(record['Beams']) == 2
         assert {k: list(v) for k, v in record['Beams'].items()} == {
-            'SampleCount': [3, 2], 'DetectSample': [1, 0], 'StartRangeSamples': [100, 50]}
-        assert list(record['Samples']) == [10, 20, 30, 200, 201]
+            'DetectRangeSample': [101, 50]}
+        assert list(record['Samples']['Value']) == [10, 20, 30, 200, 201]
+        # Each sample's beam, and its range: the beam's start range plus its
+        # position within the beam.
+        assert list(record['Samples']['Beam']) == [0, 0, 0, 1, 1]
+        assert list(record['Samples']['RangeSample']) == [100, 101, 102, 50, 51]
         assert consumed == len(payload)
 
     def test_16_bit_samples_decoded_per_beam(self):
@@ -2326,7 +2329,9 @@ class TestPrintIntensitySeriesRealData:
             assert a['PingTime'] == b['PingTime']
             for column in b['Beams']:
                 assert np.array_equal(a['Beams'][column], b['Beams'][column]), column
-            assert np.array_equal(a['IntensityTimeSeries']['Samples'], b['IntensityTimeSeries']['Samples'])
+            for column in b['IntensityTimeSeries']['Samples']:
+                assert np.array_equal(a['IntensityTimeSeries']['Samples'][column],
+                                      b['IntensityTimeSeries']['Samples'][column]), column
 
     def test_read_attitude_matches_per_record_decode(self):
         G = gsf(str(SMALL_SAMPLE))

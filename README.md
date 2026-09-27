@@ -164,8 +164,9 @@ row per beam, across every ping in the file:
 The `gsf` class is the main entry point for using `gsfu` from Python
 code. `gsf.iter_records()` walks a file's records in order and yields each
 one decoded, optionally restricted to one record type. The example below
-opens a file, takes its first `GSF_RECORD_SWATH_BATHYMETRY_PING` record,
-and prints its keys and a few of its fields:
+opens a file, takes its first `GSF_RECORD_SWATH_BATHYMETRY_PING` record
+(decoding its backscatter intensity time series too), and prints what the
+decoded record holds:
 
 ```python
 from GSFU.gsfu import gsf
@@ -173,43 +174,120 @@ from GSFU.gsfu import gsf
 G = gsf("data/GSF/0264_20240826_022211_EM712.gsf")
 
 # Each item is (record type, byte offset in the file, decoded record).
-record_type, offset, record = next(G.iter_records("SWATH_BATHYMETRY_PING"))
+record_type, offset, d = next(G.iter_records("SWATH_BATHYMETRY_PING", decode_intensity=True))
 
-print(list(record.keys()))
-print(record["PingTime"], record["Latitude_deg"], record["Longitude_deg"])
+for k, v in d.items():
+    print(f"d[{k!r}]".ljust(25), type(v).__name__, getattr(v, "shape", ""))
 ```
 
-This prints the following:
+This prints:
 
 ```
-['PingTime', 'Longitude_deg', 'Latitude_deg', 'NumberBeams', 'CenterBeam', 'PingFlags', 'TideCorrector_m', 'DepthCorrector_m', 'Heading_deg', 'Pitch_deg', 'Roll_deg', 'Heave_m', 'Course_deg', 'Speed_kn', 'Height_m', 'SEP_m', 'GPSTideCorrector_m', 'Beams', 'SensorSpecificID', 'SensorSpecific', 'Notes']
-2024-08-26T02:22:13.621820+00:00 -14.2136476 -169.0929353
+d['PingTime']             str
+d['Longitude_deg']        float
+d['Latitude_deg']         float
+d['NumberBeams']          int
+d['CenterBeam']           int
+d['PingFlags']            int
+d['TideCorrector_m']      float
+d['DepthCorrector_m']     float
+d['Heading_deg']          float
+d['Pitch_deg']            float
+d['Roll_deg']             float
+d['Heave_m']              float
+d['Course_deg']           float
+d['Speed_kn']             float
+d['Height_m']             float
+d['SEP_m']                float
+d['GPSTideCorrector_m']   float
+d['Beams']                dict
+d['Notes']                list
+d['IntensityTimeSeries']  dict
+d['SensorSpecificID']     int
+d['SensorSpecific']       dict
 ```
 
-Every decoded ping is a single dictionary. Its fixed scalar fields, such
-as `PingTime`, `Latitude_deg`, and `Longitude_deg`, sit directly at the
-top level. Its per-beam arrays sit under `Beams`, as a table: a
-dictionary mapping each column name (`Depth_m`, `AcrossTrack_m`, and so
-on) to a `numpy` array with one element per beam. If the ping carries a
-vendor-specific subrecord, its fields sit under `SensorSpecific`,
-alongside `SensorSpecificID` naming which vendor format it is; any
-per-element data it carries, such as KMALL's `TxSectors`, is a table of
-the same kind. If the ping carries a per-beam backscatter intensity time
-series and `decode_intensity=True` is passed, it sits under
-`IntensityTimeSeries`: a dictionary of that subrecord's header fields
-(plus any vendor-specific imagery fields), a `Beams` table of each beam's
-`SampleCount`, `DetectSample`, and `StartRangeSamples`, and `Samples`,
-one flat array of every beam's samples in beam order. (One array per beam
-is `np.split(Samples, np.cumsum(Beams["SampleCount"])[:-1])`.)
+A decoded record is one dictionary. Its fixed fields sit at the top level,
+and its per-beam data sits in tables: dictionaries mapping each column
+name to a `numpy` array with one element per beam.
 
-Records are decoded without `pandas`, which made up most of the read
-time when every record built its own `DataFrame`. A table converts to one
-in a single call when that is handier for analysis:
-`pd.DataFrame(record["Beams"])`. A decoded ping, intensity series
-included, can be passed straight back to
-`_encode_swath_bathymetry_ping()` or `gsf.write_swath_bathymetry_ping()`
-with no conversion, and the encoders accept a `pandas.DataFrame`
-anywhere they accept a table.
+```python
+for k, v in d["Beams"].items():
+    print(f"d['Beams'][{k!r}]".ljust(40), type(v).__name__, getattr(v, "shape", ""))
+```
+
+```
+d['Beams']['Depth_m']                    ndarray (400,)
+d['Beams']['AcrossTrack_m']              ndarray (400,)
+d['Beams']['AlongTrack_m']               ndarray (400,)
+d['Beams']['TravelTime_s']               ndarray (400,)
+d['Beams']['BeamAngle_deg']              ndarray (400,)
+d['Beams']['MeanCalAmplitude_dB']        ndarray (400,)
+d['Beams']['QualityFactor']              ndarray (400,)
+d['Beams']['BeamFlags']                  ndarray (400,)
+d['Beams']['BeamAngleForward_deg']       ndarray (400,)
+d['Beams']['VerticalError_m']            ndarray (400,)
+d['Beams']['HorizontalError_m']          ndarray (400,)
+d['Beams']['SectorNumber']               ndarray (400,)
+```
+
+`SensorSpecific` holds the fields of the ping's vendor-specific subrecord,
+and `SensorSpecificID` names the vendor format. In this file the format
+is Kongsberg's KMALL, which has 72 fields, including a `TxSectors` table.
+
+`IntensityTimeSeries` holds the ping's backscatter samples. It is present
+only when `decode_intensity=True` is passed. It contains two tables:
+
+```python
+its = d["IntensityTimeSeries"]
+for k, v in its.items():
+    print(f"its[{k!r}]".ljust(28), type(v).__name__, getattr(v, "shape", ""))
+for table in ("Beams", "Samples"):
+    for k, v in its[table].items():
+        print(f"its[{table!r}][{k!r}]".ljust(40), type(v).__name__, getattr(v, "shape", ""))
+```
+
+```
+its['BitsPerSample']         int
+its['AppliedCorrections']    int
+its['Beams']                 dict
+its['Samples']               dict
+its['Beams']['DetectRangeSample']        ndarray (400,)
+its['Samples']['Beam']                   ndarray (1736,)
+its['Samples']['RangeSample']            ndarray (1736,)
+its['Samples']['Value']                  ndarray (1736,)
+```
+
+The `Beams` table has one row per beam. Its one column,
+`DetectRangeSample`, is the range of the beam's bottom detection, counted
+in samples.
+
+The `Samples` table has one row per sample, for every beam in the ping,
+in beam order. `Value` is the sample itself. `Beam` is the number of the
+beam the sample belongs to. `RangeSample` is the sample's range, counted
+in samples, in the same units as `DetectRangeSample`. A beam's samples
+have consecutive ranges. The number of samples in each beam, and the
+range where each beam's samples start, follow from these columns and are
+not stored separately. These columns let a correction be applied to every
+sample in one vectorized operation. For example, a per-beam gain `gain`
+applies as `gain[its["Samples"]["Beam"]]`, and a range-dependent
+correction can be computed directly from `its["Samples"]["RangeSample"]`.
+
+Any table converts to a `pandas.DataFrame` in a single call when that is
+more convenient for analysis, for example `pd.DataFrame(d["Beams"])`.
+
+`iter_records()` indexes the file on first use (`gsf.index_file()`,
+which builds `G.Index`, a `pandas.DataFrame` with one row per record) and
+then reads each record with a single seek, skipping records of other
+types without reading them. Swath bathymetry pings are decoded with the
+scale factors carried from one ping to the next, as the format requires.
+Every record type comes back as a single dictionary, in the shape of that
+type's `new_*()` template, such as `new_comment()` or
+`new_sound_velocity_profile()`. A decoded record can be passed straight
+back to the matching `write_*()` method, as described in
+[Writing a GSF file](#writing-a-gsf-file). For casual
+inspection of a whole file, `gsf.print_records()` (the `-p` option's
+underlying method) prints every record as text.
 
 To get every attitude measurement in a file at once, use
 `gsf.read_attitude()`. It returns one dictionary in the same shape as a
@@ -225,18 +303,66 @@ attitude = G.read_attitude()
 print(attitude["NumMeasurements"], attitude["Time"][0], attitude["Roll_deg"].std())
 ```
 
-`iter_records()` indexes the file on first use (`gsf.index_file()`,
-which builds `G.Index`, a `pandas.DataFrame` with one row per record) and
-then reads each record with a single seek, skipping records of other
-types without reading them. Swath bathymetry pings are decoded with the
-scale factors carried from one ping to the next, as the format requires.
-Pass `decode_intensity=True` to decode each ping's intensity time series
-too. Every record type comes back as a single dictionary, in the shape
-of that type's `new_*()` template (`new_comment()`,
-`new_sound_velocity_profile()`, and so on), and can be passed straight
-back to the matching `write_*()` method. For casual inspection of
-a whole file, `gsf.print_records()` (the `-p` option's underlying
-method) prints every record as text.
+## Writing a GSF file
+
+Every record type is written from a single dictionary, the same shape the
+reader returns. Each type has a template function, `new_*()`, that
+returns that dictionary with every field name already present and set to
+its default ("not available" where GSF defines such a value), so you fill
+in only what you know and pass it to the matching `write_*()` method:
+
+```python
+from GSFU.gsfu import gsf, new_attitude, new_comment, new_swath_bathymetry_ping
+
+G = gsf("out.gsf")
+G.write_header()  # always the first record
+
+comment = new_comment()
+comment.update(CommentTime=1724650073.7, Comment="written by gsfu")
+G.write_comment(comment)
+
+attitude = new_attitude()
+attitude.update(Time=[1724650073.70, 1724650073.71], Pitch_deg=[0.12, 0.10],
+                Roll_deg=[-0.5, -0.4], Heave_m=[0.02, 0.01], Heading_deg=[210.5, 210.6])
+G.write_attitude(attitude)
+
+ping = new_swath_bathymetry_ping()
+ping.update(PingTime=1724650073.72, Longitude_deg=-129.98, Latitude_deg=45.93, NumberBeams=3)
+ping["Beams"] = {"Depth_m": [1010.2, 1004.8, 1011.9], "AcrossTrack_m": [-850.0, 0.0, 850.0]}
+G.write_swath_bathymetry_ping(ping)
+
+G.closeFile()
+```
+
+A field left at its template default is written as "not available". A
+required field left as `None`, such as a ping's `PingTime`, raises a
+`ValueError` that names it. Times may be POSIX seconds, `datetime` objects, or
+ISO 8601 strings. Because reading and writing use the same dictionaries,
+a record read with `iter_records()` can be written back unchanged, and
+copying a file record by record this way reproduces it byte for byte.
+
+| Record type | Template | Write method |
+|---|---|---|
+| `GSF_RECORD_HEADER` | `new_header()` | `write_header()` |
+| `GSF_RECORD_SWATH_BATHYMETRY_PING` | `new_swath_bathymetry_ping()` | `write_swath_bathymetry_ping()` |
+| `GSF_RECORD_SOUND_VELOCITY_PROFILE` | `new_sound_velocity_profile()` | `write_sound_velocity_profile()` |
+| `GSF_RECORD_PROCESSING_PARAMETERS` | `new_name_value_parameters()` | `write_processing_parameters()` |
+| `GSF_RECORD_SENSOR_PARAMETERS` | `new_name_value_parameters()` | `write_sensor_parameters()` |
+| `GSF_RECORD_COMMENT` | `new_comment()` | `write_comment()` |
+| `GSF_RECORD_HISTORY` | `new_history()` | `write_history()` |
+| `GSF_RECORD_NAVIGATION_ERROR` | `new_navigation_error()` | `write_navigation_error()` |
+| `GSF_RECORD_SWATH_BATHY_SUMMARY` | `new_swath_bathy_summary()` | `write_swath_bathy_summary()` |
+| `GSF_RECORD_SINGLE_BEAM_PING` | `new_single_beam_ping()` | `write_single_beam_ping()` |
+| `GSF_RECORD_HV_NAVIGATION_ERROR` | `new_hv_navigation_error()` | `write_hv_navigation_error()` |
+| `GSF_RECORD_ATTITUDE` | `new_attitude()` | `write_attitude()` |
+
+A ping's vendor sensor-specific subrecord (its `SensorSpecific`
+dictionary, identified by `SensorSpecificID`) has a template of its own
+for every supported vendor family, named after it: for example
+`new_kmall_specific()`, `new_em4_specific()`, `new_reson7125_specific()`,
+or, for single-beam pings, `new_echotrac_specific()`. Tables inside them
+have row templates, such as `new_kmall_tx_sector()` for KMALL's
+`TxSectors`. See [`convert.md`](convert.md) for a complete worked example.
 
 ## Converting other sonar formats to GSF
 
