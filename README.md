@@ -3,7 +3,7 @@
 `gsfu` is both a Python library and a command line utility for indexing,
 reading, and writing sonar data files in the **Generic Sensor Format
 (GSF)**. As a library, it gives Python code direct access to a GSF file's
-records as ordinary dictionaries and `pandas.DataFrame`s, and lets a
+records as ordinary dictionaries of values and `numpy` arrays, and lets a
 program write new GSF files from scratch. As a command line tool, it can
 index a GSF file and print a summary of the record types it contains, and
 it can decode and print any record's fields for inspection and debugging.
@@ -201,17 +201,28 @@ This prints the following:
 
 Every decoded ping is a single dictionary. Its fixed scalar fields, such
 as `PingTime`, `Latitude_deg`, and `Longitude_deg`, sit directly at the
-top level. Its per-beam arrays sit under `Beams`, as a `pandas.DataFrame`
-with one row per beam. If the ping carries a vendor-specific subrecord,
-its fields sit under `SensorSpecific`, alongside `SensorSpecificID`
-naming which vendor format it is. If the ping carries a per-beam
-backscatter intensity time series and `decode_intensity=True` is passed,
-it sits under `IntensityTimeSeries`, as a dictionary of that subrecord's
-header fields (plus any vendor-specific imagery fields) with its own
-`Beams` `pandas.DataFrame` holding each beam's list of samples. A decoded
-ping, intensity series included, can be passed straight back to
+top level. Its per-beam arrays sit under `Beams`, as a table: a
+dictionary mapping each column name (`Depth_m`, `AcrossTrack_m`, and so
+on) to a `numpy` array with one element per beam. If the ping carries a
+vendor-specific subrecord, its fields sit under `SensorSpecific`,
+alongside `SensorSpecificID` naming which vendor format it is; any
+per-element data it carries, such as KMALL's `TxSectors`, is a table of
+the same kind. If the ping carries a per-beam backscatter intensity time
+series and `decode_intensity=True` is passed, it sits under
+`IntensityTimeSeries`: a dictionary of that subrecord's header fields
+(plus any vendor-specific imagery fields), a `Beams` table of each beam's
+`SampleCount`, `DetectSample`, and `StartRangeSamples`, and `Samples`,
+one flat array of every beam's samples in beam order. (One array per beam
+is `np.split(Samples, np.cumsum(Beams["SampleCount"])[:-1])`.)
+
+Records are decoded without `pandas`, which made up most of the read
+time when every record built its own `DataFrame`. A table converts to one
+in a single call when that is handier for analysis:
+`pd.DataFrame(record["Beams"])`. A decoded ping, intensity series
+included, can be passed straight back to
 `_encode_swath_bathymetry_ping()` or `gsf.write_swath_bathymetry_ping()`
-with no conversion.
+with no conversion, and the encoders accept a `pandas.DataFrame`
+anywhere they accept a table.
 
 This example calls `_decode_swath_bathymetry_ping()` directly, since
 `gsfu.py` does not yet have a public convenience method for decoding a

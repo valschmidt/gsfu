@@ -183,7 +183,7 @@ class TestConvertRealFiles:
         assert record["Notes"] == []
         assert -90.0 <= record["Latitude_deg"] <= 90.0
         assert -180.0 <= record["Longitude_deg"] <= 180.0
-        assert record["NumberBeams"] == len(record["Beams"])
+        assert record["NumberBeams"] == len(record["Beams"]["Depth_m"])
         assert (record["Beams"]["Depth_m"] > 0).all()
 
         # Fields MRZ carries no data for are written as their GSF_NULL_*

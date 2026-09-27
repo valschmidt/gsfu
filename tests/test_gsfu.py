@@ -21,6 +21,7 @@ Two kinds of coverage:
 import struct
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from GSFU.gsfu import (
@@ -91,6 +92,18 @@ SAMPLE_FILES = sorted(DATA_DIR.glob("*.gsf")) if DATA_DIR.is_dir() else []
 # fast; the full set is exercised (offset accounting only) in a parametrized
 # test below.
 SMALL_SAMPLE = min(SAMPLE_FILES, key=lambda p: p.stat().st_size) if SAMPLE_FILES else None
+
+
+def _nrows(table):
+    """Number of rows in a decoded table (a dict of equal-length column arrays)."""
+    return len(next(iter(table.values())))
+
+
+def _beam_samples(intensity_record, beam):
+    """One beam's samples, as a list, from a decoded intensity time series record."""
+    counts = list(intensity_record['Beams']['SampleCount'])
+    start = sum(counts[:beam])
+    return list(intensity_record['Samples'][start:start + counts[beam]])
 
 requires_sample_data = pytest.mark.skipif(
     not SAMPLE_FILES, reason="no sample .gsf files found in data/GSF")
@@ -606,7 +619,7 @@ class TestPrintRecordsRealData:
 
             assert all("IntensityTimeSeries" in n for n in record['Notes'])
             assert record['SensorSpecific']['EchoSounderID'] == 712
-            assert len(record['SensorSpecific']['TxSectors']) == record['SensorSpecific']['NumTxSectors']
+            assert _nrows(record['SensorSpecific']['TxSectors']) == record['SensorSpecific']['NumTxSectors']
 
     def test_kmall_specific_num_tx_sectors_matches_tx_sectors_table_rows(self):
         G = gsf(str(SMALL_SAMPLE))
@@ -623,7 +636,7 @@ class TestPrintRecordsRealData:
 
         assert all("IntensityTimeSeries" in n for n in record['Notes'])
         assert record['SensorSpecific']['EchoSounderID'] == 712
-        assert len(record['SensorSpecific']['TxSectors']) == record['SensorSpecific']['NumTxSectors']
+        assert _nrows(record['SensorSpecific']['TxSectors']) == record['SensorSpecific']['NumTxSectors']
 
     def test_real_kmall_ping_round_trips_through_encode_with_tx_sectors_intact(self):
         # A real decoded record (its 'SensorSpecific' table values already
@@ -651,7 +664,7 @@ class TestPrintRecordsRealData:
         assert re_decoded['SensorSpecificID'] == 156
         assert re_decoded['SensorSpecific']['EchoSounderID'] == record['SensorSpecific']['EchoSounderID']
         re_tx_sectors = re_decoded['SensorSpecific']['TxSectors']
-        assert len(re_tx_sectors) == len(original_tx_sectors)
+        assert _nrows(re_tx_sectors) == _nrows(original_tx_sectors)
         assert list(re_tx_sectors['CentreFreq_Hz']) == pytest.approx(list(original_tx_sectors['CentreFreq_Hz']))
         assert list(re_decoded['Beams']['Depth_m']) == pytest.approx(list(record['Beams']['Depth_m']), abs=0.001)
 
@@ -724,8 +737,8 @@ class TestDecodeSwathBathymetryPingSynthetic:
         beams = record['Beams']
 
         assert list(beams['Depth_m']) == pytest.approx([10.0, 10.5, 9.95])
-        assert beams.index.name == 'Beam'
-        assert list(beams.index) == [0, 1, 2]
+        assert beams['Depth_m'].dtype == np.float64
+        assert beams['Depth_m'].flags.writeable
 
     def test_signed_array_and_nonzero_offset_applied(self):
         # across_track (id 2) is signed; multiplier=10, offset=5 =>
@@ -1428,12 +1441,12 @@ class TestDecodeEm4Specific:
         assert fields['PuStatus.SensorStatus'] == 63
         assert fields['PuStatus.YawStabilization_deg'] == pytest.approx(-1.5)
 
-        assert len(fields['TxSectors']) == 2
-        assert fields['TxSectors'].iloc[0]['TiltAngle_deg'] == pytest.approx(1.5)
-        assert fields['TxSectors'].iloc[0]['SectorNumber'] == 0
-        assert fields['TxSectors'].iloc[0]['CenterFrequency_Hz'] == pytest.approx(71000.0)
-        assert fields['TxSectors'].iloc[1]['TiltAngle_deg'] == pytest.approx(-1.5)
-        assert fields['TxSectors'].iloc[1]['SectorNumber'] == 1
+        assert _nrows(fields['TxSectors']) == 2
+        assert fields['TxSectors']['TiltAngle_deg'][0] == pytest.approx(1.5)
+        assert fields['TxSectors']['SectorNumber'][0] == 0
+        assert fields['TxSectors']['CenterFrequency_Hz'][0] == pytest.approx(71000.0)
+        assert fields['TxSectors']['TiltAngle_deg'][1] == pytest.approx(-1.5)
+        assert fields['TxSectors']['SectorNumber'][1] == 1
 
         assert consumed == len(payload)
 
@@ -1554,9 +1567,9 @@ class TestDecodeEm3Specific:
         payload = self._FIXED + struct.pack('>I', 0x1) + run_time_bytes
         fields, consumed = _decode_em3_specific(payload, 0)
 
-        assert len(fields['RunTime']) == 1
-        assert fields['RunTime'].iloc[0]['Head'] == 0
-        assert fields['RunTime'].iloc[0]['ModelNumber'] == 3000
+        assert _nrows(fields['RunTime']) == 1
+        assert fields['RunTime']['Head'][0] == 0
+        assert fields['RunTime']['ModelNumber'][0] == 3000
         assert consumed == len(payload)
 
     def test_bit1_alone_without_bit0_yields_no_run_time_blocks(self):
@@ -1574,10 +1587,10 @@ class TestDecodeEm3Specific:
         payload = self._FIXED + struct.pack('>I', 0x3) + head0_bytes + head1_bytes
         fields, consumed = _decode_em3_specific(payload, 0)
 
-        assert len(fields['RunTime']) == 2
-        assert fields['RunTime'].iloc[0]['Head'] == 0
-        assert fields['RunTime'].iloc[1]['Head'] == 1
-        assert fields['RunTime'].iloc[1]['PortSwathWidth_m'] == 50
+        assert _nrows(fields['RunTime']) == 2
+        assert fields['RunTime']['Head'][0] == 0
+        assert fields['RunTime']['Head'][1] == 1
+        assert fields['RunTime']['PortSwathWidth_m'][1] == 50
         assert consumed == len(payload)
 
 
@@ -1632,13 +1645,13 @@ class TestDecodeEm3RawSpecific:
         assert fields['PuStatus.SensorStatus'] == 63
         assert fields['PuStatus.YawStabilization_deg'] == pytest.approx(-1.5)
 
-        assert len(fields['TxSectors']) == 2
-        assert fields['TxSectors'].iloc[0]['TiltAngle_deg'] == pytest.approx(1.5)
-        assert fields['TxSectors'].iloc[0]['SectorNumber'] == 0
-        assert fields['TxSectors'].iloc[0]['CenterFrequency_Hz'] == pytest.approx(71000.0)
-        assert 'MeanAbsorption_dBkm' not in fields['TxSectors'].columns
-        assert fields['TxSectors'].iloc[1]['TiltAngle_deg'] == pytest.approx(-1.5)
-        assert fields['TxSectors'].iloc[1]['SectorNumber'] == 1
+        assert _nrows(fields['TxSectors']) == 2
+        assert fields['TxSectors']['TiltAngle_deg'][0] == pytest.approx(1.5)
+        assert fields['TxSectors']['SectorNumber'][0] == 0
+        assert fields['TxSectors']['CenterFrequency_Hz'][0] == pytest.approx(71000.0)
+        assert 'MeanAbsorption_dBkm' not in fields['TxSectors']
+        assert fields['TxSectors']['TiltAngle_deg'][1] == pytest.approx(-1.5)
+        assert fields['TxSectors']['SectorNumber'][1] == 1
 
         assert consumed == len(payload)
 
@@ -1946,9 +1959,9 @@ class TestDecodeBRBIntensitySynthetic:
         # recognize at all.
         payload = self._preamble(8) + self._beam(1, 0, 0, [42], '>B')
         record, consumed = _decode_brb_intensity(payload, 0, num_beams=1, sensor_id=999)
-        assert record.keys() == {'BitsPerSample', 'AppliedCorrections', 'Beams'}
+        assert record.keys() == {'BitsPerSample', 'AppliedCorrections', 'Beams', 'Samples'}
         assert (record['BitsPerSample'], record['AppliedCorrections']) == (8, 0)
-        assert record['Beams'].loc[0, 'Samples'] == [42]
+        assert _beam_samples(record, 0) == [42]
         assert consumed == len(payload)
 
     def test_zero_beams_returns_none(self):
@@ -1963,11 +1976,10 @@ class TestDecodeBRBIntensitySynthetic:
         record, consumed = _decode_brb_intensity(payload, 0, num_beams=2, sensor_id=999)
 
         assert record['BitsPerSample'] == 8
-        assert len(record['Beams']) == 2
-        assert record['Beams'].loc[0].to_dict() == {
-            'SampleCount': 3, 'DetectSample': 1, 'StartRangeSamples': 100, 'Samples': [10, 20, 30]}
-        assert record['Beams'].loc[1].to_dict() == {
-            'SampleCount': 2, 'DetectSample': 0, 'StartRangeSamples': 50, 'Samples': [200, 201]}
+        assert _nrows(record['Beams']) == 2
+        assert {k: list(v) for k, v in record['Beams'].items()} == {
+            'SampleCount': [3, 2], 'DetectSample': [1, 0], 'StartRangeSamples': [100, 50]}
+        assert list(record['Samples']) == [10, 20, 30, 200, 201]
         assert consumed == len(payload)
 
     def test_16_bit_samples_decoded_per_beam(self):
@@ -1975,7 +1987,7 @@ class TestDecodeBRBIntensitySynthetic:
 
         record, consumed = _decode_brb_intensity(payload, 0, num_beams=1, sensor_id=999)
 
-        assert record['Beams'].loc[0, 'Samples'] == [1000, 65000]
+        assert _beam_samples(record, 0) == [1000, 65000]
         assert consumed == len(payload)
 
     def test_12_bit_packed_samples_decoded(self):
@@ -1988,7 +2000,7 @@ class TestDecodeBRBIntensitySynthetic:
 
         record, consumed = _decode_brb_intensity(payload, 0, num_beams=1, sensor_id=999)
 
-        assert record['Beams'].loc[0, 'Samples'] == [0xABC, 0x123]
+        assert _beam_samples(record, 0) == [0xABC, 0x123]
         assert consumed == len(payload)
 
     def test_12_bit_odd_sample_count_drops_trailing_half_sample(self):
@@ -2000,16 +2012,16 @@ class TestDecodeBRBIntensitySynthetic:
 
         record, _consumed = _decode_brb_intensity(payload, 0, num_beams=1, sensor_id=999)
 
-        assert record['Beams'].loc[0, 'Samples'] == [0xABC]
+        assert _beam_samples(record, 0) == [0xABC]
 
     def test_kmall_preamble_skipped_as_pure_spare(self):
         payload = self._preamble(8, sensor_imagery=b"\x00" * 64) + self._beam(1, 0, 0, [7], '>B')
 
         record, consumed = _decode_brb_intensity(payload, 0, num_beams=1, sensor_id=156)
 
-        assert record.keys() == {'BitsPerSample', 'AppliedCorrections', 'Beams'}
+        assert record.keys() == {'BitsPerSample', 'AppliedCorrections', 'Beams', 'Samples'}
         assert (record['BitsPerSample'], record['AppliedCorrections']) == (8, 0)
-        assert record['Beams'].loc[0, 'Samples'] == [7]
+        assert _beam_samples(record, 0) == [7]
         assert consumed == len(payload)
 
     @pytest.mark.parametrize("sensor_id", sorted(_SUBRECORD_EM3_IMAGERY_IDS))
@@ -2027,7 +2039,7 @@ class TestDecodeBRBIntensitySynthetic:
         assert record['MeanAbsorption_dBkm'] == pytest.approx(50.0)
         assert record['Offset'] == -10
         assert record['Scale'] == 2
-        assert record['Beams'].loc[0, 'Samples'] == [9]
+        assert _beam_samples(record, 0) == [9]
         assert consumed == len(payload)
 
     @pytest.mark.parametrize("sensor_id", sorted(_SUBRECORD_EM4_IMAGERY_IDS))
@@ -2051,7 +2063,7 @@ class TestDecodeBRBIntensitySynthetic:
         assert record['TvgCrossOver_deg'] == pytest.approx(25.0)
         assert record['Offset'] == -10
         assert record['Scale'] == 10
-        assert record['Beams'].loc[0, 'Samples'] == [9]
+        assert _beam_samples(record, 0) == [9]
         assert consumed == len(payload)
 
     @pytest.mark.parametrize("sensor_id", sorted(_SUBRECORD_RESON_SIZE_SPARE_IMAGERY_IDS))
@@ -2062,7 +2074,7 @@ class TestDecodeBRBIntensitySynthetic:
         record, consumed = _decode_brb_intensity(payload, 0, num_beams=1, sensor_id=sensor_id)
 
         assert record['Size'] == 42
-        assert record['Beams'].loc[0, 'Samples'] == [9]
+        assert _beam_samples(record, 0) == [9]
         assert consumed == len(payload)
 
     @pytest.mark.parametrize("sensor_id", sorted(_SUBRECORD_RESON_8100_IMAGERY_IDS))
@@ -2071,9 +2083,9 @@ class TestDecodeBRBIntensitySynthetic:
 
         record, consumed = _decode_brb_intensity(payload, 0, num_beams=1, sensor_id=sensor_id)
 
-        assert record.keys() == {'BitsPerSample', 'AppliedCorrections', 'Beams'}
+        assert record.keys() == {'BitsPerSample', 'AppliedCorrections', 'Beams', 'Samples'}
         assert (record['BitsPerSample'], record['AppliedCorrections']) == (8, 0)
-        assert record['Beams'].loc[0, 'Samples'] == [9]
+        assert _beam_samples(record, 0) == [9]
         assert consumed == len(payload)
 
     def test_klein5410bss_imagery_preamble_decoded(self):
@@ -2086,7 +2098,7 @@ class TestDecodeBRBIntensitySynthetic:
         assert record['ResMode'] == 1
         assert record['TvgPage'] == 2
         assert record['BeamID'] == [10, 11, 12, 13, 14]
-        assert record['Beams'].loc[0, 'Samples'] == [9]
+        assert _beam_samples(record, 0) == [9]
         assert consumed == len(payload)
 
     @pytest.mark.parametrize("sensor_id", sorted(_SUBRECORD_R2SONIC_IMAGERY_IDS))
@@ -2108,7 +2120,7 @@ class TestDecodeBRBIntensitySynthetic:
         assert record['Frequency_Hz'] == pytest.approx(300000.0)
         assert record['NumBeams'] == 5
         assert record['MoreInfo'] == [pytest.approx(1.0), pytest.approx(2.0), pytest.approx(-3.0), 0.0, 0.0, 0.0]
-        assert record['Beams'].loc[0, 'Samples'] == [9]
+        assert _beam_samples(record, 0) == [9]
         assert consumed == len(payload)
 
 

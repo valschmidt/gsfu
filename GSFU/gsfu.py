@@ -417,9 +417,9 @@ _SENSOR_SPECIFIC_SUBRECORD_NAMES = {
 #:
 #: decode_fn(payload, pos) -> (record: dict, bytes_consumed). `record` is
 #: one flat dict: scalar fields directly, plus, for a family with any
-#: per-element arrays (EM3, EM3Raw, EM4, KMALL), those as
-#: pandas.DataFrame-valued entries under their own table name (e.g.
-#: 'TxSectors') -- nested directly in the same dict, not returned
+#: per-element arrays (EM3, EM3Raw, EM4, KMALL), those as tables (each a
+#: dictionary of column name -> numpy array) under their own table name
+#: (e.g. 'TxSectors') -- nested directly in the same dict, not returned
 #: separately. encode_fn(record) -> bytes, including its own 4-byte
 #: subrecord id+size word -- the exact dict decode_fn returns (or, for a
 #: hand-built record, the same shape) can be passed straight back in, no
@@ -2901,6 +2901,66 @@ def _encode_em_pu_status(fields):
     return out
 
 
+def _rows_to_table(rows):
+    """
+    Convert a list of row dictionaries, all with the same keys, into a
+    table: a dictionary mapping each key to a numpy array holding that
+    column's value from every row. This is the table shape every decoder
+    in this file returns for per-element data (per-beam arrays, transmit
+    sectors, run-time blocks, and so on), for decoders whose rows are few
+    and variably laid out enough that they are still decoded one row at a
+    time.
+
+    :param rows: a non-empty list of dictionaries sharing the same keys.
+
+    :return: a dictionary of column name -> numpy array, one element per
+        row.
+    """
+    return {key: np.array([row[key] for row in rows]) for key in rows[0]}
+
+
+def _table_length(table):
+    """
+    Return the number of rows in a table: a dictionary of column name ->
+    equal-length array-like, as the decoders in this file return, or
+    anything else with the same column access, such as a
+    pandas.DataFrame.
+
+    :param table: the table, or None.
+
+    :return: the number of rows; 0 if table is None or has no columns.
+    """
+    if table is None:
+        return 0
+    for key in table.keys():
+        return len(table[key])
+    return 0
+
+
+def _table_rows(table, limit=None):
+    """
+    Yield each row of a table as a dictionary of column name -> value,
+    for encoders that write a table's rows one at a time. The table may
+    be a dictionary of column name -> equal-length array-like, as the
+    decoders in this file return, or anything else with the same column
+    access, such as a pandas.DataFrame, which is read column by column
+    without any conversion.
+
+    :param table: the table, or None (which yields no rows).
+    :param limit: if given, yield at most this many rows.
+
+    :return: a generator of row dictionaries.
+    """
+    if table is None:
+        return
+    columns = {key: np.asarray(table[key]) for key in table.keys()}
+    n = _table_length(columns)
+    if limit is not None:
+        n = min(n, limit)
+    for i in range(n):
+        yield {key: values[i] for key, values in columns.items()}
+
+
 def _decode_em4_specific(payload, pos):
     """
     Decode a GSF_SWATH_BATHY_SUBRECORD_EM4_SPECIFIC subrecord (one of ids
@@ -2924,8 +2984,9 @@ def _decode_em4_specific(payload, pos):
         _decode_em_run_time() merged in with a 'RunTime.' key prefix,
         every field decoded by _decode_em_pu_status() merged in with a
         'PuStatus.' key prefix, and an optional 'TxSectors' key holding
-        a pandas.DataFrame with one row per transmit sector, present
-        only when the ping reported at least one transmit sector.
+        a table (a dictionary of column name -> numpy array, one element
+        per transmit sector), present only when the ping reported at
+        least one transmit sector.
         bytes_consumed is the number of bytes read from payload.
     """
     start = pos
@@ -2989,9 +3050,7 @@ def _decode_em4_specific(payload, pos):
     record.update({'PuStatus.' + k: v for k, v in pu_status_fields.items()})
 
     if sector_rows:
-        sectors = pd.DataFrame(sector_rows)
-        sectors.index.name = 'TxSectors'
-        record['TxSectors'] = sectors
+        record['TxSectors'] = _rows_to_table(sector_rows)
     return record, pos - start
 
 
@@ -3007,11 +3066,12 @@ def _encode_em4_specific(record):
         same shape _decode_em4_specific() returns, including its
         'RunTime.'-prefixed and 'PuStatus.'-prefixed fields (encoded by
         _encode_em_run_time() and _encode_em_pu_status() respectively).
-        An optional 'TxSectors' key holds a pandas.DataFrame with one row
-        per transmit sector; the transmit-sector count written to the
-        wire is taken from the number of rows in this table, so the
-        exact DataFrame _decode_em4_specific() returns can be passed
-        straight back in with no conversion required. An optional
+        An optional 'TxSectors' key holds a table (a dictionary of column
+        name -> array-like, or a pandas.DataFrame) with one row per
+        transmit sector; the transmit-sector count written to the wire
+        is taken from the number of rows in this table, so the exact
+        table _decode_em4_specific() returns can be passed straight back
+        in with no conversion required. An optional
         'SubrecordID' key selects which of the five registered ids to
         stamp, defaulting to 133 (EM710) if absent. A field missing from
         record is written as zero.
@@ -3021,8 +3081,6 @@ def _encode_em4_specific(record):
     subrecord_id = record.get('SubrecordID', 133)
     g = record.get
     sectors = record.get('TxSectors')
-    if sectors is None:
-        sectors = pd.DataFrame()
 
     body = struct.pack('>H', int(g('ModelNumber', 0)))
     body += struct.pack('>H', int(g('PingCounter', 0)))
@@ -3041,8 +3099,8 @@ def _encode_em4_specific(record):
     body += struct.pack('>i', _gsf_round(g('VehicleDepth_m', 0.0) * 1000.0))
     body += b'\x00' * 16  # spare_1
 
-    body += struct.pack('>H', len(sectors))
-    for _, row in sectors.iterrows():
+    body += struct.pack('>H', _table_length(sectors))
+    for row in _table_rows(sectors):
         r = row.get
         body += struct.pack('>h', _gsf_round(r('TiltAngle_deg', 0.0) * 100.0))
         body += struct.pack('>H', _gsf_round(r('FocusRange_m', 0.0) * 10.0))
@@ -3110,8 +3168,9 @@ def _decode_em3raw_specific(payload, pos):
         _decode_em_run_time() merged in with a 'RunTime.' key prefix,
         every field decoded by _decode_em_pu_status() merged in with a
         'PuStatus.' key prefix, and an optional 'TxSectors' key holding
-        a pandas.DataFrame with one row per transmit sector, present
-        only when the ping reported at least one transmit sector.
+        a table (a dictionary of column name -> numpy array, one element
+        per transmit sector), present only when the ping reported at
+        least one transmit sector.
         bytes_consumed is the number of bytes read from payload.
     """
     start = pos
@@ -3175,9 +3234,7 @@ def _decode_em3raw_specific(payload, pos):
     record.update({'PuStatus.' + k: v for k, v in pu_status_fields.items()})
 
     if sector_rows:
-        sectors = pd.DataFrame(sector_rows)
-        sectors.index.name = 'TxSectors'
-        record['TxSectors'] = sectors
+        record['TxSectors'] = _rows_to_table(sector_rows)
     return record, pos - start
 
 
@@ -3193,11 +3250,12 @@ def _encode_em3raw_specific(record):
         same shape _decode_em3raw_specific() returns, including its
         'RunTime.'-prefixed and 'PuStatus.'-prefixed fields (encoded by
         _encode_em_run_time() and _encode_em_pu_status() respectively).
-        An optional 'TxSectors' key holds a pandas.DataFrame with one row
-        per transmit sector; the transmit-sector count written to the
-        wire is taken from the number of rows in this table, so the
-        exact DataFrame _decode_em3raw_specific() returns can be passed
-        straight back in with no conversion required. An optional
+        An optional 'TxSectors' key holds a table (a dictionary of column
+        name -> array-like, or a pandas.DataFrame) with one row per
+        transmit sector; the transmit-sector count written to the wire
+        is taken from the number of rows in this table, so the exact
+        table _decode_em3raw_specific() returns can be passed straight back
+        in with no conversion required. An optional
         'SubrecordID' key selects which of the nine registered ids to
         stamp, defaulting to 140 (EM300_RAW) if absent. A field missing
         from record is written as zero.
@@ -3207,8 +3265,6 @@ def _encode_em3raw_specific(record):
     subrecord_id = record.get('SubrecordID', 140)
     g = record.get
     sectors = record.get('TxSectors')
-    if sectors is None:
-        sectors = pd.DataFrame()
 
     body = struct.pack('>H', int(g('ModelNumber', 0)))
     body += struct.pack('>H', int(g('PingCounter', 0)))
@@ -3228,8 +3284,8 @@ def _encode_em3raw_specific(record):
     body += struct.pack('>b', int(g('OffsetMultiplier', 0)))
     body += b'\x00' * 16  # spare_1
 
-    body += struct.pack('>H', len(sectors))
-    for _, row in sectors.iterrows():
+    body += struct.pack('>H', _table_length(sectors))
+    for row in _table_rows(sectors):
         r = row.get
         body += struct.pack('>h', _gsf_round(r('TiltAngle_deg', 0.0) * 100.0))
         body += struct.pack('>H', _gsf_round(r('FocusRange_m', 0.0) * 10.0))
@@ -3458,8 +3514,8 @@ def _decode_em3_specific(payload, pos):
 
     :return: a tuple of (record, bytes_consumed). record is a dictionary
         of the decoded scalar fields, plus an optional 'RunTime' key
-        holding a pandas.DataFrame with one row per decoded
-        run-time-parameters sub-block, present only when bit 0 of
+        holding a table (a dictionary of column name -> numpy array, one
+        element per decoded run-time-parameters sub-block), present only when bit 0 of
         run_time_id was set (so at least one sub-block was decoded).
         bytes_consumed is the number of bytes read from payload.
     """
@@ -3499,9 +3555,7 @@ def _decode_em3_specific(payload, pos):
             run_time_rows.append({'Head': 1, **head1_fields})
 
     if run_time_rows:
-        run_time = pd.DataFrame(run_time_rows)
-        run_time.index.name = 'RunTime'
-        record['RunTime'] = run_time
+        record['RunTime'] = _rows_to_table(run_time_rows)
     return record, pos - start
 
 
@@ -3525,10 +3579,11 @@ def _encode_em3_specific(record):
 
     :param record: a dictionary of the scalar fields to encode, in the
         same shape _decode_em3_specific() returns. An optional 'RunTime'
-        key holds a pandas.DataFrame in which each row needs a 'Head'
-        column (0 or 1) selecting which position it is written at -- the
-        exact DataFrame _decode_em3_specific() returns can be passed
-        straight back in with no conversion required. Bit 0 of the
+        key holds a table (a dictionary of column name -> array-like, or
+        a pandas.DataFrame) in which each row needs a 'Head' column (0 or
+        1) selecting which position it is written at -- the exact table
+        _decode_em3_specific() returns can be passed straight back in
+        with no conversion required. Bit 0 of the
         on-disk run_time_id is set if and only if a row with Head == 0
         is present, and bit 1 is set if and only if a row with Head == 1
         is present; an empty or absent table writes run_time_id = 0 (no
@@ -3549,11 +3604,8 @@ def _encode_em3_specific(record):
     """
     subrecord_id = record.get('SubrecordID', 118)
     g = record.get
-    run_time_df = record.get('RunTime')
-    if run_time_df is None:
-        run_time_df = pd.DataFrame()
     rows_by_head = {}
-    for _, row in run_time_df.iterrows():
+    for row in _table_rows(record.get('RunTime')):
         head = row.get('Head')
         if head not in (0, 1):
             raise ValueError("EM3 RunTime row 'Head' must be 0 or 1, got %r" % (head,))
@@ -4521,6 +4573,60 @@ def _encode_r2sonic_imagery_specific(fields):
     return body
 
 
+#: One KMALL_SPECIFIC transmit-sector entry as stored on the wire (gsf_dec.c's
+#: DecodeKMALLSpecific(); 53 bytes, including 8 spare).
+_KMALL_TX_SECTOR_DTYPE = np.dtype([
+    ('TxSectorNumb', 'u1'), ('TxArrNumber', 'u1'), ('TxSubArray', 'u1'),
+    ('SectorTransmitDelay_sec', '>i4'), ('TiltAngleReTx_deg', '>i4'),
+    ('TxNominalSourceLevel_dB', '>i4'), ('TxFocusRange_m', '>i4'),
+    ('CentreFreq_Hz', '>i4'), ('SignalBandWidth_Hz', '>i4'),
+    ('TotalSignalLength_sec', '>i4'), ('PulseShading', 'u1'), ('SignalWaveForm', 'u1'),
+    ('HighVoltageLevel_dB', '>i4'), ('SectorTrackingCorr_dB', '>i4'),
+    ('EffectiveSignalLength_sec', '>i4'), ('spare', 'V8'),
+])
+
+#: Divisor that turns each KMALL transmit-sector wire integer into its
+#: physical value; None keeps the raw integer.
+_KMALL_TX_SECTOR_SCALE = {
+    'TxSectorNumb': None, 'TxArrNumber': None, 'TxSubArray': None,
+    'SectorTransmitDelay_sec': 1.0e6, 'TiltAngleReTx_deg': 1.0e6,
+    'TxNominalSourceLevel_dB': 1.0e6, 'TxFocusRange_m': 1.0e3,
+    'CentreFreq_Hz': 1.0e3, 'SignalBandWidth_Hz': 1.0e3,
+    'TotalSignalLength_sec': 1.0e6, 'PulseShading': None, 'SignalWaveForm': None,
+    'HighVoltageLevel_dB': 1.0e6, 'SectorTrackingCorr_dB': 1.0e6,
+    'EffectiveSignalLength_sec': 1.0e6,
+}
+
+#: One KMALL_SPECIFIC extra-detection-class entry as stored on the wire
+#: (35 bytes, including 32 spare).
+_KMALL_EXTRA_CLASS_DTYPE = np.dtype([
+    ('NumExtraDetInClass', '>u2'), ('AlarmFlag', 'u1'), ('spare', 'V32'),
+])
+
+_KMALL_EXTRA_CLASS_SCALE = {'NumExtraDetInClass': None, 'AlarmFlag': None}
+
+
+def _scale_table(raw, scales):
+    """
+    Turn a structured numpy array of wire integers (one element per table
+    row, typically a zero-copy np.frombuffer() view of the payload) into
+    a table: a dictionary of column name -> numpy array. Each column in
+    scales is divided by its divisor in one vectorized operation, giving
+    float64 values; a column whose divisor is None is kept as integers,
+    copied out to a native int64 array so the result is writable and
+    independent of the payload.
+
+    :param raw: a structured numpy array of the wire fields.
+    :param scales: a dictionary of column name -> divisor or None, in
+        the column order the table should have. Spare fields are simply
+        left out of it.
+
+    :return: a dictionary of column name -> numpy array.
+    """
+    return {name: raw[name] / divisor if divisor is not None else raw[name].astype(np.int64)
+            for name, divisor in scales.items()}
+
+
 def _decode_kmall_specific(payload, pos):
     """
     Decode a GSF_SWATH_BATHY_SUBRECORD_KMALL_SPECIFIC subrecord (id
@@ -4553,10 +4659,12 @@ def _decode_kmall_specific(payload, pos):
 
     :return: a tuple of (record, bytes_consumed). record is a
         dictionary of the decoded scalar fields, plus two optional
-        keys: 'TxSectors' and 'ExtraDetectionClasses', each a
-        pandas.DataFrame with one row per decoded transmit-sector or
-        extra-detection-class entry respectively, present only when the
-        ping reported at least one row of that kind. bytes_consumed is
+        keys: 'TxSectors' and 'ExtraDetectionClasses', each a table (a
+        dictionary of column name -> numpy array, one element per
+        decoded transmit-sector or extra-detection-class entry
+        respectively), present only when the ping reported at least one
+        row of that kind. Each table is unpacked from the wire in a
+        single step, as a numpy view of all of its rows at once. bytes_consumed is
         the number of bytes read from payload.
     """
     start = pos
@@ -4634,26 +4742,9 @@ def _decode_kmall_specific(payload, pos):
     (raw,) = struct.unpack_from('>i', payload, pos); s['EllipsoidHeightReRefPoint_m'] = raw / 1.0e3; pos += 4
     pos += 32  # spare3
 
-    sector_rows = []
-    for _ in range(min(num_tx_sectors, 9)):  # gsf.h: GSF_MAX_KMALL_SECTORS
-        row = {}
-        row['TxSectorNumb'] = payload[pos]; pos += 1
-        row['TxArrNumber'] = payload[pos]; pos += 1
-        row['TxSubArray'] = payload[pos]; pos += 1
-        (raw,) = struct.unpack_from('>i', payload, pos); row['SectorTransmitDelay_sec'] = raw / 1.0e6; pos += 4
-        (raw,) = struct.unpack_from('>i', payload, pos); row['TiltAngleReTx_deg'] = raw / 1.0e6; pos += 4
-        (raw,) = struct.unpack_from('>i', payload, pos); row['TxNominalSourceLevel_dB'] = raw / 1.0e6; pos += 4
-        (raw,) = struct.unpack_from('>i', payload, pos); row['TxFocusRange_m'] = raw / 1.0e3; pos += 4
-        (raw,) = struct.unpack_from('>i', payload, pos); row['CentreFreq_Hz'] = raw / 1.0e3; pos += 4
-        (raw,) = struct.unpack_from('>i', payload, pos); row['SignalBandWidth_Hz'] = raw / 1.0e3; pos += 4
-        (raw,) = struct.unpack_from('>i', payload, pos); row['TotalSignalLength_sec'] = raw / 1.0e6; pos += 4
-        row['PulseShading'] = payload[pos]; pos += 1
-        row['SignalWaveForm'] = payload[pos]; pos += 1
-        (raw,) = struct.unpack_from('>i', payload, pos); row['HighVoltageLevel_dB'] = raw / 1.0e6; pos += 4
-        (raw,) = struct.unpack_from('>i', payload, pos); row['SectorTrackingCorr_dB'] = raw / 1.0e6; pos += 4
-        (raw,) = struct.unpack_from('>i', payload, pos); row['EffectiveSignalLength_sec'] = raw / 1.0e6; pos += 4
-        pos += 8  # spare1
-        sector_rows.append(row)
+    num_sectors = min(num_tx_sectors, 9)  # gsf.h: GSF_MAX_KMALL_SECTORS
+    sectors = np.frombuffer(payload, dtype=_KMALL_TX_SECTOR_DTYPE, count=num_sectors, offset=pos)
+    pos += num_sectors * _KMALL_TX_SECTOR_DTYPE.itemsize
 
     (s['NumBytesRxInfo'],) = struct.unpack_from('>H', payload, pos); pos += 2
     (s['NumSoundingsMaxMain'],) = struct.unpack_from('>H', payload, pos); pos += 2
@@ -4674,23 +4765,16 @@ def _decode_kmall_specific(payload, pos):
     (s['NumBytesPerClass'],) = struct.unpack_from('>H', payload, pos); pos += 2
     pos += 32  # spare4
 
-    class_rows = []
-    for _ in range(min(num_extra_classes, 11)):  # gsf.h: GSF_MAX_KMALL_EXTRA_CLASSES
-        (num_in_class,) = struct.unpack_from('>H', payload, pos); pos += 2
-        alarm_flag = payload[pos]; pos += 1
-        pos += 32  # spare
-        class_rows.append({'NumExtraDetInClass': num_in_class, 'AlarmFlag': alarm_flag})
+    num_classes = min(num_extra_classes, 11)  # gsf.h: GSF_MAX_KMALL_EXTRA_CLASSES
+    classes = np.frombuffer(payload, dtype=_KMALL_EXTRA_CLASS_DTYPE, count=num_classes, offset=pos)
+    pos += num_classes * _KMALL_EXTRA_CLASS_DTYPE.itemsize
 
     pos += 32  # spare5
 
-    if sector_rows:
-        sectors = pd.DataFrame(sector_rows)
-        sectors.index.name = 'TxSectors'
-        s['TxSectors'] = sectors
-    if class_rows:
-        classes = pd.DataFrame(class_rows)
-        classes.index.name = 'ExtraDetectionClasses'
-        s['ExtraDetectionClasses'] = classes
+    if num_sectors:
+        s['TxSectors'] = _scale_table(sectors, _KMALL_TX_SECTOR_SCALE)
+    if num_classes:
+        s['ExtraDetectionClasses'] = _scale_table(classes, _KMALL_EXTRA_CLASS_SCALE)
     return s, pos - start
 
 
@@ -4736,14 +4820,94 @@ def new_intensity_time_series_beam():
     """
     Return a new dictionary with every per-beam field name used within a
     GSF_SWATH_BATHY_SUBRECORD_INTENSITY_SERIES_ARRAY subrecord's 'Beams'
-    table, each pre-set to 0 or an empty list. _decode_brb_intensity()
-    builds each beam row starting from this same template, so the two
-    can never define a different set of field names.
+    table, each pre-set to 0: one row of that table. _decode_brb_intensity()
+    returns exactly these columns, so the two can never define a different
+    set of field names. Each beam's samples are not part of its row; they
+    live in the subrecord's flat 'Samples' array, in beam order.
 
-    :return: a dictionary with 'SampleCount', 'DetectSample',
-        'StartRangeSamples', and 'Samples' (an empty list) present.
+    :return: a dictionary with 'SampleCount', 'DetectSample', and
+        'StartRangeSamples' present, each pre-set to 0.
     """
-    return {'SampleCount': 0, 'DetectSample': 0, 'StartRangeSamples': 0, 'Samples': []}
+    return {'SampleCount': 0, 'DetectSample': 0, 'StartRangeSamples': 0}
+
+
+#: The first 6 bytes of each beam's 12-byte header in a
+#: GSF_SWATH_BATHY_SUBRECORD_INTENSITY_SERIES_ARRAY subrecord: sample count,
+#: bottom-detect sample index, and start-range sample index.
+_INTENSITY_BEAM_HEADER = struct.Struct('>3H')
+
+#: Just the sample count at the start of each beam's 12-byte header.
+_INTENSITY_SAMPLE_COUNT = struct.Struct('>H')
+
+#: Native unsigned sample dtype for each supported intensity sample width,
+#: in bytes. As in gsf_dec.c, any bits-per-sample value other than 12 is
+#: read as bits_per_sample // 8 whole bytes per sample.
+_INTENSITY_SAMPLE_DTYPE = {1: np.uint8, 2: np.uint16, 4: np.uint32}
+
+
+def _gather_intensity_samples(payload, sample_starts, sample_counts, bits_per_sample):
+    """
+    Gather every beam's intensity samples out of a ping payload into one
+    flat array, with vectorized indexing rather than a per-beam loop.
+    Beam i's samples are the sample_counts[i] consecutive entries that
+    follow those of beams 0..i-1.
+
+    :param payload: the raw bytes of the ping record.
+    :param sample_starts: a numpy int64 array of the byte offset at which
+        each beam's samples begin within payload.
+    :param sample_counts: a numpy int64 array of each beam's number of
+        samples.
+    :param bits_per_sample: 12, or a width whose bits_per_sample // 8 is
+        a key of _INTENSITY_SAMPLE_DTYPE.
+
+    :return: a flat numpy array of every beam's samples, in beam order:
+        uint16 for 12-bit samples, otherwise the native unsigned integer
+        type of the sample width.
+    """
+    byte_counts = (sample_counts + 1) // 2 * 3 if bits_per_sample == 12 \
+        else sample_counts * (bits_per_sample // 8)
+    # Source byte index of every sample byte: each beam's run of bytes,
+    # shifted from its position in the output to its position in payload.
+    total_bytes = int(byte_counts.sum())
+    first_out = np.cumsum(byte_counts) - byte_counts
+    index = np.repeat(sample_starts - first_out, byte_counts)
+    index += np.arange(total_bytes)
+    raw = np.frombuffer(payload, dtype=np.uint8)[index]
+
+    if bits_per_sample != 12:
+        native = _INTENSITY_SAMPLE_DTYPE[bits_per_sample // 8]
+        return raw.view(np.dtype(native).newbyteorder('>')).astype(native)
+
+    # Two 12-bit samples per 3 bytes: (b0 b1_hi) and (b1_lo b2), as in
+    # gsf_dec.c's DecodeBRBIntensity().
+    triples = raw.reshape(-1, 3).astype(np.uint16)
+    pairs = np.empty((len(triples), 2), dtype=np.uint16)
+    pairs[:, 0] = (triples[:, 0] << 4) | (triples[:, 1] >> 4)
+    pairs[:, 1] = ((triples[:, 1] & 0x0F) << 8) | triples[:, 2]
+    samples = pairs.reshape(-1)
+    # A beam with an odd sample count carries one padding sample at the
+    # end of its last pair; drop it.
+    odd = (sample_counts % 2) == 1
+    if odd.any():
+        pair_counts = (sample_counts + 1) // 2
+        padding = (np.cumsum(pair_counts) * 2 - 1)[odd]
+        samples = np.delete(samples, padding)
+    return samples
+
+
+def _split_intensity_samples(intensity_record):
+    """
+    Split an intensity time series record's flat 'Samples' array into one
+    array per beam, using its Beams['SampleCount'] column. Each returned
+    array is a view into 'Samples', not a copy.
+
+    :param intensity_record: a dictionary in the shape
+        _decode_brb_intensity() returns.
+
+    :return: a list of numpy arrays, one per beam, in beam order.
+    """
+    counts = np.asarray(intensity_record['Beams']['SampleCount'])
+    return np.split(np.asarray(intensity_record['Samples']), np.cumsum(counts)[:-1])
 
 
 def _decode_brb_intensity(payload, pos, num_beams, sensor_id):
@@ -4764,9 +4928,12 @@ def _decode_brb_intensity(payload, pos, num_beams, sensor_id):
     SeaBeam, the EM12/100/950/1000/121 family, GeoSwath, DeltaT), has no
     preamble at all, matching gsf_dec.c's switch default of a zero-length
     sensor block, and decoding proceeds straight to the per-beam samples.
-    The result starts from new_intensity_time_series_header()'s and
-    new_intensity_time_series_beam()'s templates, so its field names
-    always match what _encode_brb_intensity() expects.
+    The beam headers are walked in order, since each one's sample count
+    fixes where the next begins, but every beam's samples are then
+    gathered from the payload in one vectorized step. The result starts
+    from new_intensity_time_series_header()'s template, and its 'Beams'
+    columns are those of new_intensity_time_series_beam(), so its field
+    names always match what _encode_brb_intensity() expects.
 
     :param payload: the raw bytes of the ping record.
     :param pos: the byte offset within payload where this subrecord's
@@ -4781,11 +4948,15 @@ def _decode_brb_intensity(payload, pos, num_beams, sensor_id):
         bits-per-sample value does not resolve to a supported sample
         width. Otherwise, a tuple of (record, bytes_consumed). record is
         a dictionary with 'BitsPerSample', 'AppliedCorrections', any
-        fields decoded from a sensor-imagery preamble, and 'Beams', a
-        pandas.DataFrame with one row per beam holding 'SampleCount',
-        'DetectSample', 'StartRangeSamples', and 'Samples' (a list of
-        integer sample values). bytes_consumed is the number of bytes
-        read from payload.
+        fields decoded from a sensor-imagery preamble, 'Beams', a table
+        (a dictionary of column name -> numpy array, one element per
+        beam) of 'SampleCount', 'DetectSample', and 'StartRangeSamples',
+        and 'Samples', one flat numpy array holding every beam's samples
+        in beam order: beam i's are the Beams['SampleCount'][i] entries
+        following those of the beams before it, so
+        np.split(Samples, np.cumsum(Beams['SampleCount'])[:-1]) gives one
+        array per beam. bytes_consumed is the number of bytes read from
+        payload.
     """
     if num_beams <= 0:
         return None
@@ -4820,41 +4991,79 @@ def _decode_brb_intensity(payload, pos, num_beams, sensor_id):
     # else: no sensor-imagery preamble precedes the per-beam samples for
     # this sensor_id (gsf_dec.c's switch default, sensor_size=0).
 
-    bytes_per_sample = bits_per_sample // 8
-    beam_rows = []
-    for _beam in range(num_beams):
-        row = new_intensity_time_series_beam()
-        (row['SampleCount'], row['DetectSample'], row['StartRangeSamples']) = \
-            struct.unpack_from('>3H', payload, pos)
-        pos += 6
-        pos += 6  # spare
-        sample_count = row['SampleCount']
+    if bits_per_sample != 12 and bits_per_sample // 8 not in _INTENSITY_SAMPLE_DTYPE:
+        return None
 
-        if bits_per_sample == 12:
-            samples = []
-            i = 0
-            while i < sample_count:
-                b0, b1, b2 = payload[pos], payload[pos + 1], payload[pos + 2]
-                samples.append((b0 << 4) | (b1 >> 4))
-                if i + 1 < sample_count:
-                    samples.append(((b1 & 0x0F) << 8) | b2)
-                pos += 3
-                i += 2
-        elif bytes_per_sample in (1, 2, 4):
-            dtype = {1: '>u1', 2: '>u2', 4: '>u4'}[bytes_per_sample]
-            samples = list(np.frombuffer(payload, dtype=dtype, count=sample_count, offset=pos))
-            pos += sample_count * bytes_per_sample
-        else:
-            return None
+    # Each beam's fixed 12-byte header begins with its sample count, which
+    # fixes where the next beam's header starts, so the beams are located
+    # one at a time, reading only that count. Every beam's full header and
+    # samples are then gathered from the payload at once.
+    unpack_count = _INTENSITY_SAMPLE_COUNT.unpack_from
+    sample_starts = []
+    if bits_per_sample == 12:
+        for _beam in range(num_beams):
+            (count,) = unpack_count(payload, pos)
+            pos += 12  # 3 x u16, plus 6 spare bytes
+            sample_starts.append(pos)
+            pos += (count + 1) // 2 * 3
+    else:
+        bytes_per_sample = bits_per_sample // 8
+        for _beam in range(num_beams):
+            (count,) = unpack_count(payload, pos)
+            pos += 12  # 3 x u16, plus 6 spare bytes
+            sample_starts.append(pos)
+            pos += count * bytes_per_sample
+    sample_starts = np.array(sample_starts, dtype=np.int64)
+    header_bytes = np.frombuffer(payload, dtype=np.uint8)[(sample_starts - 12)[:, None] + np.arange(6)]
+    headers = header_bytes.view('>u2').astype(np.int64)
+    sample_counts = headers[:, 0]
 
-        row['Samples'] = samples
-        beam_rows.append(row)
-
-    beams = pd.DataFrame(beam_rows)
-    beams.index.name = 'Beam'
-    record = dict(header)
-    record['Beams'] = beams
+    record = header
+    record['Beams'] = {
+        'SampleCount': sample_counts,
+        'DetectSample': headers[:, 1],
+        'StartRangeSamples': headers[:, 2],
+    }
+    record['Samples'] = _gather_intensity_samples(payload, sample_starts, sample_counts, bits_per_sample)
     return record, pos - start
+
+
+def _pack_intensity_samples(samples, sample_counts, bits_per_sample):
+    """
+    Pack a flat array of every beam's intensity samples into their wire
+    bytes in one vectorized step: the inverse of
+    _gather_intensity_samples(). 12-bit samples are packed two into
+    every three bytes using gsf_enc.c's EncodeBRBIntensity() bit layout,
+    with a beam whose sample count is odd padded out to a whole pair with
+    a zero sample; every other width is written as big-endian unsigned
+    integers.
+
+    :param samples: a flat numpy array of every beam's samples, in beam
+        order.
+    :param sample_counts: a numpy int64 array of each beam's number of
+        samples; these must total len(samples).
+    :param bits_per_sample: 8, 12, 16, or 32.
+
+    :return: a tuple of (wire, beam_bytes). wire is every beam's packed
+        samples, as bytes, in beam order. beam_bytes is a numpy int64
+        array of how many of those bytes belong to each beam.
+    """
+    if bits_per_sample != 12:
+        beam_bytes = sample_counts * (bits_per_sample // 8)
+        wire_dtype = np.dtype(_INTENSITY_SAMPLE_DTYPE[bits_per_sample // 8]).newbyteorder('>')
+        return samples.astype(wire_dtype).tobytes(), beam_bytes
+
+    beam_bytes = (sample_counts + 1) // 2 * 3
+    values = samples.astype(np.uint16) & 0x0FFF
+    odd = (sample_counts % 2) == 1
+    if odd.any():
+        values = np.insert(values, np.cumsum(sample_counts)[odd], 0)
+    pairs = values.reshape(-1, 2)
+    packed = np.empty((len(pairs), 3), dtype=np.uint8)
+    packed[:, 0] = pairs[:, 0] >> 4
+    packed[:, 1] = ((pairs[:, 0] & 0x0F) << 4) | (pairs[:, 1] >> 8)
+    packed[:, 2] = pairs[:, 1] & 0xFF
+    return packed.tobytes(), beam_bytes
 
 
 def _encode_brb_intensity(record, sensor_id):
@@ -4869,18 +5078,19 @@ def _encode_brb_intensity(record, sensor_id):
     same for every sensor, but gsflib inserts an optional sensor-specific
     "imagery" preamble between them, whose size and layout depend on
     sensor_id, dispatched here exactly as _decode_brb_intensity() does.
-    Each beam's sample count is taken from the length of its 'Samples'
-    list rather than trusting a separately stored count, so the two can
-    never disagree. 12-bit samples are packed two-into-three-bytes using
-    gsflib's own bit layout; 8-, 16-, and 32-bit samples are packed as
+    Every beam's samples are packed to wire bytes in one vectorized step
+    (see _pack_intensity_samples()): 12-bit samples two-into-three-bytes
+    using gsflib's own bit layout, and 8-, 16-, and 32-bit samples as
     plain big-endian values.
 
     :param record: a dictionary in the same shape _decode_brb_intensity()
-        returns or new_intensity_time_series_header() creates, plus a
-        'Beams' key holding a pandas.DataFrame with one row per beam and
-        'DetectSample', 'StartRangeSamples', and 'Samples' columns. A
-        header field that is missing from the dictionary is written as
-        zero.
+        returns: the header fields new_intensity_time_series_header()
+        creates, plus a 'Beams' table (a dictionary of column name ->
+        array-like, or a pandas.DataFrame) with 'SampleCount',
+        'DetectSample', and 'StartRangeSamples' columns, one row per
+        beam, and 'Samples', a flat array-like of every beam's samples in
+        beam order. A header field that is missing from the dictionary is
+        written as zero.
     :param sensor_id: the vendor "_SPECIFIC" subrecord id for this ping,
         used to decide which sensor-imagery preamble format, if any,
         precedes the per-beam samples. This should be the same value
@@ -4894,7 +5104,8 @@ def _encode_brb_intensity(record, sensor_id):
 
     :raises ValueError: if record's 'BitsPerSample' is not 8, 12, 16, or
         32, matching the reference encoder's GSF_MB_PING_RECORD_ENCODE_FAILED
-        error for the same condition.
+        error for the same condition; or if Beams['SampleCount'] does not
+        total the length of 'Samples'.
     """
     bits_per_sample = int(record.get('BitsPerSample', 16))
     if bits_per_sample not in (8, 12, 16, 32):
@@ -4921,31 +5132,31 @@ def _encode_brb_intensity(record, sensor_id):
     # else: no sensor-imagery preamble precedes the per-beam samples for
     # this sensor_id (gsf_enc.c's switch default, sensor_size=0).
 
-    bytes_per_sample = bits_per_sample // 8
     beams = record.get('Beams')
-    if beams is None:
-        beams = pd.DataFrame(columns=['DetectSample', 'StartRangeSamples', 'Samples'])
-    for row in beams.itertuples():
-        samples = list(row.Samples)
-        sample_count = len(samples)
-        body += struct.pack('>3H', sample_count, int(row.DetectSample), int(row.StartRangeSamples))
-        body += b'\x00' * 6  # spare
+    num_beams = _table_length(beams)
+    if num_beams:
+        sample_counts = np.asarray(beams['SampleCount'], dtype=np.int64)
+        detect_samples = np.asarray(beams['DetectSample'], dtype=np.int64)
+        start_ranges = np.asarray(beams['StartRangeSamples'], dtype=np.int64)
+    else:
+        sample_counts = detect_samples = start_ranges = np.zeros(0, dtype=np.int64)
+    samples = np.asarray(record.get('Samples', ()))
+    if int(sample_counts.sum()) != len(samples):
+        raise ValueError(
+            "IntensityTimeSeries: Beams['SampleCount'] totals %d, but 'Samples' holds %d"
+            % (int(sample_counts.sum()), len(samples)))
 
-        if bits_per_sample == 12:
-            for i in range(0, sample_count, 2):
-                s0 = int(samples[i]) & 0xFFF
-                b0 = (s0 >> 4) & 0xFF
-                if i + 1 < sample_count:
-                    s1 = int(samples[i + 1]) & 0xFFF
-                    b1 = ((s0 & 0x0F) << 4) | ((s1 >> 8) & 0x0F)
-                    b2 = s1 & 0xFF
-                else:
-                    b1 = (s0 & 0x0F) << 4
-                    b2 = 0
-                body += bytes((b0, b1, b2))
-        else:
-            dtype = {1: '>u1', 2: '>u2', 4: '>u4'}[bytes_per_sample]
-            body += np.array(samples, dtype=dtype).tobytes()
+    wire, beam_bytes = _pack_intensity_samples(samples, sample_counts, bits_per_sample)
+    beam_ends = np.cumsum(beam_bytes).tolist()
+    parts = [body]
+    beam_start = 0
+    for count, detect, start_range, beam_end in zip(
+            sample_counts.tolist(), detect_samples.tolist(), start_ranges.tolist(), beam_ends):
+        parts.append(_INTENSITY_BEAM_HEADER.pack(count, detect, start_range))
+        parts.append(b'\x00' * 6)  # spare
+        parts.append(wire[beam_start:beam_end])
+        beam_start = beam_end
+    body = b''.join(parts)
 
     # Unlike every other ping subrecord, gsf_enc.c's EncodeBRBIntensity()
     # counts its own 4-byte identifier word in this subrecord's size field.
@@ -5047,8 +5258,10 @@ def _decode_ping_array(payload, pos, size, num_beams, multiplier, offset, signed
     if dtype is None:
         return None
 
-    raw = np.frombuffer(payload, dtype=dtype, count=num_beams, offset=pos)
-    values = raw.astype(np.float64) / multiplier - offset
+    # Dividing the zero-copy view of the wire integers yields the one new
+    # float64 array needed; the offset is then removed in place.
+    values = np.frombuffer(payload, dtype=dtype, count=num_beams, offset=pos) / multiplier
+    values -= offset
     if truncate_to_int:
         values = np.trunc(values).astype(np.int64)
     return values
@@ -5131,14 +5344,15 @@ def _decode_swath_bathymetry_ping(payload, major_version, scale_factors, decode_
         example 'PingTime', 'Longitude_deg', 'Latitude_deg',
         'NumberBeams', 'CenterBeam', 'PingFlags', and 'Heading_deg') are
         stored flat, unprefixed, at the top level. 'Beams' is present, as
-        a pandas.DataFrame indexed by beam number, whenever at least one
-        per-beam array subrecord was decoded for this ping.
-        'IntensityTimeSeries' is present, as a dictionary in the shape
-        _decode_brb_intensity() returns (with its own 'Beams'
-        pandas.DataFrame nested inside), only when decode_intensity is
-        True and the ping carried that subrecord. 'SensorSpecificID' (an
-        int) and 'SensorSpecific' (a dictionary, which may itself contain
-        pandas.DataFrame tables) are present together whenever the ping
+        a table (a dictionary of column name -> numpy array, one element
+        per beam, in beam order), whenever at least one per-beam array
+        subrecord was decoded for this ping. 'IntensityTimeSeries' is
+        present, as a dictionary in the shape _decode_brb_intensity()
+        returns (with its own 'Beams' table and flat 'Samples' array),
+        only when decode_intensity is True and the ping carried that
+        subrecord. 'SensorSpecificID' (an int) and 'SensorSpecific' (a
+        dictionary, which may itself contain tables in the same
+        dictionary-of-arrays form) are present together whenever the ping
         carried a vendor sensor-specific subrecord that could be
         decoded -- at most one such subrecord can appear per ping, per
         gsf.h's union gsfSensorSpecific, and the corresponding vendor
@@ -5207,10 +5421,10 @@ def _decode_swath_bathymetry_ping(payload, major_version, scale_factors, decode_
             scale_factors.update(table)
 
         elif subrecord_id == _SUBRECORD_BEAM_FLAGS_ARRAY:
-            values = np.frombuffer(payload, dtype='>u1', count=number_beams, offset=pos) \
-                if subrecord_size == number_beams else None
-            if values is not None:
-                beam_columns['BeamFlags'] = values
+            if subrecord_size == number_beams:
+                # Copied out of the payload so the array is writable.
+                beam_columns['BeamFlags'] = np.frombuffer(
+                    payload, dtype=np.uint8, count=number_beams, offset=pos).copy()
             else:
                 notes.append("BeamFlags (%d bytes) not decoded: unexpected size" % subrecord_size)
 
@@ -5281,9 +5495,7 @@ def _decode_swath_bathymetry_ping(payload, major_version, scale_factors, decode_
         pos += subrecord_size
 
     if beam_columns:
-        beams = pd.DataFrame(beam_columns)
-        beams.index.name = 'Beam'
-        record['Beams'] = beams
+        record['Beams'] = beam_columns
 
     if sensor_specific_id is not None:
         record['SensorSpecificID'] = sensor_specific_id
@@ -5322,7 +5534,8 @@ def _decode_single_beam_ping(payload):
         example 'PingTime', 'Longitude_deg', 'Latitude_deg', and
         'Depth_m') are stored flat, unprefixed, at the top level.
         'SensorSpecificID' (an int) and 'SensorSpecific' (a dictionary,
-        with any tables it contains as pandas.DataFrames) are present
+        with any tables it contains as dictionaries of column name ->
+        numpy array) are present
         together only when the ping carried a sensor-specific tail
         subrecord that this function was able to decode. 'Notes' is
         always present, as a list of strings describing anything that
@@ -6399,7 +6612,8 @@ def _encode_single_beam_ping(record):
         'Heave_m', 'Depth_m', and 'SoundSpeedCorrection_m') are all
         required. 'PositioningSystemType' is optional and defaults to 0.
         'SensorSpecificID' (an int) and 'SensorSpecific' (a dictionary,
-        with any table values as pandas.DataFrame) are optional and,
+        with any table values as dictionaries of column name ->
+        array-like, or pandas.DataFrames) are optional and,
         together, describe the one sensor-specific tail subrecord to
         encode. 'Notes', if present, is ignored, since there is no wire
         slot for it.
@@ -6903,7 +7117,8 @@ def new_kmall_tx_sector():
     present, pre-set to 0 or 0.0, representing one row of the
     'TxSectors' table. This function exists so a caller can build that
     table without having to remember every field name by hand, for
-    example by assigning pd.DataFrame([new_kmall_tx_sector(), ...]) to
+    example by assigning pd.DataFrame([new_kmall_tx_sector(), ...]) (or
+    the equivalent dictionary of column name -> array) to
     record['SensorSpecific']['TxSectors'] before calling
     write_swath_bathymetry_ping(). See new_kmall_specific() for why 0,
     rather than a GSF_NULL_* sentinel, is the best available default
@@ -6945,22 +7160,22 @@ def _encode_kmall_specific(record):
         same shape _decode_kmall_specific() returns them; any field
         missing from `record` defaults to 0. It may also carry the
         optional 'TxSectors' and 'ExtraDetectionClasses' keys, each a
-        pandas.DataFrame, of which at most 9 and 11 rows respectively are
-        written (GSF_MAX_KMALL_SECTORS and GSF_MAX_KMALL_EXTRA_CLASSES)
-        -- the exact DataFrames _decode_kmall_specific() returns can be
-        passed straight back in. The NumTxSectors and
-        NumExtraDetectionClasses fields are always derived from those
-        tables' row counts, not read from `record`.
+        table (a dictionary of column name -> array-like, or a
+        pandas.DataFrame), of which at most 9 and 11 rows respectively
+        are written (GSF_MAX_KMALL_SECTORS and
+        GSF_MAX_KMALL_EXTRA_CLASSES) -- the exact tables
+        _decode_kmall_specific() returns can be passed straight back in.
+        The NumTxSectors and NumExtraDetectionClasses fields are always
+        derived from the number of rows actually written, not read from
+        `record`.
 
     :return: the encoded subrecord as bytes, including its leading 4-byte
         subrecord id and size word.
     """
     sector_rows = record.get('TxSectors')
-    if sector_rows is None:
-        sector_rows = pd.DataFrame()
     class_rows = record.get('ExtraDetectionClasses')
-    if class_rows is None:
-        class_rows = pd.DataFrame()
+    num_sectors = min(_table_length(sector_rows), 9)  # gsf.h: GSF_MAX_KMALL_SECTORS
+    num_classes = min(_table_length(class_rows), 11)  # gsf.h: GSF_MAX_KMALL_EXTRA_CLASSES
     g = record.get
 
     out = bytearray()
@@ -7006,7 +7221,7 @@ def _encode_kmall_specific(record):
     out += struct.pack('>h', _gsf_round(g('TransmitPower_dB', 0.0) * 1.0e2))
     out += struct.pack('>H', g('SLrampUpTimeRemaining', 0))
     out += struct.pack('>i', _gsf_round(g('YawAngle_deg', 0.0) * 1.0e6))
-    out += struct.pack('>H', len(sector_rows))
+    out += struct.pack('>H', num_sectors)
     out += struct.pack('>H', g('NumBytesPerTxSector', 53))
     out += struct.pack('>i', _gsf_round(g('HeadingVessel_deg', 0.0) * 1.0e6))
     out += struct.pack('>i', _gsf_round(g('SoundSpeedAtTxDepth_mPerSec', 0.0) * 1.0e6))
@@ -7020,7 +7235,7 @@ def _encode_kmall_specific(record):
     out += struct.pack('>i', _gsf_round(g('EllipsoidHeightReRefPoint_m', 0.0) * 1.0e3))
     out += b'\x00' * 32
 
-    for _, row in sector_rows.iloc[:9].iterrows():  # gsf.h: GSF_MAX_KMALL_SECTORS
+    for row in _table_rows(sector_rows, limit=num_sectors):
         r = row.get
         out += struct.pack('>3B', int(r('TxSectorNumb', 0)), int(r('TxArrNumber', 0)), int(r('TxSubArray', 0)))
         out += struct.pack('>i', _gsf_round(r('SectorTransmitDelay_sec', 0.0) * 1.0e6))
@@ -7051,11 +7266,11 @@ def _encode_kmall_specific(record):
     out += struct.pack('>i', _gsf_round(g('BSoblique_dB', 0.0) * 1.0e6))
     out += struct.pack('>H', g('ExtraDetectionAlarmFlag', 0))
     out += struct.pack('>H', g('NumExtraDetections', 0))
-    out += struct.pack('>H', len(class_rows))
+    out += struct.pack('>H', num_classes)
     out += struct.pack('>H', g('NumBytesPerClass', 35))
     out += b'\x00' * 32
 
-    for _, row in class_rows.iloc[:11].iterrows():  # gsf.h: GSF_MAX_KMALL_EXTRA_CLASSES
+    for row in _table_rows(class_rows, limit=num_classes):
         out += struct.pack('>H', int(row.get('NumExtraDetInClass', 0)))
         out += struct.pack('>B', int(row.get('AlarmFlag', 0)))
         out += b'\x00' * 32
@@ -7200,15 +7415,18 @@ def _encode_swath_bathymetry_ping(record, scale_factors=None, major_version=3):
         dictionary of that family's scalar field names, as returned,
         unprefixed, by _decode_swath_bathymetry_ping(), plus, for
         families with nested per-element arrays (EM3, EM3Raw, EM4, and
-        KMALL), any table entries as pandas.DataFrame values keyed by
-        their table name (for example 'TxSectors') -- the exact
-        DataFrames _decode_swath_bathymetry_ping() returns can be passed
-        straight back in, with no conversion required.
+        KMALL), any table entries keyed by their table name (for example
+        'TxSectors'), each a dictionary of column name -> array-like or
+        a pandas.DataFrame -- the exact tables
+        _decode_swath_bathymetry_ping() returns can be passed straight
+        back in, with no conversion required.
 
         record['IntensityTimeSeries'], if present, is a dictionary in
-        the same shape _decode_brb_intensity() returns or
-        new_intensity_time_series_header() creates, plus a 'Beams' key
-        holding a pandas.DataFrame with one row per beam. It is encoded
+        the same shape _decode_brb_intensity() returns: the fields
+        new_intensity_time_series_header() creates, plus a 'Beams' table
+        of each beam's 'SampleCount', 'DetectSample', and
+        'StartRangeSamples', and a flat 'Samples' array holding every
+        beam's samples in beam order. It is encoded
         as a GSF_SWATH_BATHY_SUBRECORD_INTENSITY_SERIES_ARRAY subrecord,
         written after the sensor-specific subrecord, matching the
         reference gsflib C library's own subrecord ordering. Whichever
@@ -7724,6 +7942,22 @@ class gsf():
     ###########################################################
 
     @staticmethod
+    def _table_to_string(table, index_name):
+        """
+        A print_records() helper that renders a table (a dictionary of
+        column name -> equal-length array) as aligned text, one row per
+        element, via a pandas.DataFrame built only for display.
+
+        :param table: the table to render.
+        :param index_name: the label for the row-number column.
+
+        :return: the rendered table, as a string.
+        """
+        frame = pd.DataFrame(table)
+        frame.index.name = index_name
+        return frame.to_string()
+
+    @staticmethod
     def _print_attitude_record(record):
         """
         A print_records() helper that prints one decoded
@@ -7737,11 +7971,10 @@ class gsf():
             returned by _decode_attitude().
         """
         print("  NumMeasurements : %s" % record['NumMeasurements'])
-        table = pd.DataFrame({k: v for k, v in record.items() if k != 'NumMeasurements'})
-        table.index.name = 'Measurement'
-        if len(table):
+        table = {k: v for k, v in record.items() if k != 'NumMeasurements'}
+        if _table_length(table):
             print("-- Measurements --")
-            print(table.to_string())
+            print(gsf._table_to_string(table, 'Measurement'))
 
     @staticmethod
     def _print_ping_record(record):
@@ -7783,35 +8016,38 @@ class gsf():
         for note in record.get('Notes', []):
             print("  # %s" % note)
         beams = record.get('Beams')
-        if beams is not None and len(beams):
+        if _table_length(beams):
             print("-- Beams --")
-            print(beams.to_string())
+            print(gsf._table_to_string(beams, 'Beam'))
         intensity_record = record.get('IntensityTimeSeries')
         if intensity_record:
-            scalar_items = {k: v for k, v in intensity_record.items() if k != 'Beams'}
+            scalar_items = {k: v for k, v in intensity_record.items() if k not in ('Beams', 'Samples')}
             if scalar_items:
                 print("-- IntensityTimeSeries --")
                 width = max(len(k) for k in scalar_items)
                 for k, v in scalar_items.items():
                     print("  %-*s : %s" % (width, k, v))
             intensity_beams = intensity_record.get('Beams')
-            if intensity_beams is not None and len(intensity_beams):
+            if _table_length(intensity_beams):
+                # Shown with each beam's own samples alongside its row.
+                display = dict(intensity_beams)
+                display['Samples'] = [s.tolist() for s in _split_intensity_samples(intensity_record)]
                 print("-- IntensityTimeSeries.Beams --")
-                print(intensity_beams.to_string())
+                print(gsf._table_to_string(display, 'Beam'))
         sensor_specific = record.get('SensorSpecific')
         if sensor_specific:
             sensor_id = record.get('SensorSpecificID')
             family_name = _SENSOR_SPECIFIC_SUBRECORD_NAMES.get(sensor_id, str(sensor_id))
-            scalar_items = {k: v for k, v in sensor_specific.items() if not isinstance(v, pd.DataFrame)}
+            scalar_items = {k: v for k, v in sensor_specific.items() if not isinstance(v, dict)}
             if scalar_items:
                 print("-- SensorSpecific (%s, id=%s) --" % (family_name, sensor_id))
                 width = max(len(k) for k in scalar_items)
                 for k, v in scalar_items.items():
                     print("  %-*s : %s" % (width, k, v))
             for k, v in sensor_specific.items():
-                if isinstance(v, pd.DataFrame) and len(v):
+                if isinstance(v, dict) and _table_length(v):
                     print("-- %s --" % k)
-                    print(v.to_string())
+                    print(gsf._table_to_string(v, k))
 
     def print_records(self, record_type=None):
         """
@@ -8022,10 +8258,13 @@ class gsf():
                         else:
                             print("# ping offset=%d ping_time=%s" % (offset, record.get('PingTime', '?')))
                             print("# Beam,SampleCount,DetectSample,StartRangeSamples,Sample0,Sample1,...")
-                            for beam, row in intensity_record['Beams'].iterrows():
-                                fields = [str(beam), str(row['SampleCount']), str(row['DetectSample']),
-                                          str(row['StartRangeSamples'])]
-                                fields.extend(str(v) for v in row['Samples'])
+                            beams = intensity_record['Beams']
+                            for beam, (count, detect, start_range, samples) in enumerate(zip(
+                                    beams['SampleCount'].tolist(), beams['DetectSample'].tolist(),
+                                    beams['StartRangeSamples'].tolist(),
+                                    _split_intensity_samples(intensity_record))):
+                                fields = [str(beam), str(count), str(detect), str(start_range)]
+                                fields.extend(str(v) for v in samples.tolist())
                                 print(",".join(fields))
 
             self.FID.seek(offset + GSF_RECORD_FRAMING_SIZE + readSize, 0)

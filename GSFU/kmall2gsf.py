@@ -51,7 +51,6 @@ import struct
 import sys
 
 import numpy as np
-import pandas as pd
 
 from GSFU.gsfu import (
     GSF_NULL_COURSE,
@@ -205,8 +204,8 @@ def interpolate_attitude(attitude_samples, t):
 
 def mrz_to_kmall_specific(mrz):
     """
-    Build the KMALL_SPECIFIC scalar field dictionary and the list of
-    per-transmit-sector dictionaries that a GSF ping's sensor-specific
+    Build the KMALL_SPECIFIC scalar field dictionary and the
+    per-transmit-sector table that a GSF ping's sensor-specific
     subrecord needs, directly from one MRZ datagram (as returned by
     kmall.kmall.read_EMdgmMRZ()). The field names this returns match the
     key names GSFU.gsfu._decode_kmall_specific() decodes from a GSF file,
@@ -217,8 +216,10 @@ def mrz_to_kmall_specific(mrz):
         kmall.kmall.read_EMdgmMRZ().
 
     :return: a tuple of (kmall_specific, tx_sectors). kmall_specific is a
-        dictionary of scalar KMALL_SPECIFIC fields. tx_sectors is a list
-        of dictionaries, one per transmit sector.
+        dictionary of scalar KMALL_SPECIFIC fields. tx_sectors is a table:
+        a dictionary of column name -> numpy array, one element per
+        transmit sector, in the same form _decode_kmall_specific()
+        returns its 'TxSectors'.
     """
     header = mrz['header']
     cmn = mrz['cmnPart']
@@ -295,23 +296,23 @@ def mrz_to_kmall_specific(mrz):
         'NumBytesPerClass': mrz['rxInfo']['numBytesPerClass'],
     }
 
-    tx_sectors = [
-        {
-            'TxSectorNumb': s['txSectorNumb'],
-            'TxArrNumber': s['txArrNumber'],
-            'TxSubArray': s['txSubArray'],
-            'SectorTransmitDelay_sec': s['sectorTransmitDelay_sec'],
-            'TiltAngleReTx_deg': s['tiltAngleReTx_deg'],
-            'TxNominalSourceLevel_dB': s['txNominalSourceLevel_dB'],
-            'TxFocusRange_m': s['txFocusRange_m'],
-            'CentreFreq_Hz': s['centreFreq_Hz'],
-            'SignalBandWidth_Hz': s['signalBandWidth_Hz'],
-            'TotalSignalLength_sec': s['totalSignalLength_sec'],
-            'PulseShading': s['pulseShading'],
-            'SignalWaveForm': s['signalWaveForm'],
-        }
-        for s in _listofdicts(mrz['txSectorInfo'])
-    ]
+    sectors = _listofdicts(mrz['txSectorInfo'])
+    kmall_names = {
+        'TxSectorNumb': 'txSectorNumb',
+        'TxArrNumber': 'txArrNumber',
+        'TxSubArray': 'txSubArray',
+        'SectorTransmitDelay_sec': 'sectorTransmitDelay_sec',
+        'TiltAngleReTx_deg': 'tiltAngleReTx_deg',
+        'TxNominalSourceLevel_dB': 'txNominalSourceLevel_dB',
+        'TxFocusRange_m': 'txFocusRange_m',
+        'CentreFreq_Hz': 'centreFreq_Hz',
+        'SignalBandWidth_Hz': 'signalBandWidth_Hz',
+        'TotalSignalLength_sec': 'totalSignalLength_sec',
+        'PulseShading': 'pulseShading',
+        'SignalWaveForm': 'signalWaveForm',
+    }
+    tx_sectors = {gsf_name: np.array([s[kmall_name] for s in sectors])
+                  for gsf_name, kmall_name in kmall_names.items()}
 
     return kmall_specific, tx_sectors
 
@@ -600,7 +601,7 @@ def convert(kmall_path, gsf_path, attitude_source=1, verbose=False):
         record = mrz_to_ping_scalars(mrz, pitch, roll, heave)
         record['Beams'] = mrz_to_beams(mrz)
         record['SensorSpecificID'] = 156
-        record['SensorSpecific'] = {**kmall_specific, 'TxSectors': pd.DataFrame(tx_sectors)}
+        record['SensorSpecific'] = {**kmall_specific, 'TxSectors': tx_sectors}
 
         G.write_swath_bathymetry_ping(record)
         ping_count += 1

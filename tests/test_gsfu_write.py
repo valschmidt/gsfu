@@ -157,6 +157,18 @@ from GSFU.gsfu import (
 )
 
 
+
+def _nrows(table):
+    """Number of rows in a decoded table (a dict of equal-length column arrays)."""
+    return len(next(iter(table.values())))
+
+
+def _beam_samples(intensity_record, beam):
+    """One beam's samples, as a list, from a decoded intensity time series record."""
+    counts = list(intensity_record['Beams']['SampleCount'])
+    start = sum(counts[:beam])
+    return list(intensity_record['Samples'][start:start + counts[beam]])
+
 # ---------------------------------------------------------------------------
 # _gsf_round / _gsf_epoch
 # ---------------------------------------------------------------------------
@@ -1608,9 +1620,9 @@ class TestEncodeEm4Specific:
         assert decoded['RunTime.MinDepth_m'] == pytest.approx(10.0)
         assert decoded['PuStatus.SensorStatus'] == 63
         assert decoded['PuStatus.YawStabilization_deg'] == pytest.approx(-1.5)
-        assert len(decoded['TxSectors']) == 2
-        assert decoded['TxSectors'].iloc[0]['CenterFrequency_Hz'] == pytest.approx(71000.0)
-        assert decoded['TxSectors'].iloc[1]['TiltAngle_deg'] == pytest.approx(-1.5)
+        assert _nrows(decoded['TxSectors']) == 2
+        assert decoded['TxSectors']['CenterFrequency_Hz'][0] == pytest.approx(71000.0)
+        assert decoded['TxSectors']['TiltAngle_deg'][1] == pytest.approx(-1.5)
         assert consumed == len(payload) - 4
 
     def test_registered_under_every_em4_id(self):
@@ -1713,9 +1725,9 @@ class TestEncodeEm3Specific:
         payload = _encode_em3_specific(record)
         _decoded, consumed = _decode_em3_specific(payload, 4)
 
-        assert len(_decoded['RunTime']) == 1
-        assert _decoded['RunTime'].iloc[0]['Head'] == 0
-        assert _decoded['RunTime'].iloc[0]['ModelNumber'] == 3000
+        assert _nrows(_decoded['RunTime']) == 1
+        assert _decoded['RunTime']['Head'][0] == 0
+        assert _decoded['RunTime']['ModelNumber'][0] == 3000
         assert consumed == len(payload) - 4
 
     def test_round_trip_both_heads(self):
@@ -1727,10 +1739,10 @@ class TestEncodeEm3Specific:
         payload = _encode_em3_specific(record)
         _decoded, consumed = _decode_em3_specific(payload, 4)
 
-        assert len(_decoded['RunTime']) == 2
-        assert _decoded['RunTime'].iloc[0]['Head'] == 0
-        assert _decoded['RunTime'].iloc[1]['Head'] == 1
-        assert _decoded['RunTime'].iloc[1]['SerialNumber'] == 101
+        assert _nrows(_decoded['RunTime']) == 2
+        assert _decoded['RunTime']['Head'][0] == 0
+        assert _decoded['RunTime']['Head'][1] == 1
+        assert _decoded['RunTime']['SerialNumber'][1] == 101
         assert consumed == len(payload) - 4
 
     def test_head1_without_head0_raises(self):
@@ -1792,10 +1804,10 @@ class TestEncodeEm3RawSpecific:
         assert decoded['RunTime.MinDepth_m'] == pytest.approx(10.0)
         assert decoded['PuStatus.SensorStatus'] == 63
         assert decoded['PuStatus.YawStabilization_deg'] == pytest.approx(-1.5)
-        assert len(decoded['TxSectors']) == 2
-        assert decoded['TxSectors'].iloc[0]['CenterFrequency_Hz'] == pytest.approx(71000.0)
-        assert 'MeanAbsorption_dBkm' not in decoded['TxSectors'].columns
-        assert decoded['TxSectors'].iloc[1]['TiltAngle_deg'] == pytest.approx(-1.5)
+        assert _nrows(decoded['TxSectors']) == 2
+        assert decoded['TxSectors']['CenterFrequency_Hz'][0] == pytest.approx(71000.0)
+        assert 'MeanAbsorption_dBkm' not in decoded['TxSectors']
+        assert decoded['TxSectors']['TiltAngle_deg'][1] == pytest.approx(-1.5)
         assert consumed == len(payload) - 4
 
     def test_registered_under_every_em3raw_id(self):
@@ -1858,9 +1870,9 @@ class TestEncodeKmallSpecific:
         decoded, _consumed = _decode_kmall_specific(payload, 4)
 
         assert decoded['NumTxSectors'] == 2
-        assert len(decoded['TxSectors']) == 2
-        assert decoded['TxSectors'].iloc[0]['CentreFreq_Hz'] == pytest.approx(49000.0)
-        assert decoded['TxSectors'].iloc[1]['TiltAngleReTx_deg'] == pytest.approx(-3.2)
+        assert _nrows(decoded['TxSectors']) == 2
+        assert decoded['TxSectors']['CentreFreq_Hz'][0] == pytest.approx(49000.0)
+        assert decoded['TxSectors']['TiltAngleReTx_deg'][1] == pytest.approx(-3.2)
 
     def test_extra_detection_classes_round_trip(self):
         classes = pd.DataFrame([{'NumExtraDetInClass': 5, 'AlarmFlag': 1}])
@@ -1869,13 +1881,13 @@ class TestEncodeKmallSpecific:
         decoded, _consumed = _decode_kmall_specific(payload, 4)
 
         assert decoded['NumExtraDetectionClasses'] == 1
-        assert len(decoded['ExtraDetectionClasses']) == 1
-        assert decoded['ExtraDetectionClasses'].iloc[0]['NumExtraDetInClass'] == 5
-        assert decoded['ExtraDetectionClasses'].iloc[0]['AlarmFlag'] == 1
+        assert _nrows(decoded['ExtraDetectionClasses']) == 1
+        assert decoded['ExtraDetectionClasses']['NumExtraDetInClass'][0] == 5
+        assert decoded['ExtraDetectionClasses']['AlarmFlag'][0] == 1
 
     def test_byte_length_matches_header_word(self):
         payload = _encode_kmall_specific(
-            {'TxSectors': pd.DataFrame([{}]), 'ExtraDetectionClasses': pd.DataFrame([{}])})
+            {'TxSectors': {'TxSectorNumb': [0]}, 'ExtraDetectionClasses': {'AlarmFlag': [0]}})
         word, = struct.unpack_from('>I', payload, 0)
         assert (word >> 24) & 0xFF == 156
         assert word & 0xFFFFFF == len(payload) - 4
@@ -1934,13 +1946,15 @@ class TestEncodeBRBIntensity:
     def _record(bits_per_sample, beams, sensor_id=None, **fields):
         record = new_intensity_time_series_header(sensor_id)
         record.update(BitsPerSample=bits_per_sample, **fields)
-        rows = []
-        for detect, start, samples in beams:
-            row = new_intensity_time_series_beam()
-            row.update(SampleCount=len(samples), DetectSample=detect,
-                       StartRangeSamples=start, Samples=samples)
-            rows.append(row)
-        record['Beams'] = pd.DataFrame(rows)
+        columns = {key: [] for key in new_intensity_time_series_beam()}
+        samples = []
+        for detect, start, beam_samples in beams:
+            columns['SampleCount'].append(len(beam_samples))
+            columns['DetectSample'].append(detect)
+            columns['StartRangeSamples'].append(start)
+            samples.extend(beam_samples)
+        record['Beams'] = {key: np.array(values, dtype=np.int64) for key, values in columns.items()}
+        record['Samples'] = np.array(samples, dtype=np.int64)
         return record
 
     @staticmethod
@@ -1951,7 +1965,7 @@ class TestEncodeBRBIntensity:
         # gsf_enc.c's EncodeBRBIntensity() counts its own 4-byte
         # identifier word in the size field, unlike every other subrecord.
         assert word & 0xFFFFFF == len(payload)
-        decoded, consumed = _decode_brb_intensity(payload, 4, len(record['Beams']), sensor_id)
+        decoded, consumed = _decode_brb_intensity(payload, 4, _nrows(record['Beams']), sensor_id)
         assert consumed == len(payload) - 4
         return payload, decoded
 
@@ -1965,9 +1979,9 @@ class TestEncodeBRBIntensity:
 
         assert decoded['BitsPerSample'] == bits_per_sample
         assert decoded['AppliedCorrections'] == 0x12345678
-        assert decoded['Beams'].loc[0].to_dict() == {
-            'SampleCount': 3, 'DetectSample': 1, 'StartRangeSamples': 100, 'Samples': [0, 1, top]}
-        assert decoded['Beams'].loc[1, 'Samples'] == [top, 7]
+        assert {k: list(v) for k, v in decoded['Beams'].items()} == {
+            'SampleCount': [3, 2], 'DetectSample': [1, 0], 'StartRangeSamples': [100, 50]}
+        assert list(decoded['Samples']) == [0, 1, top, top, 7]
 
     def test_12_bit_samples_packed_with_gsflib_bit_layout(self):
         # Same bytes TestDecodeBRBIntensitySynthetic decodes: 0xABC, 0x123
@@ -1977,7 +1991,7 @@ class TestEncodeBRBIntensity:
         payload, decoded = self._round_trip(record, sensor_id=999)
 
         assert payload.endswith(bytes([0xAB, 0xC1, 0x23]))
-        assert decoded['Beams'].loc[0, 'Samples'] == [0xABC, 0x123]
+        assert _beam_samples(decoded, 0) == [0xABC, 0x123]
 
     def test_12_bit_odd_sample_count_pads_trailing_half_sample(self):
         record = self._record(12, [(0, 0, [0xABC, 0x123, 0xFFF])])
@@ -1985,16 +1999,20 @@ class TestEncodeBRBIntensity:
         payload, decoded = self._round_trip(record, sensor_id=999)
 
         assert payload.endswith(bytes([0xAB, 0xC1, 0x23, 0xFF, 0xF0, 0x00]))
-        assert decoded['Beams'].loc[0, 'SampleCount'] == 3
-        assert decoded['Beams'].loc[0, 'Samples'] == [0xABC, 0x123, 0xFFF]
+        assert decoded['Beams']['SampleCount'][0] == 3
+        assert _beam_samples(decoded, 0) == [0xABC, 0x123, 0xFFF]
 
-    def test_sample_count_taken_from_samples_not_stored_count(self):
+    def test_sample_counts_not_matching_samples_raises(self):
         record = self._record(8, [(0, 0, [1, 2, 3])])
-        record['Beams'].loc[0, 'SampleCount'] = 99
+        record['Beams']['SampleCount'][0] = 99
 
-        _payload, decoded = self._round_trip(record, sensor_id=999)
+        with pytest.raises(ValueError):
+            _encode_brb_intensity(record, sensor_id=999)
 
-        assert decoded['Beams'].loc[0, 'SampleCount'] == 3
+    def test_beams_given_as_dataframe_encode_the_same(self):
+        record = self._record(16, [(1, 2, [10, 20]), (0, 0, [30])])
+        as_frame = dict(record, Beams=pd.DataFrame(record['Beams']))
+        assert _encode_brb_intensity(as_frame, 999) == _encode_brb_intensity(record, 999)
 
     @pytest.mark.parametrize("bits_per_sample", [0, 4, 24, 64])
     def test_unsupported_bits_per_sample_raises(self, bits_per_sample):
@@ -2014,7 +2032,7 @@ class TestEncodeBRBIntensity:
                 assert decoded[key] == value, key
             else:
                 assert decoded[key] == pytest.approx(value), key
-        assert decoded['Beams'].loc[0, 'Samples'] == [500, 600]
+        assert _beam_samples(decoded, 0) == [500, 600]
         # Re-encoding the decoded record reproduces the same bytes.
         assert _encode_brb_intensity(decoded, sensor_id) == payload
 
@@ -2024,7 +2042,7 @@ class TestEncodeBRBIntensity:
 
         payload, decoded = self._round_trip(record, sensor_id)
 
-        assert set(decoded) == {'BitsPerSample', 'AppliedCorrections', 'Beams'}
+        assert set(decoded) == {'BitsPerSample', 'AppliedCorrections', 'Beams', 'Samples'}
         assert _encode_brb_intensity(decoded, sensor_id) == payload
 
     @pytest.mark.parametrize("sensor_id,preamble_size", [
@@ -2044,7 +2062,7 @@ class TestEncodeBRBIntensity:
     def test_header_template_matches_decoded_keys(self, sensor_id):
         payload = _encode_brb_intensity(self._record(8, [(0, 0, [9])], sensor_id=sensor_id), sensor_id)
         decoded, _consumed = _decode_brb_intensity(payload, 4, 1, sensor_id)
-        assert set(decoded) - {'Beams'} == set(new_intensity_time_series_header(sensor_id))
+        assert set(decoded) - {'Beams', 'Samples'} == set(new_intensity_time_series_header(sensor_id))
 
 
 # ---------------------------------------------------------------------------
@@ -2177,7 +2195,7 @@ class TestEncodeSwathBathymetryPing:
         assert decoded['SensorSpecificID'] == 156
         assert decoded['SensorSpecific']['EchoSounderID'] == 712
         assert 'TxSectors' in decoded['SensorSpecific']
-        assert len(decoded['SensorSpecific']['TxSectors']) == 1
+        assert _nrows(decoded['SensorSpecific']['TxSectors']) == 1
         assert decoded['Notes'] == []
 
     def test_sensor_specific_round_trip(self):
@@ -2340,8 +2358,8 @@ class TestEncodeSwathBathymetryPing:
         assert decoded['SensorSpecific']['SurfaceVelocity_mps'] == pytest.approx(1500.0)
         assert decoded['SensorSpecific']['RunTime.MinDepth_m'] == pytest.approx(10.0)
         assert decoded['SensorSpecific']['PuStatus.SensorStatus'] == 63
-        assert len(decoded['SensorSpecific']['TxSectors']) == 1
-        assert decoded['SensorSpecific']['TxSectors'].iloc[0]['CenterFrequency_Hz'] == pytest.approx(71000.0)
+        assert _nrows(decoded['SensorSpecific']['TxSectors']) == 1
+        assert decoded['SensorSpecific']['TxSectors']['CenterFrequency_Hz'][0] == pytest.approx(71000.0)
         assert decoded['Notes'] == []
 
     def test_em3raw_sensor_specific_round_trip(self):
@@ -2360,8 +2378,8 @@ class TestEncodeSwathBathymetryPing:
         assert decoded['SensorSpecific']['DepthDifference_m'] == pytest.approx(0.5)
         assert decoded['SensorSpecific']['RunTime.MinDepth_m'] == pytest.approx(10.0)
         assert decoded['SensorSpecific']['PuStatus.SensorStatus'] == 63
-        assert len(decoded['SensorSpecific']['TxSectors']) == 1
-        assert decoded['SensorSpecific']['TxSectors'].iloc[0]['CenterFrequency_Hz'] == pytest.approx(71000.0)
+        assert _nrows(decoded['SensorSpecific']['TxSectors']) == 1
+        assert decoded['SensorSpecific']['TxSectors']['CenterFrequency_Hz'][0] == pytest.approx(71000.0)
         assert decoded['Notes'] == []
 
     def test_em3_sensor_specific_round_trip(self):
@@ -2388,9 +2406,9 @@ class TestEncodeSwathBathymetryPing:
 
         assert decoded['SensorSpecific']['ModelNumber'] == 3000
         assert decoded['SensorSpecific']['SurfaceVelocity_mps'] == pytest.approx(1500.0)
-        assert len(decoded['SensorSpecific']['RunTime']) == 1
-        assert decoded['SensorSpecific']['RunTime'].iloc[0]['Head'] == 0
-        assert decoded['SensorSpecific']['RunTime'].iloc[0]['MinDepth_m'] == pytest.approx(5.0)
+        assert _nrows(decoded['SensorSpecific']['RunTime']) == 1
+        assert decoded['SensorSpecific']['RunTime']['Head'][0] == 0
+        assert decoded['SensorSpecific']['RunTime']['MinDepth_m'][0] == pytest.approx(5.0)
         assert decoded['Notes'] == []
 
     def test_sensor_specific_unregistered_id_raises_keyerror(self):
@@ -2424,7 +2442,7 @@ class TestEncodeSwathBathymetryPing:
         assert decoded['SensorSpecificID'] == _SUBRECORD_KMALL_SPECIFIC
         series = decoded['IntensityTimeSeries']
         assert series['BitsPerSample'] == 16
-        assert list(series['Beams']['Samples']) == [[10, 20], [30], []]
+        assert [_beam_samples(series, beam) for beam in range(3)] == [[10, 20], [30], []]
         # Decoded ping goes straight back into the encoder unchanged.
         assert _encode_swath_bathymetry_ping(decoded) == payload
 
@@ -2496,10 +2514,10 @@ class TestTemplateHelpers:
         payload = _encode_kmall_specific({'TxSectors': pd.DataFrame([row])})
         decoded, _consumed = _decode_kmall_specific(payload, 4)
 
-        assert len(decoded['TxSectors']) == 1
-        assert decoded['TxSectors'].iloc[0]['TxSectorNumb'] == 2
-        assert decoded['TxSectors'].iloc[0]['CentreFreq_Hz'] == pytest.approx(71000.0)
-        assert decoded['TxSectors'].iloc[0]['TxArrNumber'] == 0
+        assert _nrows(decoded['TxSectors']) == 1
+        assert decoded['TxSectors']['TxSectorNumb'][0] == 2
+        assert decoded['TxSectors']['CentreFreq_Hz'][0] == pytest.approx(71000.0)
+        assert decoded['TxSectors']['TxArrNumber'][0] == 0
 
 
 # ---------------------------------------------------------------------------

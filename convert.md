@@ -214,7 +214,6 @@ template pattern applies -- `new_kmall_specific()` for the scalar block,
 to `record["SensorSpecificID"]`/`record["SensorSpecific"]`:
 
 ```python
-import pandas as pd
 from GSFU.gsfu import new_kmall_specific, new_kmall_tx_sector
 
 kmall_specific = new_kmall_specific()
@@ -226,7 +225,9 @@ sector1 = new_kmall_tx_sector()
 sector1.update(TxSectorNumb=1, CentreFreq_Hz=71000.0, TiltAngleReTx_deg=15.0)
 
 record["SensorSpecificID"] = 156
-record["SensorSpecific"] = {**kmall_specific, "TxSectors": pd.DataFrame([sector0, sector1])}
+# A table is a dict of column name -> one value per row.
+tx_sectors = {name: [sector0[name], sector1[name]] for name in sector0}
+record["SensorSpecific"] = {**kmall_specific, "TxSectors": tx_sectors}
 
 G.write_swath_bathymetry_ping(record)
 ```
@@ -237,10 +238,12 @@ format's own (British) spelling, and exactly the kind of thing
 `new_kmall_specific()`/`new_kmall_tx_sector()` save you from having to get
 right from memory. `kmall_specific` is a flat dict of scalar fields
 (matching the names `-p` prints under `-- SensorSpecific (KMALL_SPECIFIC,
-id=156) --`); `record["SensorSpecific"]["TxSectors"]` is a `pandas.DataFrame`,
-one row per transmit sector (up to `GSF_MAX_KMALL_SECTORS` = 9) -- the exact
-shape `_decode_swath_bathymetry_ping()` returns, so a decoded KMALL ping's
-`TxSectors` table can be assigned back in unmodified. Both
+id=156) --`); `record["SensorSpecific"]["TxSectors"]` is a table -- a dict
+of column name -> array, one element per transmit sector (up to
+`GSF_MAX_KMALL_SECTORS` = 9) -- the exact shape
+`_decode_swath_bathymetry_ping()` returns, so a decoded KMALL ping's
+`TxSectors` table can be assigned back in unmodified. A `pandas.DataFrame`
+(for example `pd.DataFrame([sector0, sector1])`) is accepted too. Both
 `SensorSpecificID`/`SensorSpecific` are optional -- omit them entirely for a
 non-KMALL system, or if you don't need the vendor-specific block. Unlike
 the ping scalars above, gsf.h defines no null-value convention for these
@@ -391,8 +394,8 @@ G.closeFile()
 Because `write_*`'s `record` dict shape matches what the `_decode_*`
 functions return, you can round-trip a record through `gsfu.py`'s own
 reader unmodified -- no repackaging, even for a vendor sensor-specific
-subrecord's own tables (`SensorSpecific["TxSectors"]` etc., already
-`pandas.DataFrame`s on both sides):
+subrecord's own tables (`SensorSpecific["TxSectors"]` etc., dicts of
+`numpy` arrays on both sides):
 
 ```python
 from GSFU.gsfu import gsf, _decode_swath_bathymetry_ping
