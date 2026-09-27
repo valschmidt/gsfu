@@ -52,6 +52,7 @@ required.
 """
 import argparse
 import datetime
+import mmap
 import os
 import struct
 import sys
@@ -75,6 +76,9 @@ GSF_VERSION_SIZE = 12
 #: Size, in bytes, of a record's fixed on-disk framing: the 4-byte record
 #: size field plus the 4-byte data identifier word.
 GSF_RECORD_FRAMING_SIZE = 8
+
+#: The record framing: the size field, then the packed data identifier word.
+_RECORD_FRAMING = struct.Struct('>II')
 
 
 class FileMode(IntEnum):
@@ -127,6 +131,11 @@ class RecordType(IntEnum):
 #: in the indexing for ping records which contain scale factor subrecords).
 #: (gsf.h: NUM_REC_TYPES)
 NUM_REC_TYPES = 13
+
+#: RecordType name for each recordID, indexed by recordID, for naming every
+#: record of a file in one vectorized lookup. recordID 0 is not a record type.
+_RECORD_TYPE_NAMES = np.array(
+    ["UNKNOWN(0)"] + [RecordType(i).name for i in range(1, NUM_REC_TYPES)], dtype=object)
 
 #: Human readable description of each record type, adapted from the
 #: struct-level comments in gsf.h documenting each record's data structure.
@@ -5872,6 +5881,11 @@ _ATTITUDE_MEASUREMENT_DTYPE = np.dtype([
 ])
 
 
+#: The fixed start of every GSF_RECORD_ATTITUDE payload: base time (seconds,
+#: nanoseconds) and the number of measurements that follow.
+_ATTITUDE_HEADER_DTYPE = np.dtype([('sec', '>u4'), ('nsec', '>u4'), ('num_measurements', '>u2')])
+
+
 def new_attitude():
     """
     Return a new dictionary with every GSF_RECORD_ATTITUDE field name
@@ -7805,6 +7819,77 @@ class gsf():
     # Indexing
     ###########################################################
 
+    def _walk_record_framing(self):
+        """
+        Walk every record's eight-byte framing from the start of the file,
+        returning each record's byte offset, size field, and packed data
+        identifier word, and validating them exactly as
+        read_record_header() does. The file is memory-mapped and each
+        record's framing unpacked straight from memory, following only
+        the size fields; every check is then applied to all records at
+        once, and the error for the first invalid record, in file order,
+        is raised.
+
+        :return: a tuple of three numpy int64 arrays, one element per
+            record: (offsets, data_sizes, id_words).
+
+        :raises GSFPartialRecordAtEndOfFileError: fewer than eight bytes
+            remain for a record's framing, or a record's declared size
+            would extend past the end of the file.
+        :raises GSFRecordSizeError: a record's declared size is eight
+            bytes or smaller, or larger than GSF_MAX_RECORD_SIZE.
+        :raises GSFUnrecognizedRecordIDError: a record's recordID is not
+            a value between 1 and NUM_REC_TYPES - 1, inclusive.
+        """
+        offsets = []
+        data_sizes = []
+        id_words = []
+        partial_at = None
+        if self.file_size:
+            unpack = _RECORD_FRAMING.unpack_from
+            n = self.file_size
+            with mmap.mmap(self.FID.fileno(), 0, access=mmap.ACCESS_READ) as data:
+                pos = 0
+                while pos < n:
+                    if pos + GSF_RECORD_FRAMING_SIZE > n:
+                        partial_at = pos
+                        break
+                    size, word = unpack(data, pos)
+                    offsets.append(pos)
+                    data_sizes.append(size)
+                    id_words.append(word)
+                    pos += GSF_RECORD_FRAMING_SIZE + size + (4 if word & 0x80000000 else 0)
+
+        offsets = np.array(offsets, dtype=np.int64)
+        data_sizes = np.array(data_sizes, dtype=np.int64)
+        id_words = np.array(id_words, dtype=np.int64)
+
+        read_sizes = data_sizes + np.where(id_words & 0x80000000, 4, 0)
+        record_ids = id_words & 0x003FFFFF
+        bad_size = (read_sizes <= 8) | (read_sizes > GSF_MAX_RECORD_SIZE)
+        bad_id = (record_ids < 1) | (record_ids >= NUM_REC_TYPES)
+        past_end = offsets + GSF_RECORD_FRAMING_SIZE + read_sizes > self.file_size
+        bad = np.flatnonzero(bad_size | bad_id | past_end)
+        if len(bad):
+            i = bad[0]
+            offset = int(offsets[i])
+            if bad_size[i]:
+                raise GSFRecordSizeError(
+                    "Record at byte offset %d in %s has an invalid size (%d bytes)"
+                    % (offset, self.filename, read_sizes[i]))
+            if bad_id[i]:
+                raise GSFUnrecognizedRecordIDError(
+                    "Record at byte offset %d in %s has an unrecognized recordID (%d)"
+                    % (offset, self.filename, record_ids[i]))
+            raise GSFPartialRecordAtEndOfFileError(
+                "Record at byte offset %d in %s declares %d bytes, which "
+                "extends past the end of the file" % (offset, self.filename, read_sizes[i]))
+        if partial_at is not None:
+            raise GSFPartialRecordAtEndOfFileError(
+                "Partial record header at byte offset %d in %s" % (partial_at, self.filename))
+
+        return offsets, data_sizes, id_words
+
     def index_file(self):
         """
         Index this instance's GSF file: walk every record in the file
@@ -7837,54 +7922,34 @@ class gsf():
 
         self.gsfVersion = None
 
-        record_type = []
-        record_id = []
-        byte_offset = []
-        record_size = []
-        total_bytes = []
-        checksum_flag = []
+        offsets, data_sizes, id_words = self._walk_record_framing()
 
-        while self.FID.tell() < self.file_size:
-            offset = self.FID.tell()
-            header = self.read_record_header()
-            if header is None:
-                break
-            dataSize, readSize, data_id = header
+        checksum = (id_words & 0x80000000) != 0
+        record_ids = (id_words & 0x003FFFFF).astype(np.int64)
+        read_sizes = data_sizes + np.where(checksum, 4, 0)
+        total = GSF_RECORD_FRAMING_SIZE + read_sizes
 
-            # Opportunistically capture the GSF version string out of the
-            # header record while we're already positioned at its payload.
-            if data_id.recordID == RecordType.GSF_RECORD_HEADER and self.gsfVersion is None:
-                version_bytes = self.FID.read(min(GSF_VERSION_SIZE, dataSize))
-                self.gsfVersion = version_bytes.split(b'\x00', 1)[0].decode('ascii', 'replace')
-
-            # Skip/seek past the rest of this record's payload, regardless
-            # of whether we read part of it above, to land exactly on the
-            # next record.
-            self.FID.seek(offset + GSF_RECORD_FRAMING_SIZE + readSize, 0)
-
-            byte_offset.append(offset)
-            record_id.append(int(data_id.recordID))
-            try:
-                record_type.append(RecordType(data_id.recordID).name)
-            except ValueError:
-                record_type.append("UNKNOWN(%d)" % data_id.recordID)
-            record_size.append(dataSize)
-            total_bytes.append(GSF_RECORD_FRAMING_SIZE + readSize)
-            checksum_flag.append(data_id.checksumFlag)
-
-            if self.verbose:
-                print("RECORD_TYPE: %s,\tOFFSET: %d,\tSIZE: %d" %
-                      (record_type[-1], byte_offset[-1], total_bytes[-1]))
+        header_rows = np.flatnonzero(record_ids == RecordType.GSF_RECORD_HEADER)
+        if len(header_rows):
+            first = header_rows[0]
+            start = int(offsets[first]) + GSF_RECORD_FRAMING_SIZE + (4 if checksum[first] else 0)
+            self.FID.seek(start)
+            version_bytes = self.FID.read(min(GSF_VERSION_SIZE, int(data_sizes[first])))
+            self.gsfVersion = version_bytes.split(b'\x00', 1)[0].decode('ascii', 'replace')
 
         self.Index = pd.DataFrame({
-            'RecordType': record_type,
-            'RecordID': record_id,
-            'ByteOffset': byte_offset,
-            'RecordSize': record_size,
-            'TotalBytes': total_bytes,
-            'ChecksumFlag': checksum_flag,
+            'RecordType': _RECORD_TYPE_NAMES[record_ids],
+            'RecordID': record_ids,
+            'ByteOffset': offsets,
+            'RecordSize': data_sizes,
+            'TotalBytes': total,
+            'ChecksumFlag': checksum,
         })
         self.Index['RecordType'] = self.Index['RecordType'].astype('category')
+
+        if self.verbose:
+            for name, offset, size in zip(self.Index['RecordType'], offsets.tolist(), total.tolist()):
+                print("RECORD_TYPE: %s,\tOFFSET: %d,\tSIZE: %d" % (name, offset, size))
 
         unreadBytes = self.file_size - int(self.Index['TotalBytes'].sum())
         if unreadBytes != 0:
@@ -7894,6 +7959,97 @@ class gsf():
 
         if self.verbose >= 2:
             print(self.Index)
+
+    ###########################################################
+    # Whole-file readers
+    ###########################################################
+
+    #: At most this many attitude measurements are gathered from the file
+    #: per vectorized step in read_attitude(), bounding its temporary index
+    #: arrays on very large files.
+    _ATTITUDE_GATHER_CHUNK = 1_000_000
+
+    def read_attitude(self):
+        """
+        Read every GSF_RECORD_ATTITUDE record in the file at once, and
+        return all of their measurements together, in file order, as one
+        dictionary of numpy arrays: the same shape _decode_attitude()
+        returns for a single record, but covering the whole file. This
+        indexes the file first if it has not been indexed yet.
+
+        Rather than decoding one record at a time, this memory-maps the
+        file and gathers every attitude record's header, and then every
+        measurement, with vectorized indexing, so its cost barely depends
+        on how many records the measurements are spread across: files
+        that store one measurement per record (as some writers do at
+        100 Hz) read as quickly as files that batch them.
+
+        :return: a dictionary, in the shape new_attitude() creates, with
+            'NumMeasurements' (the total over all attitude records),
+            'Time' (a numpy datetime64[ns] array of each measurement's
+            time, in UTC), and 'Pitch_deg', 'Roll_deg', 'Heave_m', and
+            'Heading_deg' (each a float64 numpy array), one element per
+            measurement.
+
+        :raises ValueError: an attitude record's payload is too short for
+            the number of measurements it declares.
+        """
+        if self.Index is None:
+            self.index_file()
+        rows = self.Index[self.Index['RecordID'] == RecordType.GSF_RECORD_ATTITUDE]
+        payload_starts = (rows['ByteOffset'].to_numpy() + GSF_RECORD_FRAMING_SIZE
+                          + np.where(rows['ChecksumFlag'].to_numpy(), 4, 0))
+        payload_sizes = rows['RecordSize'].to_numpy()
+
+        record = new_attitude()
+        if len(rows) == 0:
+            return record
+
+        header_size = _ATTITUDE_HEADER_DTYPE.itemsize
+        measurement_size = _ATTITUDE_MEASUREMENT_DTYPE.itemsize
+        with mmap.mmap(self.FID.fileno(), 0, access=mmap.ACCESS_READ) as data:
+            file_bytes = np.frombuffer(data, dtype=np.uint8)
+            try:
+                headers = file_bytes[payload_starts[:, None] + np.arange(header_size)] \
+                    .view(_ATTITUDE_HEADER_DTYPE).reshape(-1)
+                counts = headers['num_measurements'].astype(np.int64)
+                short = np.flatnonzero(payload_sizes < header_size + counts * measurement_size)
+                if len(short):
+                    i = short[0]
+                    raise ValueError(
+                        "attitude record at byte offset %d in %s declares %d measurements "
+                        "but holds only %d payload bytes"
+                        % (rows['ByteOffset'].iloc[i], self.filename, counts[i], payload_sizes[i]))
+
+                total = int(counts.sum())
+                # Each measurement's byte offset in the file: its record's
+                # first measurement, plus 10 bytes per earlier measurement in
+                # the same record.
+                first_in_record = np.cumsum(counts) - counts
+                record_of = np.repeat(np.arange(len(counts)), counts)
+                measurement_starts = (payload_starts + header_size)[record_of] \
+                    + (np.arange(total) - first_in_record[record_of]) * measurement_size
+
+                measurements = np.empty(total, dtype=_ATTITUDE_MEASUREMENT_DTYPE)
+                for lo in range(0, total, self._ATTITUDE_GATHER_CHUNK):
+                    hi = min(lo + self._ATTITUDE_GATHER_CHUNK, total)
+                    measurements[lo:hi] = file_bytes[
+                        measurement_starts[lo:hi, None] + np.arange(measurement_size)] \
+                        .view(_ATTITUDE_MEASUREMENT_DTYPE).reshape(-1)
+            finally:
+                # Release the view before the mapping closes.
+                del file_bytes
+
+        base_ns = headers['sec'].astype(np.int64) * 1_000_000_000 + headers['nsec']
+        time_ns = measurements['time_offset_ms'] * np.int64(1_000_000)
+        time_ns += base_ns[record_of]
+        record['NumMeasurements'] = total
+        record['Time'] = time_ns.view('datetime64[ns]')
+        record['Pitch_deg'] = measurements['pitch'] / 100.0
+        record['Roll_deg'] = measurements['roll'] / 100.0
+        record['Heave_m'] = measurements['heave'] / 100.0
+        record['Heading_deg'] = measurements['heading'] / 100.0
+        return record
 
     ###########################################################
     # Reporting

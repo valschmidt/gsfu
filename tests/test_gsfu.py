@@ -40,7 +40,9 @@ from GSFU.gsfu import (
     _SUBRECORD_RESON_8100_IMAGERY_IDS,
     _SUBRECORD_RESON_SIZE_SPARE_IMAGERY_IDS,
     _decode_bdb_specific,
+    _decode_attitude,
     _decode_brb_intensity,
+    _encode_attitude,
     _encode_brb_intensity,
     _decode_cmp_sass_specific,
     _decode_delta_t_specific,
@@ -351,6 +353,106 @@ class TestErrorConditions:
         G = gsf(str(tmp_path / "does_not_exist.gsf"))
         with pytest.raises(FileNotFoundError):
             G.OpenFiletoRead()
+
+    @pytest.mark.parametrize("bad_record, error", [
+        (_pack_record(NUM_REC_TYPES + 5, b"data012345"), GSFUnrecognizedRecordIDError),
+        (_pack_record(0, b"data012345"), GSFUnrecognizedRecordIDError),
+        (_pack_record(RecordType.GSF_RECORD_COMMENT, b""), GSFRecordSizeError),
+        (struct.pack('>I', 100), GSFPartialRecordAtEndOfFileError),
+        (struct.pack('>II', 10_000, RecordType.GSF_RECORD_COMMENT) + b"short", GSFPartialRecordAtEndOfFileError),
+    ], ids=["unrecognized_id", "id_zero", "zero_size", "truncated_header", "past_eof"])
+    def test_index_file_raises_same_errors_as_read_record_header(self, tmp_path, bad_record, error):
+        path = tmp_path / "bad.gsf"
+        _write_records(path, [_header_record(), bad_record])
+
+        G = gsf(str(path))
+        with pytest.raises(error, match="byte offset %d" % len(_header_record())):
+            G.index_file()
+
+    def test_index_file_reports_first_bad_record(self, tmp_path):
+        # A bad size is followed by garbage framing; the error must name the
+        # first bad record, not whatever the walk ran into after it.
+        path = tmp_path / "bad.gsf"
+        _write_records(path, [
+            _header_record(),
+            _pack_record(RecordType.GSF_RECORD_COMMENT, b""),
+            b"\xff" * 3,
+        ])
+
+        G = gsf(str(path))
+        with pytest.raises(GSFRecordSizeError, match="byte offset %d" % len(_header_record())):
+            G.index_file()
+
+
+# ---------------------------------------------------------------------------
+# Synthetic-record tests: gsf.read_attitude()
+# ---------------------------------------------------------------------------
+
+class TestReadAttitude:
+    @staticmethod
+    def _attitude_record(times, checksum_flag=False):
+        n = len(times)
+        payload = _encode_attitude(
+            times, [0.1 * i for i in range(n)], [-0.2 * i for i in range(n)],
+            [0.01 * i for i in range(n)], [100.0 + i for i in range(n)])
+        return _pack_record(RecordType.GSF_RECORD_ATTITUDE, payload, checksum_flag=checksum_flag)
+
+    def test_matches_per_record_decode_across_mixed_records(self, tmp_path):
+        records = [
+            _header_record(),
+            self._attitude_record([1700000000.0]),
+            _comment_record(),
+            self._attitude_record([1700000001.0, 1700000001.01, 1700000001.02], checksum_flag=True),
+            self._attitude_record([1700000002.5, 1700000003.5]),
+        ]
+        path = tmp_path / "attitude.gsf"
+        _write_records(path, records)
+
+        G = gsf(str(path))
+        result = G.read_attitude()  # indexes the file itself
+
+        singles = []
+        for offset, checksum in G.Index.loc[
+                G.Index['RecordType'] == 'GSF_RECORD_ATTITUDE', ['ByteOffset', 'ChecksumFlag']].itertuples(index=False):
+            G.FID.seek(int(offset))
+            data_size, _read_size, _data_id = G.read_record_header()
+            if checksum:
+                G.FID.seek(4, 1)
+            singles.append(_decode_attitude(G.FID.read(data_size)))
+
+        assert result['NumMeasurements'] == 6
+        for key in ('Time', 'Pitch_deg', 'Roll_deg', 'Heave_m', 'Heading_deg'):
+            assert np.array_equal(result[key], np.concatenate([r[key] for r in singles])), key
+
+    def test_chunked_gather_gives_same_result(self, tmp_path):
+        records = [_header_record()] + [
+            self._attitude_record([1700000000.0 + i, 1700000000.0 + i + 0.5]) for i in range(7)]
+        path = tmp_path / "attitude.gsf"
+        _write_records(path, records)
+
+        whole = gsf(str(path)).read_attitude()
+        G = gsf(str(path))
+        G._ATTITUDE_GATHER_CHUNK = 3  # forces five chunks for 14 measurements
+        chunked = G.read_attitude()
+        for key in ('Time', 'Pitch_deg', 'Roll_deg', 'Heave_m', 'Heading_deg'):
+            assert np.array_equal(whole[key], chunked[key]), key
+
+    def test_no_attitude_records_gives_empty_arrays(self, tmp_path):
+        path = tmp_path / "none.gsf"
+        _write_records(path, [_header_record(), _comment_record()])
+
+        result = gsf(str(path)).read_attitude()
+
+        assert result['NumMeasurements'] == 0
+        assert len(result['Time']) == 0 and result['Time'].dtype == np.dtype('datetime64[ns]')
+
+    def test_record_shorter_than_declared_raises(self, tmp_path):
+        payload = struct.pack('>2IH', 1700000000, 0, 5) + b"\x00" * 10  # declares 5, holds 1
+        path = tmp_path / "short.gsf"
+        _write_records(path, [_header_record(), _pack_record(RecordType.GSF_RECORD_ATTITUDE, payload)])
+
+        with pytest.raises(ValueError, match="declares 5 measurements"):
+            gsf(str(path)).read_attitude()
 
 
 # ---------------------------------------------------------------------------
@@ -2150,6 +2252,22 @@ class TestPrintIntensitySeriesRealData:
                 continue
             _beam, sample_count, _detect, _start, *samples = line.split(",")
             assert int(sample_count) == len(samples)
+
+    def test_read_attitude_matches_per_record_decode(self):
+        G = gsf(str(SMALL_SAMPLE))
+        result = G.read_attitude()
+
+        singles = []
+        for offset in G.Index.loc[G.Index['RecordType'] == 'GSF_RECORD_ATTITUDE', 'ByteOffset']:
+            G.FID.seek(int(offset))
+            data_size, _read_size, data_id = G.read_record_header()
+            if data_id.checksumFlag:
+                G.FID.seek(4, 1)
+            singles.append(_decode_attitude(G.FID.read(data_size)))
+
+        assert result['NumMeasurements'] == sum(r['NumMeasurements'] for r in singles)
+        for key in ('Time', 'Pitch_deg', 'Roll_deg', 'Heave_m', 'Heading_deg'):
+            assert np.array_equal(result[key], np.concatenate([r[key] for r in singles])), key
 
     def test_real_intensity_series_re_encodes_byte_for_byte(self):
         # Every per-beam intensity series subrecord in a real, gsflib-

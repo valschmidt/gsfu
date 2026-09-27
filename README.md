@@ -224,6 +224,20 @@ included, can be passed straight back to
 with no conversion, and the encoders accept a `pandas.DataFrame`
 anywhere they accept a table.
 
+To get every attitude measurement in a file at once, use
+`gsf.read_attitude()`. It returns one dictionary in the same shape as a
+single decoded attitude record (`Time`, `Pitch_deg`, `Roll_deg`,
+`Heave_m`, `Heading_deg`), but covering the whole file, and it reads the
+records together with vectorized `numpy` operations rather than one at a
+time, so it stays fast even for files that store high-rate attitude as
+one measurement per record:
+
+```python
+G = gsf("data/GSF/0264_20240826_022211_EM712.gsf")
+attitude = G.read_attitude()
+print(attitude["NumMeasurements"], attitude["Time"][0], attitude["Roll_deg"].std())
+```
+
 This example calls `_decode_swath_bathymetry_ping()` directly, since
 `gsfu.py` does not yet have a public convenience method for decoding a
 single record at a known file offset. For casual inspection of a whole
