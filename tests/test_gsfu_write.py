@@ -21,6 +21,7 @@ independent of decode.
 import datetime
 import struct
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -147,6 +148,7 @@ from GSFU.gsfu import (
     _solve_scale_factor,
     gsf,
     gsf_checksum,
+    new_attitude,
     new_intensity_time_series_beam,
     new_intensity_time_series_header,
     new_kmall_specific,
@@ -282,14 +284,46 @@ class TestEncodeAttitude:
             pitch_deg=[-1.1, -1.0, -0.9], roll_deg=[0.4, 0.5, 0.3],
             heave_m=[0.2, 0.1, 0.15], heading_deg=[12.3, 12.4, 359.99])
 
-        scalars, tables, _notes = _decode_attitude(payload)
+        m = _decode_attitude(payload)
 
-        assert scalars['NumMeasurements'] == 3
-        m = tables['Measurements']
+        assert set(m) == set(new_attitude())
+        assert m['NumMeasurements'] == 3
         assert list(m['Pitch_deg']) == pytest.approx([-1.1, -1.0, -0.9])
         assert list(m['Roll_deg']) == pytest.approx([0.4, 0.5, 0.3])
         assert list(m['Heave_m']) == pytest.approx([0.2, 0.1, 0.15])
         assert list(m['Heading_deg']) == pytest.approx([12.3, 12.4, 359.99], abs=0.01)
+        assert m['Time'].dtype == np.dtype('datetime64[ns]')
+        assert list(m['Time'].astype(np.int64)) == [
+            1700000000_000000000, 1700000000_100000000, 1700000000_200000000]
+
+    def test_decoded_record_re_encodes_to_same_bytes(self):
+        payload = _encode_attitude(
+            attitude_time=[1700000000.25, 1700000030.5, 1700000065.5],
+            pitch_deg=[-90.0, 0.01, 45.5], roll_deg=[-180.0, 0.0, 179.99],
+            heave_m=[-3.2, 0.0, 12.34], heading_deg=[0.0, 180.0, 359.99])
+
+        m = _decode_attitude(payload)
+
+        assert _encode_attitude(
+            m['Time'], m['Pitch_deg'], m['Roll_deg'], m['Heave_m'], m['Heading_deg']) == payload
+
+    def test_datetime_times_encode_same_as_posix_times(self):
+        posix = [1700000000.0, 1700000000.5]
+        utc = [datetime.datetime.fromtimestamp(t, tz=datetime.timezone.utc) for t in posix]
+        values = ([1.0, 2.0], [3.0, 4.0], [0.5, 0.25], [10.0, 20.0])
+        assert _encode_attitude(utc, *values) == _encode_attitude(posix, *values)
+
+    def test_time_offset_beyond_65_535_seconds_raises(self):
+        with pytest.raises(ValueError):
+            _encode_attitude([0.0, 65.536], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0])
+
+    def test_value_out_of_field_range_raises(self):
+        with pytest.raises(ValueError):
+            _encode_attitude([0.0], [400.0], [0.0], [0.0], [0.0])  # pitch * 100 > int16
+
+    def test_empty_raises(self):
+        with pytest.raises(ValueError):
+            _encode_attitude([], [], [], [], [])
 
     def test_base_time_is_first_sample(self):
         payload = _encode_attitude(

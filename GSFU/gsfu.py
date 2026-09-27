@@ -5646,6 +5646,40 @@ def _decode_hv_navigation_error(payload):
     return scalars, {}, []
 
 
+#: One attitude measurement as stored on the wire (gsf_dec.c's
+#: gsfDecodeAttitude()): a millisecond time offset from the record's base
+#: time, then pitch, roll, heave, and heading, each in hundredths. Heading
+#: is unsigned; the other three are signed.
+_ATTITUDE_MEASUREMENT_DTYPE = np.dtype([
+    ('time_offset_ms', '>u2'),
+    ('pitch', '>i2'),
+    ('roll', '>i2'),
+    ('heave', '>i2'),
+    ('heading', '>u2'),
+])
+
+
+def new_attitude():
+    """
+    Return a new dictionary with every GSF_RECORD_ATTITUDE field name
+    present, in the same shape _decode_attitude() returns: a
+    'NumMeasurements' count of 0, and an empty numpy array for each
+    per-measurement field. _decode_attitude() builds its result starting
+    from this same template, so the two can never define a different set
+    of field names.
+
+    :return: a dictionary with 'NumMeasurements' (0), 'Time' (an empty
+        numpy datetime64[ns] array), and 'Pitch_deg', 'Roll_deg',
+        'Heave_m', and 'Heading_deg' (each an empty float64 array).
+    """
+    return {
+        'NumMeasurements': 0,
+        'Time': np.empty(0, dtype='datetime64[ns]'),
+        'Pitch_deg': np.empty(0), 'Roll_deg': np.empty(0),
+        'Heave_m': np.empty(0), 'Heading_deg': np.empty(0),
+    }
+
+
 def _decode_attitude(payload):
     """
     Decode a GSF_RECORD_ATTITUDE payload: a base time stamp plus a series
@@ -5654,47 +5688,35 @@ def _decode_attitude(payload):
     is ported from the reference gsflib C library's gsfDecodeAttitude()
     function in gsf_dec.c.
 
+    Every measurement is unpacked at once, as a zero-copy numpy view of
+    the payload, and each field is scaled with a single vectorized
+    operation rather than a per-measurement loop. Each measurement's time
+    is computed exactly, in integer nanoseconds, as the base time plus
+    that measurement's millisecond offset.
+
     :param payload: the raw bytes of the record.
 
-    :return: a tuple of (scalars, tables, notes). scalars is a dictionary
-        with 'NumMeasurements'. tables is a dictionary with one key,
-        'Measurements', holding a pandas.DataFrame indexed by measurement
-        number with 'Time' (each measurement's own datetime, computed
-        from the base time plus that measurement's time offset),
-        'Pitch_deg', 'Roll_deg', 'Heave_m', and 'Heading_deg' columns.
-        notes is always an empty list.
+    :return: a dictionary, in the shape new_attitude() creates, with
+        'NumMeasurements' (an int), 'Time' (a numpy datetime64[ns] array
+        of each measurement's own time, in UTC), and 'Pitch_deg',
+        'Roll_deg', 'Heave_m', and 'Heading_deg' (each a float64 numpy
+        array, one value per measurement).
     """
-    (base_sec, base_nsec) = struct.unpack_from('>2I', payload, 0)
-    (num_measurements,) = struct.unpack_from('>H', payload, 8)
+    (base_sec, base_nsec, num_measurements) = struct.unpack_from('>2IH', payload, 0)
+    m = np.frombuffer(payload, dtype=_ATTITUDE_MEASUREMENT_DTYPE, count=num_measurements, offset=10)
 
-    times = []
-    pitch = np.empty(num_measurements)
-    roll = np.empty(num_measurements)
-    heave = np.empty(num_measurements)
-    heading = np.empty(num_measurements)
-
-    pos = 10
-    for i in range(num_measurements):
-        # time_offset (u16), pitch/roll/heave (s16 each), heading (u16).
-        (time_offset_raw, pitch_raw, roll_raw, heave_raw, heading_raw) = \
-            struct.unpack_from('>H3hH', payload, pos)
-        times.append(_gsf_timestamp(base_sec, base_nsec + int(round((time_offset_raw / 1000.0) * 1e9))))
-        pitch[i] = pitch_raw / 100.0
-        roll[i] = roll_raw / 100.0
-        heave[i] = heave_raw / 100.0
-        heading[i] = heading_raw / 100.0
-        pos += 10
-
-    table = pd.DataFrame({
-        'Time': times,
-        'Pitch_deg': pitch,
-        'Roll_deg': roll,
-        'Heave_m': heave,
-        'Heading_deg': heading,
-    })
-    table.index.name = 'Measurement'
-
-    return {'NumMeasurements': num_measurements}, {'Measurements': table}, []
+    record = new_attitude()
+    record['NumMeasurements'] = num_measurements
+    # uint16 * int64 promotes to a new int64 array, which the base time is
+    # then added to in place, and viewed (not copied) as datetime64[ns].
+    time_ns = m['time_offset_ms'] * np.int64(1_000_000)
+    time_ns += base_sec * 1_000_000_000 + base_nsec
+    record['Time'] = time_ns.view('datetime64[ns]')
+    record['Pitch_deg'] = m['pitch'] / 100.0
+    record['Roll_deg'] = m['roll'] / 100.0
+    record['Heave_m'] = m['heave'] / 100.0
+    record['Heading_deg'] = m['heading'] / 100.0
+    return record
 
 
 def _decode_header(payload):
@@ -6042,6 +6064,48 @@ def _encode_sound_velocity_profile(observation_time, application_time,
     return out
 
 
+def _gsf_round_array(x):
+    """
+    Round each element of a floating-point numpy array to the nearest
+    integer exactly as _gsf_round() rounds a single value: 0.501 is added
+    before truncating toward zero for non-negative values, and subtracted
+    before truncating toward zero for negative values, matching gsf_enc.c's
+    `+/-0.501` truncating-cast idiom.
+
+    :param x: a numpy array of floating-point values.
+
+    :return: a numpy int64 array of the rounded values.
+    """
+    return np.where(x >= 0.0, x + 0.501, x - 0.501).astype(np.int64)
+
+
+def _gsf_epoch_ns_array(times):
+    """
+    Convert an array-like of caller-supplied time values into a numpy
+    int64 array of nanoseconds since the Unix epoch. A numpy datetime64
+    array (as _decode_attitude() returns) and an array of POSIX
+    timestamps are both converted with vectorized operations; any other
+    sequence (of datetime.datetime objects or ISO 8601 strings) is
+    converted one element at a time with _gsf_epoch(). POSIX timestamps
+    are split into whole seconds and a rounded nanosecond remainder
+    exactly as _gsf_epoch() splits a single one.
+
+    :param times: an array-like of times: numpy datetime64 values, POSIX
+        timestamps, datetime.datetime objects, or ISO 8601 strings.
+
+    :return: a numpy int64 array of nanoseconds since the Unix epoch.
+    """
+    a = np.asarray(times)
+    if a.dtype.kind == 'M':
+        return a.astype('datetime64[ns]').view(np.int64)
+    if a.dtype.kind in 'iuf':
+        a = a.astype(np.float64, copy=False)
+        sec = np.trunc(a)
+        return sec.astype(np.int64) * 1_000_000_000 + _gsf_round_array((a - sec) * 1.0e9)
+    return np.array([sec * 1_000_000_000 + nsec for sec, nsec in map(_gsf_epoch, a.tolist())],
+                    dtype=np.int64)
+
+
 def _encode_attitude(attitude_time, pitch_deg, roll_deg, heave_m, heading_deg):
     """
     Encode a GSF_RECORD_ATTITUDE payload: a base time stamp plus a
@@ -6055,10 +6119,13 @@ def _encode_attitude(attitude_time, pitch_deg, roll_deg, heave_m, heading_deg):
     millisecond offset from that base time. Because each offset is
     stored on disk as an unsigned 16-bit field, attitude_time must be
     non-decreasing and must span less than 65.536 seconds from its first
-    entry to its last.
+    entry to its last. Every measurement is scaled, rounded, and packed
+    with vectorized numpy operations rather than a per-measurement loop,
+    so the arrays of a record returned by _decode_attitude() (its 'Time'
+    array included) can be passed straight back in.
 
-    :param attitude_time: an array-like of measurement times, each a
-        POSIX timestamp or a datetime.datetime.
+    :param attitude_time: an array-like of measurement times: numpy
+        datetime64 values, POSIX timestamps, or datetime.datetime objects.
     :param pitch_deg: an array-like of pitch values, in degrees, the
         same length as attitude_time.
     :param roll_deg: an array-like of roll values, in degrees, the same
@@ -6071,24 +6138,35 @@ def _encode_attitude(attitude_time, pitch_deg, roll_deg, heave_m, heading_deg):
     :return: the encoded record payload, as bytes.
 
     :raises ValueError: attitude_time, pitch_deg, roll_deg, heave_m, and
-        heading_deg are not all the same length.
+        heading_deg are not all the same length, or are empty; or a time
+        offset or scaled value does not fit its on-disk field.
     """
     n = len(attitude_time)
     if not (len(pitch_deg) == len(roll_deg) == len(heave_m) == len(heading_deg) == n):
         raise ValueError("attitude arrays must all be the same length")
+    if n == 0:
+        raise ValueError("an attitude record needs at least one measurement")
 
-    base_sec, base_nsec = _gsf_epoch(attitude_time[0])
-    out = struct.pack('>2IH', base_sec, base_nsec, n)
-    for i in range(n):
-        t_sec, t_nsec = _gsf_epoch(attitude_time[i])
-        offset_ms = _gsf_round((t_sec - base_sec) * 1000.0 + (t_nsec - base_nsec) / 1.0e6)
-        out += struct.pack(
-            '>H3hH', offset_ms,
-            _gsf_round(pitch_deg[i] * 100.0),
-            _gsf_round(roll_deg[i] * 100.0),
-            _gsf_round(heave_m[i] * 100.0),
-            _gsf_round(heading_deg[i] * 100.0))
-    return out
+    time_ns = _gsf_epoch_ns_array(attitude_time)
+    base_sec, base_nsec = divmod(int(time_ns[0]), 1_000_000_000)
+
+    m = np.empty(n, dtype=_ATTITUDE_MEASUREMENT_DTYPE)
+    fields = (
+        ('time_offset_ms', (time_ns - time_ns[0]) / 1.0e6),
+        ('pitch', np.asarray(pitch_deg, dtype=np.float64) * 100.0),
+        ('roll', np.asarray(roll_deg, dtype=np.float64) * 100.0),
+        ('heave', np.asarray(heave_m, dtype=np.float64) * 100.0),
+        ('heading', np.asarray(heading_deg, dtype=np.float64) * 100.0),
+    )
+    for name, scaled in fields:
+        rounded = _gsf_round_array(scaled)
+        info = np.iinfo(_ATTITUDE_MEASUREMENT_DTYPE[name])
+        if rounded.min() < info.min or rounded.max() > info.max:
+            raise ValueError("attitude %s out of range for its %s on-disk field"
+                             % (name, _ATTITUDE_MEASUREMENT_DTYPE[name].name))
+        m[name] = rounded
+
+    return struct.pack('>2IH', base_sec, base_nsec, n) + m.tobytes()
 
 
 def _encode_swath_bathy_summary(start_time, end_time,
@@ -7646,6 +7724,26 @@ class gsf():
     ###########################################################
 
     @staticmethod
+    def _print_attitude_record(record):
+        """
+        A print_records() helper that prints one decoded
+        GSF_RECORD_ATTITUDE record to stdout as readable text: its
+        'NumMeasurements' count as a "key : value" line, then its
+        per-measurement arrays as a table, one row per measurement. The
+        table is built only here, for display; _decode_attitude() itself
+        returns plain numpy arrays.
+
+        :param record: a decoded attitude record, in the dictionary shape
+            returned by _decode_attitude().
+        """
+        print("  NumMeasurements : %s" % record['NumMeasurements'])
+        table = pd.DataFrame({k: v for k, v in record.items() if k != 'NumMeasurements'})
+        table.index.name = 'Measurement'
+        if len(table):
+            print("-- Measurements --")
+            print(table.to_string())
+
+    @staticmethod
     def _print_ping_record(record):
         """
         A print_records() helper that prints one decoded ping record to
@@ -7832,6 +7930,8 @@ class gsf():
                     elif rid in (RecordType.GSF_RECORD_SWATH_BATHYMETRY_PING,
                                  RecordType.GSF_RECORD_SINGLE_BEAM_PING):
                         self._print_ping_record(decoded)
+                    elif rid == RecordType.GSF_RECORD_ATTITUDE:
+                        self._print_attitude_record(decoded)
                     else:
                         scalars, tables, notes = decoded
                         if scalars:
