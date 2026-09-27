@@ -5608,6 +5608,28 @@ def _decode_single_beam_ping(payload):
     return record
 
 
+def new_swath_bathy_summary():
+    """
+    Return a new dictionary with every GSF_RECORD_SWATH_BATHY_SUMMARY
+    field name present, in the same shape _decode_swath_bathy_summary()
+    returns, each pre-set to None: every field is required to write this
+    record, and gsf.h defines no "not available" value for any of them.
+    _decode_swath_bathy_summary() builds its result starting from this
+    same template, so the two can never define a different set of field
+    names.
+
+    :return: a dictionary with 'StartTime', 'EndTime', 'MinLatitude_deg',
+        'MinLongitude_deg', 'MaxLatitude_deg', 'MaxLongitude_deg',
+        'MinDepth_m', and 'MaxDepth_m', each pre-set to None.
+    """
+    return {
+        'StartTime': None, 'EndTime': None,
+        'MinLatitude_deg': None, 'MinLongitude_deg': None,
+        'MaxLatitude_deg': None, 'MaxLongitude_deg': None,
+        'MinDepth_m': None, 'MaxDepth_m': None,
+    }
+
+
 def _decode_swath_bathy_summary(payload):
     """
     Decode a GSF_RECORD_SWATH_BATHY_SUMMARY payload: the start and end
@@ -5622,28 +5644,25 @@ def _decode_swath_bathy_summary(payload):
 
     :param payload: the raw bytes of the record.
 
-    :return: a tuple of (scalars, tables, notes). scalars is a dictionary
-        with 'StartTime', 'EndTime', 'MinLatitude_deg', 'MinLongitude_deg',
-        'MaxLatitude_deg', 'MaxLongitude_deg', 'MinDepth_m', and
-        'MaxDepth_m'. tables is always an empty dictionary, since this
-        record has no tabular data. notes is always an empty list.
+    :return: a dictionary, in the shape new_swath_bathy_summary()
+        creates, with 'StartTime' and 'EndTime' (ISO 8601 strings, in
+        UTC), 'MinLatitude_deg', 'MinLongitude_deg', 'MaxLatitude_deg',
+        'MaxLongitude_deg', 'MinDepth_m', and 'MaxDepth_m'.
     """
-    scalars = {}
+    record = new_swath_bathy_summary()
     (start_sec, start_nsec, end_sec, end_nsec) = struct.unpack_from('>4I', payload, 0)
-    scalars['StartTime'] = _gsf_timestamp(start_sec, start_nsec).isoformat()
-    scalars['EndTime'] = _gsf_timestamp(end_sec, end_nsec).isoformat()
+    record['StartTime'] = _gsf_timestamp(start_sec, start_nsec).isoformat()
+    record['EndTime'] = _gsf_timestamp(end_sec, end_nsec).isoformat()
 
-    (min_lat_raw, min_lon_raw, max_lat_raw, max_lon_raw) = struct.unpack_from('>4i', payload, 16)
-    scalars['MinLatitude_deg'] = min_lat_raw / 1.0e7
-    scalars['MinLongitude_deg'] = min_lon_raw / 1.0e7
-    scalars['MaxLatitude_deg'] = max_lat_raw / 1.0e7
-    scalars['MaxLongitude_deg'] = max_lon_raw / 1.0e7
-
-    (min_depth_raw, max_depth_raw) = struct.unpack_from('>2i', payload, 32)
-    scalars['MinDepth_m'] = min_depth_raw / 100.0
-    scalars['MaxDepth_m'] = max_depth_raw / 100.0
-
-    return scalars, {}, []
+    (min_lat_raw, min_lon_raw, max_lat_raw, max_lon_raw,
+     min_depth_raw, max_depth_raw) = struct.unpack_from('>6i', payload, 16)
+    record['MinLatitude_deg'] = min_lat_raw / 1.0e7
+    record['MinLongitude_deg'] = min_lon_raw / 1.0e7
+    record['MaxLatitude_deg'] = max_lat_raw / 1.0e7
+    record['MaxLongitude_deg'] = max_lon_raw / 1.0e7
+    record['MinDepth_m'] = min_depth_raw / 100.0
+    record['MaxDepth_m'] = max_depth_raw / 100.0
+    return record
 
 
 #: One sound velocity profile point as stored on the wire (gsf_dec.c's
@@ -5710,6 +5729,22 @@ def _decode_sound_velocity_profile(payload):
     return record
 
 
+def new_name_value_parameters():
+    """
+    Return a new dictionary in the shape _decode_name_value_parameters()
+    returns for a GSF_RECORD_PROCESSING_PARAMETERS or
+    GSF_RECORD_SENSOR_PARAMETERS record: 'ParamTime' pre-set to None (it is
+    required to write the record), and 'Parameters', an empty dictionary
+    of parameter name -> value to fill in. _decode_name_value_parameters()
+    builds its result starting from this same template, so the two can
+    never define a different set of field names.
+
+    :return: a dictionary with 'ParamTime' (None) and 'Parameters' (an
+        empty dictionary).
+    """
+    return {'ParamTime': None, 'Parameters': {}}
+
+
 def _decode_name_value_parameters(payload):
     """
     Decode a GSF_RECORD_PROCESSING_PARAMETERS or GSF_RECORD_SENSOR_PARAMETERS
@@ -5720,8 +5755,7 @@ def _decode_name_value_parameters(payload):
     functions in gsf_dec.c, which are identical apart from which struct
     field they write their result into. Because each parameter is already
     a "NAME=VALUE" string, decoding it is just a matter of splitting on
-    the '=' character and storing the two pieces directly as scalar
-    output.
+    the '=' character.
 
     In practice, encoders commonly include a trailing NUL byte inside a
     parameter's counted size, left over from treating the parameter as a
@@ -5737,18 +5771,18 @@ def _decode_name_value_parameters(payload):
 
     :param payload: the raw bytes of the record.
 
-    :return: a tuple of (scalars, tables, notes). scalars is a dictionary
-        with 'ParamTime' plus one entry per decoded "NAME=VALUE" string,
-        keyed by NAME (or keyed by the whole string, mapped to an empty
-        value, if a given parameter did not contain an '=' character).
-        tables is always an empty dictionary. notes is always an empty
-        list.
+    :return: a dictionary, in the shape new_name_value_parameters()
+        creates, with 'ParamTime' (an ISO 8601 string, in UTC) and
+        'Parameters', a dictionary with one entry per decoded
+        "NAME=VALUE" string, keyed by NAME, in file order. A parameter
+        string with no '=' character is keyed by the whole string, with a
+        value of None, so that it re-encodes unchanged.
     """
-    scalars = {}
-    (sec, nsec) = struct.unpack_from('>2I', payload, 0)
-    scalars['ParamTime'] = _gsf_timestamp(sec, nsec).isoformat()
+    record = new_name_value_parameters()
+    (sec, nsec, number_parameters) = struct.unpack_from('>2IH', payload, 0)
+    record['ParamTime'] = _gsf_timestamp(sec, nsec).isoformat()
 
-    (number_parameters,) = struct.unpack_from('>H', payload, 8)
+    parameters = record['Parameters']
     pos = 10
     for _ in range(number_parameters):
         (size,) = struct.unpack_from('>h', payload, pos)
@@ -5756,9 +5790,21 @@ def _decode_name_value_parameters(payload):
         text = payload[pos:pos + size].decode('ascii', 'replace').rstrip('\x00')
         pos += size
         name, sep, value = text.partition('=')
-        scalars[name if sep else text] = value if sep else ''
+        parameters[name if sep else text] = value if sep else None
+    return record
 
-    return scalars, {}, []
+
+def new_comment():
+    """
+    Return a new dictionary with every GSF_RECORD_COMMENT field name
+    present, in the same shape _decode_comment() returns: 'CommentTime'
+    pre-set to None (it is required to write the record) and 'Comment'
+    pre-set to an empty string. _decode_comment() builds its result
+    starting from this same template.
+
+    :return: a dictionary with 'CommentTime' (None) and 'Comment' ('').
+    """
+    return {'CommentTime': None, 'Comment': ''}
 
 
 def _decode_comment(payload):
@@ -5772,19 +5818,29 @@ def _decode_comment(payload):
 
     :param payload: the raw bytes of the record.
 
-    :return: a tuple of (scalars, tables, notes). scalars is a dictionary
-        with 'CommentTime' and 'Comment' (the decoded comment text).
-        tables is always an empty dictionary. notes is always an empty
-        list.
+    :return: a dictionary, in the shape new_comment() creates, with
+        'CommentTime' (an ISO 8601 string, in UTC) and 'Comment' (the
+        decoded comment text).
     """
-    scalars = {}
-    (sec, nsec) = struct.unpack_from('>2I', payload, 0)
-    scalars['CommentTime'] = _gsf_timestamp(sec, nsec).isoformat()
+    record = new_comment()
+    (sec, nsec, length) = struct.unpack_from('>3I', payload, 0)
+    record['CommentTime'] = _gsf_timestamp(sec, nsec).isoformat()
+    record['Comment'] = payload[12:12 + length].decode('ascii', 'replace')
+    return record
 
-    (length,) = struct.unpack_from('>I', payload, 8)
-    scalars['Comment'] = payload[12:12 + length].decode('ascii', 'replace')
 
-    return scalars, {}, []
+def new_history():
+    """
+    Return a new dictionary with every GSF_RECORD_HISTORY field name
+    present, in the same shape _decode_history() returns: 'HistoryTime'
+    pre-set to None (it is required to write the record), and each text
+    field pre-set to an empty string. _decode_history() builds its result
+    starting from this same template.
+
+    :return: a dictionary with 'HistoryTime' (None), and 'HostName',
+        'OperatorName', 'CommandLine', and 'Comment' (each '').
+    """
+    return {'HistoryTime': None, 'HostName': '', 'OperatorName': '', 'CommandLine': '', 'Comment': ''}
 
 
 def _decode_history(payload):
@@ -5795,28 +5851,46 @@ def _decode_history(payload):
     the reference gsflib C library's gsfDecodeHistory() function in
     gsf_dec.c.
 
+    gsf_enc.c writes the host name, operator name, and command line with
+    a trailing NUL counted in each one's size, as C strings; that NUL is
+    stripped here, so the decoded strings are plain text and a decoded
+    record re-encodes (via _encode_history(), which adds it back) to the
+    same bytes.
+
     This function has not been tested against a verified GSF file, since
     no sample data containing a GSF_RECORD_HISTORY record is available.
 
     :param payload: the raw bytes of the record.
 
-    :return: a tuple of (scalars, tables, notes). scalars is a dictionary
-        with 'HistoryTime', 'HostName', 'OperatorName', 'CommandLine',
-        and 'Comment'. tables is always an empty dictionary. notes is
-        always an empty list.
+    :return: a dictionary, in the shape new_history() creates, with
+        'HistoryTime' (an ISO 8601 string, in UTC), 'HostName',
+        'OperatorName', 'CommandLine', and 'Comment'.
     """
-    scalars = {}
+    record = new_history()
     (sec, nsec) = struct.unpack_from('>2I', payload, 0)
-    scalars['HistoryTime'] = _gsf_timestamp(sec, nsec).isoformat()
+    record['HistoryTime'] = _gsf_timestamp(sec, nsec).isoformat()
 
     pos = 8
     for key in ('HostName', 'OperatorName', 'CommandLine', 'Comment'):
         (length,) = struct.unpack_from('>H', payload, pos)
         pos += 2
-        scalars[key] = payload[pos:pos + length].decode('ascii', 'replace')
+        record[key] = payload[pos:pos + length].decode('ascii', 'replace').rstrip('\x00')
         pos += length
+    return record
 
-    return scalars, {}, []
+
+def new_navigation_error():
+    """
+    Return a new dictionary with every GSF_RECORD_NAVIGATION_ERROR field
+    name present, in the same shape _decode_navigation_error() returns,
+    each pre-set to None: every field is required to write this record.
+    _decode_navigation_error() builds its result starting from this same
+    template.
+
+    :return: a dictionary with 'NavErrorTime', 'RecordID',
+        'LongitudeError_m', and 'LatitudeError_m', each pre-set to None.
+    """
+    return {'NavErrorTime': None, 'RecordID': None, 'LongitudeError_m': None, 'LatitudeError_m': None}
 
 
 def _decode_navigation_error(payload):
@@ -5834,23 +5908,37 @@ def _decode_navigation_error(payload):
 
     :param payload: the raw bytes of the record.
 
-    :return: a tuple of (scalars, tables, notes). scalars is a dictionary
-        with 'NavErrorTime', 'RecordID', 'LongitudeError_m', and
-        'LatitudeError_m'. tables is always an empty dictionary. notes is
-        always an empty list.
+    :return: a dictionary, in the shape new_navigation_error() creates,
+        with 'NavErrorTime' (an ISO 8601 string, in UTC), 'RecordID',
+        'LongitudeError_m', and 'LatitudeError_m'.
     """
-    scalars = {}
-    (sec, nsec) = struct.unpack_from('>2I', payload, 0)
-    scalars['NavErrorTime'] = _gsf_timestamp(sec, nsec).isoformat()
+    record = new_navigation_error()
+    (sec, nsec, record_id, lon_err_raw, lat_err_raw) = struct.unpack_from('>3I2i', payload, 0)
+    record['NavErrorTime'] = _gsf_timestamp(sec, nsec).isoformat()
+    record['RecordID'] = record_id
+    record['LongitudeError_m'] = lon_err_raw / 10.0
+    record['LatitudeError_m'] = lat_err_raw / 10.0
+    return record
 
-    (record_id,) = struct.unpack_from('>I', payload, 8)
-    scalars['RecordID'] = record_id
 
-    (lon_err_raw, lat_err_raw) = struct.unpack_from('>2i', payload, 12)
-    scalars['LongitudeError_m'] = lon_err_raw / 10.0
-    scalars['LatitudeError_m'] = lat_err_raw / 10.0
+def new_hv_navigation_error():
+    """
+    Return a new dictionary with every GSF_RECORD_HV_NAVIGATION_ERROR
+    field name present, in the same shape _decode_hv_navigation_error()
+    returns: 'PositionType' pre-set to an empty string (it is optional),
+    and every other field pre-set to None (each is required to write the
+    record). _decode_hv_navigation_error() builds its result starting
+    from this same template.
 
-    return scalars, {}, []
+    :return: a dictionary with 'NavErrorTime', 'RecordID',
+        'HorizontalError_m', 'VerticalError_m', and 'SEPUncertainty_m'
+        (each None), and 'PositionType' ('').
+    """
+    return {
+        'NavErrorTime': None, 'RecordID': None,
+        'HorizontalError_m': None, 'VerticalError_m': None, 'SEPUncertainty_m': None,
+        'PositionType': '',
+    }
 
 
 def _decode_hv_navigation_error(payload):
@@ -5868,30 +5956,23 @@ def _decode_hv_navigation_error(payload):
 
     :param payload: the raw bytes of the record.
 
-    :return: a tuple of (scalars, tables, notes). scalars is a dictionary
-        with 'NavErrorTime', 'RecordID', 'HorizontalError_m',
-        'VerticalError_m', 'SEPUncertainty_m', and 'PositionType'. tables
-        is always an empty dictionary. notes is always an empty list.
+    :return: a dictionary, in the shape new_hv_navigation_error()
+        creates, with 'NavErrorTime' (an ISO 8601 string, in UTC),
+        'RecordID', 'HorizontalError_m', 'VerticalError_m',
+        'SEPUncertainty_m', and 'PositionType'.
     """
-    scalars = {}
-    (sec, nsec) = struct.unpack_from('>2I', payload, 0)
-    scalars['NavErrorTime'] = _gsf_timestamp(sec, nsec).isoformat()
-
-    (record_id,) = struct.unpack_from('>I', payload, 8)
-    scalars['RecordID'] = record_id
-
-    (horiz_err_raw, vert_err_raw) = struct.unpack_from('>2i', payload, 12)
-    scalars['HorizontalError_m'] = horiz_err_raw / 1000.0
-    scalars['VerticalError_m'] = vert_err_raw / 1000.0
-
-    (sep_unc_raw,) = struct.unpack_from('>H', payload, 20)
-    scalars['SEPUncertainty_m'] = sep_unc_raw / 100.0
-
+    record = new_hv_navigation_error()
+    (sec, nsec, record_id, horiz_err_raw, vert_err_raw, sep_unc_raw) = \
+        struct.unpack_from('>3I2iH', payload, 0)
+    record['NavErrorTime'] = _gsf_timestamp(sec, nsec).isoformat()
+    record['RecordID'] = record_id
+    record['HorizontalError_m'] = horiz_err_raw / 1000.0
+    record['VerticalError_m'] = vert_err_raw / 1000.0
+    record['SEPUncertainty_m'] = sep_unc_raw / 100.0
     # 2 spare bytes at 22-23, then the position type string.
     (length,) = struct.unpack_from('>H', payload, 24)
-    scalars['PositionType'] = payload[26:26 + length].decode('ascii', 'replace')
-
-    return scalars, {}, []
+    record['PositionType'] = payload[26:26 + length].decode('ascii', 'replace')
+    return record
 
 
 #: One attitude measurement as stored on the wire (gsf_dec.c's
@@ -5972,6 +6053,18 @@ def _decode_attitude(payload):
     return record
 
 
+def new_header():
+    """
+    Return a new dictionary in the shape _decode_header() returns for a
+    GSF_RECORD_HEADER record: 'Version' pre-set to None, which
+    _encode_header() writes as this library's own GSF_VERSION.
+    _decode_header() builds its result starting from this same template.
+
+    :return: a dictionary with one key, 'Version', pre-set to None.
+    """
+    return {'Version': None}
+
+
 def _decode_header(payload):
     """
     Decode a GSF_RECORD_HEADER payload, which holds nothing but the
@@ -5985,13 +6078,13 @@ def _decode_header(payload):
 
     :param payload: the raw bytes of the record.
 
-    :return: a tuple of (scalars, tables, notes). scalars is a dictionary
-        with one key, 'Version', holding the decoded version string with
-        its trailing NUL padding removed. tables is always an empty
-        dictionary. notes is always an empty list.
+    :return: a dictionary, in the shape new_header() creates, with one
+        key, 'Version', holding the decoded version string with its
+        trailing NUL padding removed.
     """
-    version = payload[:GSF_VERSION_SIZE].split(b'\x00', 1)[0].decode('ascii', 'replace')
-    return {'Version': version}, {}, []
+    record = new_header()
+    record['Version'] = payload[:GSF_VERSION_SIZE].split(b'\x00', 1)[0].decode('ascii', 'replace')
+    return record
 
 
 ###########################################################
@@ -6209,7 +6302,26 @@ def _gsf_epoch(time_value):
     return sec, nsec
 
 
-def _encode_header(version=None):
+def _require_fields(record, names, template_name):
+    """
+    Check that a record dictionary passed to an encoder supplies every
+    field that encoder requires.
+
+    :param record: the record dictionary.
+    :param names: the required field names.
+    :param template_name: the new_*() function that creates this record
+        type's template, named in the error message.
+
+    :raises ValueError: one or more of names is missing from record, or
+        present but set to None.
+    """
+    missing = [k for k in names if record.get(k) is None]
+    if missing:
+        raise ValueError("record is missing required field(s): %s (see %s())"
+                         % (', '.join(missing), template_name))
+
+
+def _encode_header(record=None):
     """
     Encode a GSF_RECORD_HEADER payload: the NUL-padded GSF format
     version string written at the very start of every GSF file. This is
@@ -6220,54 +6332,60 @@ def _encode_header(version=None):
     version string into the header, ignoring any version value a caller
     might otherwise want to supply -- there is no way to make
     gsfEncodeHeader() write anything other than the version gsflib
-    itself was built with. This function mirrors that behavior:
-    `version` exists only so tests can exercise the padding/truncation
-    logic with a known string, and in ordinary use it defaults to this
-    library's own GSF_VERSION constant.
+    itself was built with. This function mirrors that behavior: a
+    record's 'Version' exists only so tests can exercise the
+    padding/truncation logic with a known string, and in ordinary use
+    it is None (as new_header() creates it), which writes this library's
+    own GSF_VERSION constant.
 
-    :param version: the version string to encode. Optional; defaults to
-        GSF_VERSION when omitted, matching the reference encoder's
-        behavior of always writing its own current version.
+    :param record: a dictionary in the shape _decode_header() returns or
+        new_header() creates. Optional; omitted, or with 'Version' None,
+        GSF_VERSION is written.
 
     :return: the encoded, NUL-padded GSF_VERSION_SIZE-byte version
         field, as bytes.
     """
-    encoded = (version or GSF_VERSION).encode('ascii')
+    version = (record or {}).get('Version') or GSF_VERSION
+    encoded = version.encode('ascii')
     return encoded[:GSF_VERSION_SIZE].ljust(GSF_VERSION_SIZE, b'\x00')
 
 
-def _encode_name_value_parameters(param_time, params):
+def _encode_name_value_parameters(record):
     """
     Encode the on-disk format shared by GSF_RECORD_PROCESSING_PARAMETERS
-    and GSF_RECORD_SENSOR_PARAMETERS from a plain {name: value}
-    dictionary. This is ported from the reference gsflib C library's
-    gsfEncodeProcessingParameters() and gsfEncodeSensorParameters()
-    functions in gsf_enc.c, which write an identical wire format. Each
-    entry is written as a NUL-terminated "NAME=VALUE" string, with its
-    2-byte size field counting that trailing NUL byte, matching what
-    real encoders write and what _decode_name_value_parameters() expects
-    to find (see that function's docstring for how the trailing NUL is
-    stripped back out on decode).
+    and GSF_RECORD_SENSOR_PARAMETERS. This is ported from the reference
+    gsflib C library's gsfEncodeProcessingParameters() and
+    gsfEncodeSensorParameters() functions in gsf_enc.c, which write an
+    identical wire format. Each parameter is written as a NUL-terminated
+    "NAME=VALUE" string, with its 2-byte size field counting that
+    trailing NUL byte, matching what real encoders write and what
+    _decode_name_value_parameters() expects to find (see that function's
+    docstring for how the trailing NUL is stripped back out on decode). A
+    parameter whose value is None is written as its bare NAME, with no
+    '=', as _decode_name_value_parameters() decodes such a string.
 
-    :param param_time: the record's time stamp, as a POSIX timestamp or
-        a datetime.datetime.
-    :param params: a dictionary of {name: value} pairs to encode. Each
-        value is converted to its string form with str() before being
-        written.
+    :param record: a dictionary in the shape
+        _decode_name_value_parameters() returns or
+        new_name_value_parameters() creates: 'ParamTime' (required; a
+        POSIX timestamp, datetime.datetime, or ISO 8601 string) and
+        'Parameters', a dictionary of {name: value} pairs, each value
+        written with str() (or omitted, if None).
 
     :return: the encoded record payload, as bytes.
+
+    :raises ValueError: 'ParamTime' is missing or None.
     """
-    sec, nsec = _gsf_epoch(param_time)
+    _require_fields(record, ('ParamTime',), 'new_name_value_parameters')
+    params = record.get('Parameters') or {}
+    sec, nsec = _gsf_epoch(record['ParamTime'])
     out = struct.pack('>2IH', sec, nsec, len(params))
     for name, value in params.items():
-        text = ("%s=%s" % (name, value)).encode('ascii') + b'\x00'
+        text = (name if value is None else "%s=%s" % (name, value)).encode('ascii') + b'\x00'
         out += struct.pack('>h', len(text)) + text
     return out
 
 
-def _encode_sound_velocity_profile(observation_time, application_time,
-                                    latitude_deg, longitude_deg,
-                                    depth_m, sound_speed_mPerSec):
+def _encode_sound_velocity_profile(record):
     """
     Encode a GSF_RECORD_SOUND_VELOCITY_PROFILE payload: the observation
     and application time stamps, the position where the profile was
@@ -6275,28 +6393,31 @@ def _encode_sound_velocity_profile(observation_time, application_time,
     itself. This is ported from the reference gsflib C library's
     gsfEncodeSoundVelocityProfile() function in gsf_enc.c.
 
-    :param observation_time: the time the profile was observed or
-        collected, as a POSIX timestamp or a datetime.datetime.
-    :param application_time: the time the profile was applied, as a
-        POSIX timestamp or a datetime.datetime.
-    :param latitude_deg: the latitude where the profile was collected,
-        in decimal degrees.
-    :param longitude_deg: the longitude where the profile was collected,
-        in decimal degrees.
-    :param depth_m: an array-like of depth values, in meters. Must be
-        non-negative, since depth is stored on disk as an unsigned
-        integer count of centimeters, and must be the same length as
-        sound_speed_mPerSec.
-    :param sound_speed_mPerSec: an array-like of sound speed values, in
-        meters per second. Must be non-negative, since it is stored on
-        disk as an unsigned integer count of centimeters per second, and
-        must be the same length as depth_m.
+    :param record: a dictionary in the shape
+        _decode_sound_velocity_profile() returns or
+        new_sound_velocity_profile() creates. 'ObservationTime' and
+        'ApplicationTime' (each a POSIX timestamp, datetime.datetime, or
+        ISO 8601 string), 'Latitude_deg', 'Longitude_deg', 'Depth_m', and
+        'SoundSpeed_mPerSec' are all required. 'Depth_m' and
+        'SoundSpeed_mPerSec' are array-likes of the same length, in meters
+        and meters per second; each must be non-negative, since both are
+        stored on disk as unsigned integer counts of hundredths.
+        'NumberPoints', if present, is ignored: the point count written is
+        the length of 'Depth_m'.
 
     :return: the encoded record payload, as bytes.
 
-    :raises ValueError: depth_m and sound_speed_mPerSec are not the same
-        length.
+    :raises ValueError: a required field is missing, or 'Depth_m' and
+        'SoundSpeed_mPerSec' are not the same length.
     """
+    _require_fields(record, ('ObservationTime', 'ApplicationTime', 'Latitude_deg', 'Longitude_deg',
+                             'Depth_m', 'SoundSpeed_mPerSec'), 'new_sound_velocity_profile')
+    observation_time = record['ObservationTime']
+    application_time = record['ApplicationTime']
+    latitude_deg = record['Latitude_deg']
+    longitude_deg = record['Longitude_deg']
+    depth_m = record['Depth_m']
+    sound_speed_mPerSec = record['SoundSpeed_mPerSec']
     depth_m = np.asarray(depth_m, dtype=np.float64)
     sound_speed_mPerSec = np.asarray(sound_speed_mPerSec, dtype=np.float64)
     if len(depth_m) != len(sound_speed_mPerSec):
@@ -6359,7 +6480,7 @@ def _gsf_epoch_ns_array(times):
                     dtype=np.int64)
 
 
-def _encode_attitude(attitude_time, pitch_deg, roll_deg, heave_m, heading_deg):
+def _encode_attitude(record):
     """
     Encode a GSF_RECORD_ATTITUDE payload: a base time stamp plus a
     series of attitude measurements, each stored as a small time offset
@@ -6367,33 +6488,36 @@ def _encode_attitude(attitude_time, pitch_deg, roll_deg, heave_m, heading_deg):
     values. This is ported from the reference gsflib C library's
     gsfEncodeAttitude() function in gsf_enc.c.
 
-    The first entry of attitude_time becomes the record's base time, and
-    every measurement -- including the first one -- is stored as a
+    The first entry of 'Time' becomes the record's base time, and every
+    measurement -- including the first one -- is stored as a
     millisecond offset from that base time. Because each offset is
-    stored on disk as an unsigned 16-bit field, attitude_time must be
+    stored on disk as an unsigned 16-bit field, 'Time' must be
     non-decreasing and must span less than 65.536 seconds from its first
     entry to its last. Every measurement is scaled, rounded, and packed
-    with vectorized numpy operations rather than a per-measurement loop,
-    so the arrays of a record returned by _decode_attitude() (its 'Time'
-    array included) can be passed straight back in.
+    with vectorized numpy operations rather than a per-measurement loop.
 
-    :param attitude_time: an array-like of measurement times: numpy
-        datetime64 values, POSIX timestamps, or datetime.datetime objects.
-    :param pitch_deg: an array-like of pitch values, in degrees, the
-        same length as attitude_time.
-    :param roll_deg: an array-like of roll values, in degrees, the same
-        length as attitude_time.
-    :param heave_m: an array-like of heave values, in meters, the same
-        length as attitude_time.
-    :param heading_deg: an array-like of heading values, in degrees, the
-        same length as attitude_time.
+    :param record: a dictionary in the shape _decode_attitude() returns
+        or new_attitude() creates, so a decoded record (or the whole-file
+        result of gsf.read_attitude(), split into spans under 65.536 s)
+        can be passed straight back in. 'Time' (an array-like of numpy
+        datetime64 values, POSIX timestamps, or datetime.datetime
+        objects), 'Pitch_deg', 'Roll_deg', 'Heave_m', and 'Heading_deg'
+        (each an array-like in degrees or meters, the same length as
+        'Time') are all required. 'NumMeasurements', if present, is
+        ignored: the count written is the length of 'Time'.
 
     :return: the encoded record payload, as bytes.
 
-    :raises ValueError: attitude_time, pitch_deg, roll_deg, heave_m, and
-        heading_deg are not all the same length, or are empty; or a time
-        offset or scaled value does not fit its on-disk field.
+    :raises ValueError: a required field is missing; the arrays are not
+        all the same length, or are empty; or a time offset or scaled
+        value does not fit its on-disk field.
     """
+    _require_fields(record, ('Time', 'Pitch_deg', 'Roll_deg', 'Heave_m', 'Heading_deg'), 'new_attitude')
+    attitude_time = record['Time']
+    pitch_deg = record['Pitch_deg']
+    roll_deg = record['Roll_deg']
+    heave_m = record['Heave_m']
+    heading_deg = record['Heading_deg']
     n = len(attitude_time)
     if not (len(pitch_deg) == len(roll_deg) == len(heave_m) == len(heading_deg) == n):
         raise ValueError("attitude arrays must all be the same length")
@@ -6422,10 +6546,7 @@ def _encode_attitude(attitude_time, pitch_deg, roll_deg, heave_m, heading_deg):
     return struct.pack('>2IH', base_sec, base_nsec, n) + m.tobytes()
 
 
-def _encode_swath_bathy_summary(start_time, end_time,
-                                 min_latitude_deg, min_longitude_deg,
-                                 max_latitude_deg, max_longitude_deg,
-                                 min_depth_m, max_depth_m):
+def _encode_swath_bathy_summary(record):
     """
     Encode a GSF_RECORD_SWATH_BATHY_SUMMARY payload: the start and end
     times, the geographic bounding box, and the depth range covered by a
@@ -6437,38 +6558,33 @@ def _encode_swath_bathy_summary(start_time, end_time,
     no sample data containing a GSF_RECORD_SWATH_BATHY_SUMMARY record is
     available.
 
-    :param start_time: the start of the covered time range, as a POSIX
-        timestamp or a datetime.datetime.
-    :param end_time: the end of the covered time range, as a POSIX
-        timestamp or a datetime.datetime.
-    :param min_latitude_deg: the minimum latitude in the covered
-        bounding box, in decimal degrees.
-    :param min_longitude_deg: the minimum longitude in the covered
-        bounding box, in decimal degrees.
-    :param max_latitude_deg: the maximum latitude in the covered
-        bounding box, in decimal degrees.
-    :param max_longitude_deg: the maximum longitude in the covered
-        bounding box, in decimal degrees.
-    :param min_depth_m: the minimum depth in the covered range, in
-        meters.
-    :param max_depth_m: the maximum depth in the covered range, in
-        meters.
+    :param record: a dictionary in the shape
+        _decode_swath_bathy_summary() returns or new_swath_bathy_summary()
+        creates, with every field required: 'StartTime' and 'EndTime'
+        (each a POSIX timestamp, datetime.datetime, or ISO 8601 string),
+        'MinLatitude_deg', 'MinLongitude_deg', 'MaxLatitude_deg', and
+        'MaxLongitude_deg' (decimal degrees), and 'MinDepth_m' and
+        'MaxDepth_m' (meters).
 
     :return: the encoded record payload, as bytes.
+
+    :raises ValueError: a required field is missing.
     """
-    start_sec, start_nsec = _gsf_epoch(start_time)
-    end_sec, end_nsec = _gsf_epoch(end_time)
+    fields = tuple(new_swath_bathy_summary())
+    _require_fields(record, fields, 'new_swath_bathy_summary')
+    start_sec, start_nsec = _gsf_epoch(record['StartTime'])
+    end_sec, end_nsec = _gsf_epoch(record['EndTime'])
     out = struct.pack('>4I', start_sec, start_nsec, end_sec, end_nsec)
-    for value, scale in (
-        (min_latitude_deg, 1.0e7), (min_longitude_deg, 1.0e7),
-        (max_latitude_deg, 1.0e7), (max_longitude_deg, 1.0e7),
-        (min_depth_m, 100.0), (max_depth_m, 100.0),
+    for key, scale in (
+        ('MinLatitude_deg', 1.0e7), ('MinLongitude_deg', 1.0e7),
+        ('MaxLatitude_deg', 1.0e7), ('MaxLongitude_deg', 1.0e7),
+        ('MinDepth_m', 100.0), ('MaxDepth_m', 100.0),
     ):
-        out += struct.pack('>i', _gsf_round(value * scale))
+        out += struct.pack('>i', _gsf_round(record[key] * scale))
     return out
 
 
-def _encode_comment(comment_time, comment):
+def _encode_comment(record):
     """
     Encode a GSF_RECORD_COMMENT payload: a time stamp and a single
     free-text comment string. This is ported from the reference gsflib C
@@ -6477,18 +6593,22 @@ def _encode_comment(comment_time, comment):
     This function has not been tested against a verified GSF file, since
     no sample data containing a GSF_RECORD_COMMENT record is available.
 
-    :param comment_time: the record's time stamp, as a POSIX timestamp
-        or a datetime.datetime.
-    :param comment: the comment text to encode.
+    :param record: a dictionary in the shape _decode_comment() returns or
+        new_comment() creates: 'CommentTime' (required; a POSIX
+        timestamp, datetime.datetime, or ISO 8601 string) and 'Comment',
+        the comment text.
 
     :return: the encoded record payload, as bytes.
+
+    :raises ValueError: 'CommentTime' is missing or None.
     """
-    sec, nsec = _gsf_epoch(comment_time)
-    text = comment.encode('ascii')
+    _require_fields(record, ('CommentTime',), 'new_comment')
+    sec, nsec = _gsf_epoch(record['CommentTime'])
+    text = record.get('Comment', '').encode('ascii')
     return struct.pack('>3I', sec, nsec, len(text)) + text
 
 
-def _encode_history(history_time, host_name, operator_name, command_line, comment):
+def _encode_history(record):
     """
     Encode a GSF_RECORD_HISTORY payload: a time stamp plus the host
     name, operator name, command line, and comment text describing one
@@ -6496,42 +6616,39 @@ def _encode_history(history_time, host_name, operator_name, command_line, commen
     reference gsflib C library's gsfEncodeHistory() function in
     gsf_enc.c.
 
-    host_name, operator_name, and command_line are each written as a
-    NUL-terminated string, with the 2-byte size field counting that
-    trailing NUL byte. comment is the odd one out: it is written with no
-    NUL terminator, and its size field is simply the plain string
-    length. This matches gsf_enc.c exactly. Because _decode_history()
-    does not strip an embedded NUL from the other three fields,
-    round-tripping a record through this encoder and back through the
-    decoder returns host_name, operator_name, and command_line each with
-    a trailing '\\x00' character appended.
+    The host name, operator name, and command line are each written as
+    a NUL-terminated string, with the 2-byte size field counting that
+    trailing NUL byte. The comment is the odd one out: it is written with
+    no NUL terminator, and its size field is simply the plain string
+    length. This matches gsf_enc.c exactly. _decode_history() strips
+    those NULs back off, so a decoded record re-encodes to the same
+    bytes.
 
     This function has not been tested against a verified GSF file, since
     no sample data containing a GSF_RECORD_HISTORY record is available.
 
-    :param history_time: the record's time stamp, as a POSIX timestamp
-        or a datetime.datetime.
-    :param host_name: the name of the host that performed the
-        processing step.
-    :param operator_name: the name of the operator who performed the
-        processing step.
-    :param command_line: the command line used to perform the
-        processing step.
-    :param comment: free-text comment describing the processing step.
+    :param record: a dictionary in the shape _decode_history() returns or
+        new_history() creates: 'HistoryTime' (required; a POSIX timestamp,
+        datetime.datetime, or ISO 8601 string), and 'HostName',
+        'OperatorName', 'CommandLine', and 'Comment' (each text; a missing
+        one is written as an empty string).
 
     :return: the encoded record payload, as bytes.
+
+    :raises ValueError: 'HistoryTime' is missing or None.
     """
-    sec, nsec = _gsf_epoch(history_time)
+    _require_fields(record, ('HistoryTime',), 'new_history')
+    sec, nsec = _gsf_epoch(record['HistoryTime'])
     out = struct.pack('>2I', sec, nsec)
-    for value in (host_name, operator_name, command_line):
-        text = value.encode('ascii') + b'\x00'
+    for key in ('HostName', 'OperatorName', 'CommandLine'):
+        text = record.get(key, '').encode('ascii') + b'\x00'
         out += struct.pack('>H', len(text)) + text
-    text = comment.encode('ascii')
+    text = record.get('Comment', '').encode('ascii')
     out += struct.pack('>H', len(text)) + text
     return out
 
 
-def _encode_navigation_error(nav_error_time, record_id, longitude_error_m, latitude_error_m):
+def _encode_navigation_error(record):
     """
     Encode a GSF_RECORD_NAVIGATION_ERROR payload: a time stamp, the
     identifier of the record an error estimate applies to, and estimated
@@ -6544,7 +6661,7 @@ def _encode_navigation_error(nav_error_time, record_id, longitude_error_m, latit
 
     The reference encoder rounds both error fields with an unconditional
     "+ 0.501" that does not check the value's sign. For a negative error
-    value this is a rounding bug: for example, a longitude_error_m of
+    value this is a rounding bug: for example, a 'LongitudeError_m' of
     -1.29 m, using the reference's own formula and then truncating
     toward zero after scaling, encodes to -12 (in units of 1/10 m)
     instead of the correctly rounded -13. This function does not
@@ -6557,24 +6674,26 @@ def _encode_navigation_error(nav_error_time, record_id, longitude_error_m, latit
     no sample data containing a GSF_RECORD_NAVIGATION_ERROR record is
     available.
 
-    :param nav_error_time: the record's time stamp, as a POSIX timestamp
-        or a datetime.datetime.
-    :param record_id: the identifier of the record this error estimate
-        applies to.
-    :param longitude_error_m: the estimated longitude error, in meters.
-    :param latitude_error_m: the estimated latitude error, in meters.
+    :param record: a dictionary in the shape _decode_navigation_error()
+        returns or new_navigation_error() creates, with every field
+        required: 'NavErrorTime' (a POSIX timestamp, datetime.datetime, or
+        ISO 8601 string), 'RecordID' (the identifier of the record this
+        error estimate applies to), and 'LongitudeError_m' and
+        'LatitudeError_m' (the estimated errors, in meters).
 
     :return: the encoded record payload, as bytes.
+
+    :raises ValueError: a required field is missing.
     """
-    sec, nsec = _gsf_epoch(nav_error_time)
-    out = struct.pack('>3I', sec, nsec, record_id)
-    out += struct.pack('>i', _gsf_round(longitude_error_m * 10.0))
-    out += struct.pack('>i', _gsf_round(latitude_error_m * 10.0))
+    _require_fields(record, tuple(new_navigation_error()), 'new_navigation_error')
+    sec, nsec = _gsf_epoch(record['NavErrorTime'])
+    out = struct.pack('>3I', sec, nsec, int(record['RecordID']))
+    out += struct.pack('>i', _gsf_round(record['LongitudeError_m'] * 10.0))
+    out += struct.pack('>i', _gsf_round(record['LatitudeError_m'] * 10.0))
     return out
 
 
-def _encode_hv_navigation_error(nav_error_time, record_id, horizontal_error_m,
-                                 vertical_error_m, sep_uncertainty_m, position_type=""):
+def _encode_hv_navigation_error(record):
     """
     Encode a GSF_RECORD_HV_NAVIGATION_ERROR payload: a time stamp, the
     identifier of the record an error estimate applies to, estimated
@@ -6583,9 +6702,9 @@ def _encode_hv_navigation_error(nav_error_time, record_id, horizontal_error_m,
     the estimate came from. This is ported from the reference gsflib C
     library's gsfEncodeHVNavigationError() function in gsf_enc.c.
 
-    The reference encoder rounds the vertical_error field using a plain
+    The reference encoder rounds the vertical error field using a plain
     "+/- 0.5" rather than the "+/- 0.501" convention used everywhere
-    else in gsf_enc.c, including for horizontal_error in this same
+    else in gsf_enc.c, including for the horizontal error in this same
     function. The two conventions are functionally equivalent except
     exactly on a 0.5 fractional boundary, so this function uses the
     standard _gsf_round() convention, with its 0.501 margin, for both
@@ -6595,28 +6714,28 @@ def _encode_hv_navigation_error(nav_error_time, record_id, horizontal_error_m,
     no sample data containing a GSF_RECORD_HV_NAVIGATION_ERROR record is
     available.
 
-    :param nav_error_time: the record's time stamp, as a POSIX timestamp
-        or a datetime.datetime.
-    :param record_id: the identifier of the record this error estimate
-        applies to.
-    :param horizontal_error_m: the estimated horizontal position error,
-        in meters.
-    :param vertical_error_m: the estimated vertical position error, in
-        meters.
-    :param sep_uncertainty_m: the estimated separation (SEP)
-        uncertainty, in meters.
-    :param position_type: the name of the positioning system the error
-        estimate came from. Optional; defaults to an empty string.
+    :param record: a dictionary in the shape
+        _decode_hv_navigation_error() returns or new_hv_navigation_error()
+        creates: 'NavErrorTime' (a POSIX timestamp, datetime.datetime, or
+        ISO 8601 string), 'RecordID' (the identifier of the record this
+        error estimate applies to), and 'HorizontalError_m',
+        'VerticalError_m', and 'SEPUncertainty_m' (meters) are required;
+        'PositionType', the name of the positioning system the estimate
+        came from, is optional and defaults to an empty string.
 
     :return: the encoded record payload, as bytes.
+
+    :raises ValueError: a required field is missing.
     """
-    sec, nsec = _gsf_epoch(nav_error_time)
-    out = struct.pack('>3I', sec, nsec, record_id)
-    out += struct.pack('>i', _gsf_round(horizontal_error_m * 1000.0))
-    out += struct.pack('>i', _gsf_round(vertical_error_m * 1000.0))
-    out += struct.pack('>H', _gsf_round(sep_uncertainty_m * 100.0))
+    _require_fields(record, ('NavErrorTime', 'RecordID', 'HorizontalError_m', 'VerticalError_m',
+                             'SEPUncertainty_m'), 'new_hv_navigation_error')
+    sec, nsec = _gsf_epoch(record['NavErrorTime'])
+    out = struct.pack('>3I', sec, nsec, int(record['RecordID']))
+    out += struct.pack('>i', _gsf_round(record['HorizontalError_m'] * 1000.0))
+    out += struct.pack('>i', _gsf_round(record['VerticalError_m'] * 1000.0))
+    out += struct.pack('>H', _gsf_round(record['SEPUncertainty_m'] * 100.0))
     out += b'\x00\x00'  # spare
-    text = position_type.encode('ascii')
+    text = (record.get('PositionType') or '').encode('ascii')
     out += struct.pack('>H', len(text)) + text
     return out
 
@@ -7658,10 +7777,9 @@ def _decode_record(record_id, payload, major_version, scale_factors, decode_inte
     :param decode_intensity: passed through to
         _decode_swath_bathymetry_ping().
 
-    :return: whatever that record type's decoder returns: a single
-        dictionary for swath and single-beam pings, attitude, and sound
-        velocity profiles, and a (scalars, tables, notes) tuple for every
-        other record type; or None for a recordID with no decoder.
+    :return: the record as that record type's decoder returns it, a
+        single dictionary in the shape of that type's new_*() template;
+        or None for a recordID with no decoder.
 
     :raises struct.error, IndexError, ValueError: the payload is too short
         or otherwise malformed for its record type.
@@ -8071,10 +8189,10 @@ class gsf():
 
         :return: a generator of (record_type, byte_offset, record) tuples:
             the record's RecordType, the byte offset of its framing within
-            the file, and the record as decoded by that type's decoder (a
-            single dictionary for swath and single-beam pings, attitude,
-            and sound velocity profiles, and a (scalars, tables, notes)
-            tuple for every other type).
+            the file, and the record as decoded by that type's decoder: a
+            single dictionary in the shape of that type's new_*()
+            template, which can be passed straight back to the matching
+            write_*() method.
 
         :raises ValueError: record_type is a string that does not name any
             known record type.
@@ -8251,16 +8369,18 @@ class gsf():
     @staticmethod
     def _print_array_record(record, table_label, index_name):
         """
-        A print_records() helper that prints one decoded record whose
-        dictionary holds scalar fields alongside equal-length numpy arrays
-        (an attitude record, or a sound velocity profile): each scalar
-        field as a "key : value" line, then the arrays together as one
-        table, one row per element. The table is built only here, for
-        display; the decoders themselves return plain numpy arrays.
+        A print_records() helper that prints one decoded record other
+        than a ping: each scalar field as a "key : value" line, then any
+        equal-length numpy arrays (an attitude record's measurements, or a
+        sound velocity profile's points) together as one table, one row
+        per element. The table is built only here, for display; the
+        decoders themselves return plain numpy arrays.
 
         :param record: the decoded record dictionary.
-        :param table_label: the heading printed above the table.
-        :param index_name: the label for the table's row-number column.
+        :param table_label: the heading printed above the table, or None
+            for a record with no arrays.
+        :param index_name: the label for the table's row-number column, or
+            None for a record with no arrays.
         """
         scalars = {k: v for k, v in record.items() if not isinstance(v, np.ndarray)}
         table = {k: v for k, v in record.items() if isinstance(v, np.ndarray)}
@@ -8278,10 +8398,8 @@ class gsf():
         A print_records() helper that prints one decoded ping record to
         stdout as readable text. It handles the two record types
         (GSF_RECORD_SWATH_BATHYMETRY_PING and GSF_RECORD_SINGLE_BEAM_PING)
-        whose decoders, _decode_swath_bathymetry_ping() and
-        _decode_single_beam_ping(), each return one merged dictionary,
-        rather than the (scalars, tables, notes) three-element tuple that
-        every other record type's decoder returns.
+        whose decoded dictionaries nest tables and sensor-specific
+        subrecords, which _print_array_record() does not handle.
 
         This prints, in order: every flat scalar field in `record` (i.e.
         every entry other than 'Beams', 'IntensityTimeSeries',
@@ -8439,18 +8557,14 @@ class gsf():
                         self._print_array_record(decoded, 'Measurements', 'Measurement')
                     elif rid == RecordType.GSF_RECORD_SOUND_VELOCITY_PROFILE:
                         self._print_array_record(decoded, 'Profile', 'Point')
+                    elif rid in (RecordType.GSF_RECORD_PROCESSING_PARAMETERS,
+                                 RecordType.GSF_RECORD_SENSOR_PARAMETERS):
+                        # Each parameter on its own "NAME : VALUE" line.
+                        flat = {'ParamTime': decoded['ParamTime']}
+                        flat.update((k, '' if v is None else v) for k, v in decoded['Parameters'].items())
+                        self._print_array_record(flat, None, None)
                     else:
-                        scalars, tables, notes = decoded
-                        if scalars:
-                            width = max(len(k) for k in scalars)
-                            for k, v in scalars.items():
-                                print("  %-*s : %s" % (width, k, v))
-                        for note in notes:
-                            print("  # %s" % note)
-                        for label, table in tables.items():
-                            if table is not None and len(table):
-                                print("-- %s --" % label)
-                                print(table.to_string())
+                        self._print_array_record(decoded, None, None)
                     print()
 
             self.FID.seek(offset + GSF_RECORD_FRAMING_SIZE + readSize, 0)
@@ -8585,7 +8699,7 @@ class gsf():
 
         self.FID.write(struct.pack('>II', len(payload), did) + body)
 
-    def write_header(self, version=None):
+    def write_header(self, record=None):
         """
         Write the GSF_RECORD_HEADER record, which is normally the first
         record in any file this library writes. The version string that
@@ -8595,41 +8709,40 @@ class gsf():
         only exist in newer GSF versions. See _encode_header() for how
         the version string is encoded. The reference gsflib C library's
         own encoder always stamps its own current version when it writes
-        this record, so the `version` parameter here exists mainly to
-        support testing.
+        this record, so a record's 'Version' exists mainly to support
+        testing.
 
-        :param version: the GSF version string to write, such as
-            "GSF-v03.10". If left as None, this library's own current
-            GSF_VERSION constant is used.
+        :param record: a dictionary in the shape new_header() creates.
+            Optional; omitted, or with 'Version' None, this library's own
+            current GSF_VERSION is written.
         """
-        version = version or GSF_VERSION
-        self.write_record(RecordType.GSF_RECORD_HEADER, _encode_header(version))
+        version = (record or {}).get('Version') or GSF_VERSION
+        self.write_record(RecordType.GSF_RECORD_HEADER, _encode_header({'Version': version}))
         self.gsfVersion = version
 
-    def write_processing_parameters(self, params, param_time):
+    def write_processing_parameters(self, record):
         """
         Write a GSF_RECORD_PROCESSING_PARAMETERS record, which records
         the processing parameters that were in effect when this file's
         data was generated, as a set of named text values. See
-        _encode_name_value_parameters() for how `params` is encoded onto
-        the wire.
+        _encode_name_value_parameters() for how the record is encoded
+        onto the wire.
 
-        :param params: a dictionary mapping parameter name strings to
-            their value strings.
-        :param param_time: the timestamp associated with this set of
-            parameters.
+        :param record: a dictionary in the shape new_name_value_parameters()
+            creates: 'ParamTime', the timestamp associated with this set
+            of parameters, and 'Parameters', a dictionary mapping
+            parameter name strings to their values.
         """
         self.write_record(
-            RecordType.GSF_RECORD_PROCESSING_PARAMETERS,
-            _encode_name_value_parameters(param_time, params))
+            RecordType.GSF_RECORD_PROCESSING_PARAMETERS, _encode_name_value_parameters(record))
 
-    def write_sensor_parameters(self, params, param_time):
+    def write_sensor_parameters(self, record):
         """
         Write a GSF_RECORD_SENSOR_PARAMETERS record, which records a set
         of sensor configuration parameters as named text values, using
         the same wire format as GSF_RECORD_PROCESSING_PARAMETERS. See
-        _encode_name_value_parameters() for how `params` is encoded onto
-        the wire.
+        _encode_name_value_parameters() for how the record is encoded
+        onto the wire.
 
         This method is untested against a verified GSF file, since no
         sample data containing a GSF_RECORD_SENSOR_PARAMETERS record is
@@ -8638,65 +8751,42 @@ class gsf():
         checks only that writing and then reading back this method's own
         output is self-consistent.
 
-        :param params: a dictionary mapping parameter name strings to
-            their value strings.
-        :param param_time: the timestamp associated with this set of
-            parameters.
+        :param record: a dictionary in the shape new_name_value_parameters()
+            creates: 'ParamTime', the timestamp associated with this set
+            of parameters, and 'Parameters', a dictionary mapping
+            parameter name strings to their values.
         """
         self.write_record(
-            RecordType.GSF_RECORD_SENSOR_PARAMETERS,
-            _encode_name_value_parameters(param_time, params))
+            RecordType.GSF_RECORD_SENSOR_PARAMETERS, _encode_name_value_parameters(record))
 
-    def write_sound_velocity_profile(self, observation_time, application_time,
-                                      latitude_deg, longitude_deg,
-                                      depth_m, sound_speed_mPerSec):
+    def write_sound_velocity_profile(self, record):
         """
         Write a GSF_RECORD_SOUND_VELOCITY_PROFILE record, which records a
         sound speed profile (a series of depth/sound-speed pairs) along
         with the position and times associated with it. See
-        _encode_sound_velocity_profile() for how the arguments are
-        encoded onto the wire.
+        _encode_sound_velocity_profile() for the fields the record needs
+        and how they are encoded onto the wire.
 
-        :param observation_time: the time at which the profile was
-            observed or measured.
-        :param application_time: the time at which the profile began
-            being applied to the sonar data.
-        :param latitude_deg: the latitude, in decimal degrees, where the
-            profile was observed.
-        :param longitude_deg: the longitude, in decimal degrees, where
-            the profile was observed.
-        :param depth_m: a sequence of depths, in meters, for each point
-            in the profile.
-        :param sound_speed_mPerSec: a sequence of sound speeds, in meters
-            per second, one for each depth in `depth_m`.
+        :param record: a dictionary in the shape
+            new_sound_velocity_profile() creates or
+            _decode_sound_velocity_profile() returns.
         """
         self.write_record(
-            RecordType.GSF_RECORD_SOUND_VELOCITY_PROFILE,
-            _encode_sound_velocity_profile(
-                observation_time, application_time, latitude_deg, longitude_deg,
-                depth_m, sound_speed_mPerSec))
+            RecordType.GSF_RECORD_SOUND_VELOCITY_PROFILE, _encode_sound_velocity_profile(record))
 
-    def write_attitude(self, attitude_time, pitch_deg, roll_deg, heave_m, heading_deg):
+    def write_attitude(self, record):
         """
         Write a GSF_RECORD_ATTITUDE record, which records one or more
         vessel attitude measurements (pitch, roll, heave, and heading).
-        See _encode_attitude() for how the arguments are encoded onto
-        the wire.
+        See _encode_attitude() for the fields the record needs and how
+        they are encoded onto the wire.
 
-        :param attitude_time: a sequence of timestamps, one per attitude
-            measurement.
-        :param pitch_deg: a sequence of pitch values, in degrees, one per
-            measurement.
-        :param roll_deg: a sequence of roll values, in degrees, one per
-            measurement.
-        :param heave_m: a sequence of heave values, in meters, one per
-            measurement.
-        :param heading_deg: a sequence of heading values, in degrees, one
-            per measurement.
+        :param record: a dictionary in the shape new_attitude() creates or
+            _decode_attitude() returns: 'Time', 'Pitch_deg', 'Roll_deg',
+            'Heave_m', and 'Heading_deg', each an array-like with one
+            element per measurement.
         """
-        self.write_record(
-            RecordType.GSF_RECORD_ATTITUDE,
-            _encode_attitude(attitude_time, pitch_deg, roll_deg, heave_m, heading_deg))
+        self.write_record(RecordType.GSF_RECORD_ATTITUDE, _encode_attitude(record))
 
     def write_swath_bathymetry_ping(self, record, scale_factors=None, auto_scale=None):
         """
@@ -8784,141 +8874,88 @@ class gsf():
             RecordType.GSF_RECORD_SWATH_BATHYMETRY_PING,
             _encode_swath_bathymetry_ping(record, scale_factors, major_version))
 
-    def write_swath_bathy_summary(self, start_time, end_time,
-                                   min_latitude_deg, min_longitude_deg,
-                                   max_latitude_deg, max_longitude_deg,
-                                   min_depth_m, max_depth_m):
+    def write_swath_bathy_summary(self, record):
         """
         Write a GSF_RECORD_SWATH_BATHY_SUMMARY record, which summarizes
         the time span, geographic bounding box, and depth range covered
         by a collection of swath bathymetry pings. See
-        _encode_swath_bathy_summary() for how the arguments are encoded
-        onto the wire.
+        _encode_swath_bathy_summary() for the fields the record needs and
+        how they are encoded onto the wire.
 
         This method is untested against a verified GSF file, since no
         sample data containing a GSF_RECORD_SWATH_BATHY_SUMMARY record is
         available.
 
-        :param start_time: the timestamp of the first ping covered by
-            this summary.
-        :param end_time: the timestamp of the last ping covered by this
-            summary.
-        :param min_latitude_deg: the minimum latitude, in decimal
-            degrees, of the bounding box.
-        :param min_longitude_deg: the minimum longitude, in decimal
-            degrees, of the bounding box.
-        :param max_latitude_deg: the maximum latitude, in decimal
-            degrees, of the bounding box.
-        :param max_longitude_deg: the maximum longitude, in decimal
-            degrees, of the bounding box.
-        :param min_depth_m: the minimum depth, in meters, among the
-            covered pings.
-        :param max_depth_m: the maximum depth, in meters, among the
-            covered pings.
+        :param record: a dictionary in the shape new_swath_bathy_summary()
+            creates or _decode_swath_bathy_summary() returns.
         """
-        self.write_record(
-            RecordType.GSF_RECORD_SWATH_BATHY_SUMMARY,
-            _encode_swath_bathy_summary(
-                start_time, end_time, min_latitude_deg, min_longitude_deg,
-                max_latitude_deg, max_longitude_deg, min_depth_m, max_depth_m))
+        self.write_record(RecordType.GSF_RECORD_SWATH_BATHY_SUMMARY, _encode_swath_bathy_summary(record))
 
-    def write_comment(self, comment_time, comment):
+    def write_comment(self, record):
         """
         Write a GSF_RECORD_COMMENT record, which holds a free-text
         comment string along with a timestamp. See _encode_comment() for
-        how the arguments are encoded onto the wire.
+        the fields the record needs and how they are encoded onto the
+        wire.
 
         This method is untested against a verified GSF file, since no
         sample data containing a GSF_RECORD_COMMENT record is available.
 
-        :param comment_time: the timestamp associated with this comment.
-        :param comment: the comment text.
+        :param record: a dictionary in the shape new_comment() creates or
+            _decode_comment() returns.
         """
-        self.write_record(RecordType.GSF_RECORD_COMMENT, _encode_comment(comment_time, comment))
+        self.write_record(RecordType.GSF_RECORD_COMMENT, _encode_comment(record))
 
-    def write_history(self, history_time, host_name, operator_name, command_line, comment):
+    def write_history(self, record):
         """
         Write a GSF_RECORD_HISTORY record, which logs one processing
         step applied to the file: who ran it, on what host, with what
         command line, and any free-text comment about it. See
-        _encode_history() for how the arguments are encoded onto the
-        wire.
+        _encode_history() for the fields the record needs and how they
+        are encoded onto the wire.
 
         This method is untested against a verified GSF file, since no
         sample data containing a GSF_RECORD_HISTORY record is available.
 
-        :param history_time: the timestamp of this processing step.
-        :param host_name: the name of the host the processing step ran
-            on.
-        :param operator_name: the name of the operator who ran the
-            processing step.
-        :param command_line: the command line used to run the processing
-            step.
-        :param comment: a free-text comment describing the processing
-            step.
+        :param record: a dictionary in the shape new_history() creates or
+            _decode_history() returns.
         """
-        self.write_record(
-            RecordType.GSF_RECORD_HISTORY,
-            _encode_history(history_time, host_name, operator_name, command_line, comment))
+        self.write_record(RecordType.GSF_RECORD_HISTORY, _encode_history(record))
 
-    def write_navigation_error(self, nav_error_time, record_id, longitude_error_m, latitude_error_m):
+    def write_navigation_error(self, record):
         """
         Write a GSF_RECORD_NAVIGATION_ERROR record, which records the
         estimated longitude and latitude error associated with a ping.
         This record type is obsolete in the GSF format; prefer
         write_hv_navigation_error() for new data. See
-        _encode_navigation_error() for how the arguments are encoded
-        onto the wire.
+        _encode_navigation_error() for the fields the record needs and how
+        they are encoded onto the wire.
 
         This method is untested against a verified GSF file, since no
         sample data containing a GSF_RECORD_NAVIGATION_ERROR record is
         available.
 
-        :param nav_error_time: the timestamp this navigation error
-            estimate applies to.
-        :param record_id: the identifier of the ping record this
-            navigation error estimate is associated with.
-        :param longitude_error_m: the estimated longitude error, in
-            meters.
-        :param latitude_error_m: the estimated latitude error, in
-            meters.
+        :param record: a dictionary in the shape new_navigation_error()
+            creates or _decode_navigation_error() returns.
         """
-        self.write_record(
-            RecordType.GSF_RECORD_NAVIGATION_ERROR,
-            _encode_navigation_error(nav_error_time, record_id, longitude_error_m, latitude_error_m))
+        self.write_record(RecordType.GSF_RECORD_NAVIGATION_ERROR, _encode_navigation_error(record))
 
-    def write_hv_navigation_error(self, nav_error_time, record_id, horizontal_error_m,
-                                   vertical_error_m, sep_uncertainty_m, position_type=""):
+    def write_hv_navigation_error(self, record):
         """
         Write a GSF_RECORD_HV_NAVIGATION_ERROR record, which records the
         estimated horizontal and vertical positioning error associated
         with a ping, superseding the older GSF_RECORD_NAVIGATION_ERROR
-        record type. See _encode_hv_navigation_error() for how the
-        arguments are encoded onto the wire.
+        record type. See _encode_hv_navigation_error() for the fields the
+        record needs and how they are encoded onto the wire.
 
         This method is untested against a verified GSF file, since no
         sample data containing a GSF_RECORD_HV_NAVIGATION_ERROR record is
         available.
 
-        :param nav_error_time: the timestamp this navigation error
-            estimate applies to.
-        :param record_id: the identifier of the ping record this
-            navigation error estimate is associated with.
-        :param horizontal_error_m: the estimated horizontal position
-            error, in meters.
-        :param vertical_error_m: the estimated vertical position error,
-            in meters.
-        :param sep_uncertainty_m: the estimated separation (SEP)
-            uncertainty, in meters.
-        :param position_type: the name of the positioning system the
-            error estimate came from. Optional; defaults to an empty
-            string.
+        :param record: a dictionary in the shape new_hv_navigation_error()
+            creates or _decode_hv_navigation_error() returns.
         """
-        self.write_record(
-            RecordType.GSF_RECORD_HV_NAVIGATION_ERROR,
-            _encode_hv_navigation_error(
-                nav_error_time, record_id, horizontal_error_m, vertical_error_m,
-                sep_uncertainty_m, position_type))
+        self.write_record(RecordType.GSF_RECORD_HV_NAVIGATION_ERROR, _encode_hv_navigation_error(record))
 
     def write_single_beam_ping(self, record):
         """

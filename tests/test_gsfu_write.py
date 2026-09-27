@@ -149,11 +149,18 @@ from GSFU.gsfu import (
     gsf,
     gsf_checksum,
     new_attitude,
+    new_comment,
+    new_header,
+    new_history,
+    new_hv_navigation_error,
     new_intensity_time_series_beam,
     new_intensity_time_series_header,
     new_kmall_specific,
-    new_sound_velocity_profile,
     new_kmall_tx_sector,
+    new_name_value_parameters,
+    new_navigation_error,
+    new_sound_velocity_profile,
+    new_swath_bathy_summary,
     new_swath_bathymetry_ping_scalars,
 )
 
@@ -220,99 +227,149 @@ class TestGsfEpoch:
 
 
 # ---------------------------------------------------------------------------
-# _encode_header
+# Single-dictionary records: every non-ping record type decodes to one
+# dictionary in its new_*() template's shape, and its encoder takes that same
+# dictionary back.
 # ---------------------------------------------------------------------------
+
+#: (template, encoder, decoder, a filled-in record, its required fields)
+_SIMPLE_RECORDS = {
+    'header': (new_header, _encode_header, _decode_header,
+               {'Version': "GSF-v03.09"}, ()),
+    'parameters': (new_name_value_parameters, _encode_name_value_parameters, _decode_name_value_parameters,
+                   {'ParamTime': 1700000000.5,
+                    'Parameters': {"PLATFORM_TYPE": "SURFACE_SHIP", "FULL_RAW_DATA": "TRUE", "BARE": None}},
+                   ('ParamTime',)),
+    'sound_velocity_profile': (
+        new_sound_velocity_profile, _encode_sound_velocity_profile, _decode_sound_velocity_profile,
+        {'ObservationTime': 1700000000.25, 'ApplicationTime': 1700000100.5,
+         'Latitude_deg': 43.1, 'Longitude_deg': -70.5,
+         'Depth_m': [0.0, 1.06, 5000.5], 'SoundSpeed_mPerSec': [1540.87, 1540.85, 1480.0]},
+        ('ObservationTime', 'ApplicationTime', 'Latitude_deg', 'Longitude_deg', 'Depth_m', 'SoundSpeed_mPerSec')),
+    'attitude': (new_attitude, _encode_attitude, _decode_attitude,
+                 {'Time': [1700000000.25, 1700000030.5, 1700000065.5],
+                  'Pitch_deg': [-90.0, 0.01, 45.5], 'Roll_deg': [-180.0, 0.0, 179.99],
+                  'Heave_m': [-3.2, 0.0, 12.34], 'Heading_deg': [0.0, 180.0, 359.99]},
+                 ('Time', 'Pitch_deg', 'Roll_deg', 'Heave_m', 'Heading_deg')),
+    'swath_bathy_summary': (
+        new_swath_bathy_summary, _encode_swath_bathy_summary, _decode_swath_bathy_summary,
+        {'StartTime': 1700000000.0, 'EndTime': 1700003600.0,
+         'MinLatitude_deg': 42.9, 'MinLongitude_deg': -70.6,
+         'MaxLatitude_deg': 43.3, 'MaxLongitude_deg': -70.4,
+         'MinDepth_m': 5.0, 'MaxDepth_m': 125.5},
+        tuple(new_swath_bathy_summary())),
+    'comment': (new_comment, _encode_comment, _decode_comment,
+                {'CommentTime': 1700000000.0, 'Comment': "this is a test comment"}, ('CommentTime',)),
+    'history': (new_history, _encode_history, _decode_history,
+                {'HistoryTime': 1700000000.0, 'HostName': "host1", 'OperatorName': "vschmidt",
+                 'CommandLine': "kmall2gsf.py -f x.kmall -o x.gsf", 'Comment': "converted"},
+                ('HistoryTime',)),
+    'navigation_error': (new_navigation_error, _encode_navigation_error, _decode_navigation_error,
+                         {'NavErrorTime': 1700000000.0, 'RecordID': 12345,
+                          'LongitudeError_m': 1.3, 'LatitudeError_m': -0.8},
+                         tuple(new_navigation_error())),
+    'hv_navigation_error': (
+        new_hv_navigation_error, _encode_hv_navigation_error, _decode_hv_navigation_error,
+        {'NavErrorTime': 1700000000.0, 'RecordID': 54321, 'HorizontalError_m': 0.35,
+         'VerticalError_m': 0.12, 'SEPUncertainty_m': 0.5, 'PositionType': "GPS"},
+        ('NavErrorTime', 'RecordID', 'HorizontalError_m', 'VerticalError_m', 'SEPUncertainty_m')),
+}
+
+
+class TestSingleDictionaryRecords:
+    @pytest.mark.parametrize("name", _SIMPLE_RECORDS)
+    def test_decoded_keys_match_template(self, name):
+        template, encode, decode, record, _required = _SIMPLE_RECORDS[name]
+        assert set(decode(encode(record))) == set(template())
+
+    @pytest.mark.parametrize("name", _SIMPLE_RECORDS)
+    def test_template_filled_in_encodes_like_the_plain_record(self, name):
+        template, encode, _decode, record, _required = _SIMPLE_RECORDS[name]
+        filled = template()
+        filled.update(record)
+        assert encode(filled) == encode(record)
+
+    @pytest.mark.parametrize("name", _SIMPLE_RECORDS)
+    def test_decoded_record_re_encodes_to_same_bytes(self, name):
+        _template, encode, decode, record, _required = _SIMPLE_RECORDS[name]
+        payload = encode(record)
+        assert encode(decode(payload)) == payload
+
+    @pytest.mark.parametrize("name, field", [
+        (name, field) for name, entry in _SIMPLE_RECORDS.items() for field in entry[4]])
+    def test_missing_required_field_raises(self, name, field):
+        _template, encode, _decode, record, _required = _SIMPLE_RECORDS[name]
+        incomplete = dict(record)
+        del incomplete[field]
+        with pytest.raises(ValueError, match=field):
+            encode(incomplete)
+
 
 class TestEncodeHeader:
     def test_default_version_decodes_back(self):
-        scalars, _tables, _notes = _decode_header(_encode_header())
-        assert scalars['Version'] == GSF_VERSION
+        assert _decode_header(_encode_header())['Version'] == GSF_VERSION
+        assert _decode_header(_encode_header(new_header()))['Version'] == GSF_VERSION
 
     def test_explicit_version_decodes_back(self):
-        scalars, _tables, _notes = _decode_header(_encode_header("GSF-v03.09"))
-        assert scalars['Version'] == "GSF-v03.09"
+        assert _decode_header(_encode_header({'Version': "GSF-v03.09"}))['Version'] == "GSF-v03.09"
 
     def test_payload_is_exactly_version_size(self):
         from GSFU.gsfu import GSF_VERSION_SIZE
         assert len(_encode_header()) == GSF_VERSION_SIZE
 
 
-# ---------------------------------------------------------------------------
-# _encode_name_value_parameters
-# ---------------------------------------------------------------------------
-
 class TestEncodeNameValueParameters:
     def test_round_trip(self):
-        params = {"PLATFORM_TYPE": "SURFACE_SHIP", "FULL_RAW_DATA": "TRUE"}
-        payload = _encode_name_value_parameters(1700000000.0, params)
-        scalars, _tables, _notes = _decode_name_value_parameters(payload)
+        record = {'ParamTime': 1700000000.0,
+                  'Parameters': {"PLATFORM_TYPE": "SURFACE_SHIP", "FULL_RAW_DATA": "TRUE"}}
+        decoded = _decode_name_value_parameters(_encode_name_value_parameters(record))
 
-        assert scalars['PLATFORM_TYPE'] == "SURFACE_SHIP"
-        assert scalars['FULL_RAW_DATA'] == "TRUE"
+        assert decoded['Parameters'] == {"PLATFORM_TYPE": "SURFACE_SHIP", "FULL_RAW_DATA": "TRUE"}
 
     def test_no_embedded_nul_in_decoded_values(self):
-        payload = _encode_name_value_parameters(1700000000.0, {"A": "B"})
-        scalars, _tables, _notes = _decode_name_value_parameters(payload)
-        assert '\x00' not in scalars['A']
+        payload = _encode_name_value_parameters({'ParamTime': 1700000000.0, 'Parameters': {"A": "B"}})
+        assert '\x00' not in _decode_name_value_parameters(payload)['Parameters']['A']
 
     def test_empty_params(self):
-        payload = _encode_name_value_parameters(1700000000.0, {})
-        scalars, _tables, _notes = _decode_name_value_parameters(payload)
-        assert 'ParamTime' in scalars
-        assert len(scalars) == 1
+        payload = _encode_name_value_parameters({'ParamTime': 1700000000.0, 'Parameters': {}})
+        assert _decode_name_value_parameters(payload)['Parameters'] == {}
 
+    def test_parameter_without_equals_sign_round_trips(self):
+        payload = _encode_name_value_parameters({'ParamTime': 1700000000.0, 'Parameters': {"FLAG": None}})
+        assert _decode_name_value_parameters(payload)['Parameters'] == {"FLAG": None}
+        assert b"FLAG\x00" in payload and b"FLAG=" not in payload
 
-# ---------------------------------------------------------------------------
-# _encode_sound_velocity_profile
-# ---------------------------------------------------------------------------
 
 class TestEncodeSoundVelocityProfile:
     def test_round_trip(self):
-        payload = _encode_sound_velocity_profile(
-            observation_time=1700000000.0, application_time=1700000100.0,
-            latitude_deg=43.1, longitude_deg=-70.5,
-            depth_m=[0.0, 10.0, 10000.0], sound_speed_mPerSec=[1500.0, 1500.5, 1490.25])
+        profile = _decode_sound_velocity_profile(_encode_sound_velocity_profile({
+            'ObservationTime': 1700000000.0, 'ApplicationTime': 1700000100.0,
+            'Latitude_deg': 43.1, 'Longitude_deg': -70.5,
+            'Depth_m': [0.0, 10.0, 10000.0], 'SoundSpeed_mPerSec': [1500.0, 1500.5, 1490.25]}))
 
-        profile = _decode_sound_velocity_profile(payload)
-
-        assert set(profile) == set(new_sound_velocity_profile())
         assert profile['Latitude_deg'] == pytest.approx(43.1)
         assert profile['Longitude_deg'] == pytest.approx(-70.5)
         assert profile['NumberPoints'] == 3
         assert list(profile['Depth_m']) == pytest.approx([0.0, 10.0, 10000.0])
         assert list(profile['SoundSpeed_mPerSec']) == pytest.approx([1500.0, 1500.5, 1490.25])
 
-    def test_decoded_profile_re_encodes_to_same_bytes(self):
-        payload = _encode_sound_velocity_profile(
-            observation_time=1700000000.25, application_time=1700000100.5,
-            latitude_deg=43.1, longitude_deg=-70.5,
-            depth_m=[0.0, 1.06, 5000.5], sound_speed_mPerSec=[1540.87, 1540.85, 1480.0])
-
-        p = _decode_sound_velocity_profile(payload)
-
-        assert _encode_sound_velocity_profile(
-            p['ObservationTime'], p['ApplicationTime'], p['Latitude_deg'], p['Longitude_deg'],
-            p['Depth_m'], p['SoundSpeed_mPerSec']) == payload
-
     def test_mismatched_lengths_raises(self):
         with pytest.raises(ValueError):
-            _encode_sound_velocity_profile(0.0, 0.0, 0.0, 0.0, [1.0, 2.0], [1500.0])
+            _encode_sound_velocity_profile({
+                'ObservationTime': 0.0, 'ApplicationTime': 0.0, 'Latitude_deg': 0.0, 'Longitude_deg': 0.0,
+                'Depth_m': [1.0, 2.0], 'SoundSpeed_mPerSec': [1500.0]})
 
 
-# ---------------------------------------------------------------------------
-# _encode_attitude
-# ---------------------------------------------------------------------------
+def _attitude(times, pitch, roll, heave, heading):
+    return {'Time': times, 'Pitch_deg': pitch, 'Roll_deg': roll, 'Heave_m': heave, 'Heading_deg': heading}
+
 
 class TestEncodeAttitude:
     def test_round_trip(self):
-        payload = _encode_attitude(
-            attitude_time=[1700000000.0, 1700000000.1, 1700000000.2],
-            pitch_deg=[-1.1, -1.0, -0.9], roll_deg=[0.4, 0.5, 0.3],
-            heave_m=[0.2, 0.1, 0.15], heading_deg=[12.3, 12.4, 359.99])
+        m = _decode_attitude(_encode_attitude(_attitude(
+            [1700000000.0, 1700000000.1, 1700000000.2],
+            [-1.1, -1.0, -0.9], [0.4, 0.5, 0.3], [0.2, 0.1, 0.15], [12.3, 12.4, 359.99])))
 
-        m = _decode_attitude(payload)
-
-        assert set(m) == set(new_attitude())
         assert m['NumMeasurements'] == 3
         assert list(m['Pitch_deg']) == pytest.approx([-1.1, -1.0, -0.9])
         assert list(m['Roll_deg']) == pytest.approx([0.4, 0.5, 0.3])
@@ -322,147 +379,106 @@ class TestEncodeAttitude:
         assert list(m['Time'].astype(np.int64)) == [
             1700000000_000000000, 1700000000_100000000, 1700000000_200000000]
 
-    def test_decoded_record_re_encodes_to_same_bytes(self):
-        payload = _encode_attitude(
-            attitude_time=[1700000000.25, 1700000030.5, 1700000065.5],
-            pitch_deg=[-90.0, 0.01, 45.5], roll_deg=[-180.0, 0.0, 179.99],
-            heave_m=[-3.2, 0.0, 12.34], heading_deg=[0.0, 180.0, 359.99])
-
-        m = _decode_attitude(payload)
-
-        assert _encode_attitude(
-            m['Time'], m['Pitch_deg'], m['Roll_deg'], m['Heave_m'], m['Heading_deg']) == payload
-
     def test_datetime_times_encode_same_as_posix_times(self):
         posix = [1700000000.0, 1700000000.5]
         utc = [datetime.datetime.fromtimestamp(t, tz=datetime.timezone.utc) for t in posix]
         values = ([1.0, 2.0], [3.0, 4.0], [0.5, 0.25], [10.0, 20.0])
-        assert _encode_attitude(utc, *values) == _encode_attitude(posix, *values)
+        assert _encode_attitude(_attitude(utc, *values)) == _encode_attitude(_attitude(posix, *values))
 
     def test_time_offset_beyond_65_535_seconds_raises(self):
         with pytest.raises(ValueError):
-            _encode_attitude([0.0, 65.536], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0])
+            _encode_attitude(_attitude([0.0, 65.536], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]))
 
     def test_value_out_of_field_range_raises(self):
         with pytest.raises(ValueError):
-            _encode_attitude([0.0], [400.0], [0.0], [0.0], [0.0])  # pitch * 100 > int16
+            _encode_attitude(_attitude([0.0], [400.0], [0.0], [0.0], [0.0]))  # pitch * 100 > int16
 
     def test_empty_raises(self):
         with pytest.raises(ValueError):
-            _encode_attitude([], [], [], [], [])
+            _encode_attitude(_attitude([], [], [], [], []))
 
     def test_base_time_is_first_sample(self):
-        payload = _encode_attitude(
-            attitude_time=[1700000005.0, 1700000005.5],
-            pitch_deg=[0.0, 0.0], roll_deg=[0.0, 0.0],
-            heave_m=[0.0, 0.0], heading_deg=[0.0, 0.0])
+        payload = _encode_attitude(_attitude(
+            [1700000005.0, 1700000005.5], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]))
         (base_sec, base_nsec) = struct.unpack_from('>2I', payload, 0)
         assert base_sec == 1700000005
 
     def test_mismatched_lengths_raises(self):
         with pytest.raises(ValueError):
-            _encode_attitude([1.0, 2.0], [0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0])
+            _encode_attitude(_attitude([1.0, 2.0], [0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]))
 
-
-# ---------------------------------------------------------------------------
-# _encode_swath_bathy_summary
-# ---------------------------------------------------------------------------
 
 class TestEncodeSwathBathySummary:
     def test_round_trip(self):
-        payload = _encode_swath_bathy_summary(
-            start_time=1700000000.0, end_time=1700003600.0,
-            min_latitude_deg=42.9, min_longitude_deg=-70.6,
-            max_latitude_deg=43.3, max_longitude_deg=-70.4,
-            min_depth_m=5.0, max_depth_m=125.5)
+        decoded = _decode_swath_bathy_summary(_encode_swath_bathy_summary({
+            'StartTime': 1700000000.0, 'EndTime': 1700003600.0,
+            'MinLatitude_deg': 42.9, 'MinLongitude_deg': -70.6,
+            'MaxLatitude_deg': 43.3, 'MaxLongitude_deg': -70.4,
+            'MinDepth_m': 5.0, 'MaxDepth_m': 125.5}))
 
-        scalars, _tables, _notes = _decode_swath_bathy_summary(payload)
+        assert decoded['MinLatitude_deg'] == pytest.approx(42.9)
+        assert decoded['MaxLatitude_deg'] == pytest.approx(43.3)
+        assert decoded['MinLongitude_deg'] == pytest.approx(-70.6)
+        assert decoded['MaxLongitude_deg'] == pytest.approx(-70.4)
+        assert decoded['MinDepth_m'] == pytest.approx(5.0)
+        assert decoded['MaxDepth_m'] == pytest.approx(125.5)
 
-        assert scalars['MinLatitude_deg'] == pytest.approx(42.9)
-        assert scalars['MaxLatitude_deg'] == pytest.approx(43.3)
-        assert scalars['MinLongitude_deg'] == pytest.approx(-70.6)
-        assert scalars['MaxLongitude_deg'] == pytest.approx(-70.4)
-        assert scalars['MinDepth_m'] == pytest.approx(5.0)
-        assert scalars['MaxDepth_m'] == pytest.approx(125.5)
-
-
-# ---------------------------------------------------------------------------
-# _encode_comment
-# ---------------------------------------------------------------------------
 
 class TestEncodeComment:
     def test_round_trip(self):
-        payload = _encode_comment(1700000000.0, "this is a test comment")
-        scalars, _tables, _notes = _decode_comment(payload)
-        assert scalars['Comment'] == "this is a test comment"
+        payload = _encode_comment({'CommentTime': 1700000000.0, 'Comment': "this is a test comment"})
+        assert _decode_comment(payload)['Comment'] == "this is a test comment"
 
     def test_empty_comment(self):
-        payload = _encode_comment(1700000000.0, "")
-        scalars, _tables, _notes = _decode_comment(payload)
-        assert scalars['Comment'] == ""
+        payload = _encode_comment({'CommentTime': 1700000000.0, 'Comment': ""})
+        assert _decode_comment(payload)['Comment'] == ""
 
-
-# ---------------------------------------------------------------------------
-# _encode_history
-# ---------------------------------------------------------------------------
 
 class TestEncodeHistory:
     def test_round_trip(self):
-        payload = _encode_history(
-            1700000000.0, host_name="host1", operator_name="vschmidt",
-            command_line="kmall2gsf.py -f x.kmall -o x.gsf", comment="converted")
+        payload = _encode_history({
+            'HistoryTime': 1700000000.0, 'HostName': "host1", 'OperatorName': "vschmidt",
+            'CommandLine': "kmall2gsf.py -f x.kmall -o x.gsf", 'Comment': "converted"})
 
-        scalars, _tables, _notes = _decode_history(payload)
+        decoded = _decode_history(payload)
 
-        # _decode_history() doesn't strip the embedded NUL gsf_enc.c writes
-        # into host_name/operator_name/command_line's counted size -- see
-        # _encode_history()'s docstring.
-        assert scalars['HostName'] == "host1\x00"
-        assert scalars['OperatorName'] == "vschmidt\x00"
-        assert scalars['CommandLine'] == "kmall2gsf.py -f x.kmall -o x.gsf\x00"
-        assert scalars['Comment'] == "converted"
+        # gsf_enc.c writes a trailing NUL into the first three strings'
+        # counted sizes; _decode_history() strips it.
+        assert decoded['HostName'] == "host1"
+        assert decoded['OperatorName'] == "vschmidt"
+        assert decoded['CommandLine'] == "kmall2gsf.py -f x.kmall -o x.gsf"
+        assert decoded['Comment'] == "converted"
+        assert b"host1\x00" in payload
 
-
-# ---------------------------------------------------------------------------
-# _encode_navigation_error
-# ---------------------------------------------------------------------------
 
 class TestEncodeNavigationError:
     def test_round_trip(self):
-        payload = _encode_navigation_error(
-            1700000000.0, record_id=12345, longitude_error_m=1.3, latitude_error_m=-0.8)
+        decoded = _decode_navigation_error(_encode_navigation_error({
+            'NavErrorTime': 1700000000.0, 'RecordID': 12345,
+            'LongitudeError_m': 1.3, 'LatitudeError_m': -0.8}))
 
-        scalars, _tables, _notes = _decode_navigation_error(payload)
+        assert decoded['RecordID'] == 12345
+        assert decoded['LongitudeError_m'] == pytest.approx(1.3)
+        assert decoded['LatitudeError_m'] == pytest.approx(-0.8)
 
-        assert scalars['RecordID'] == 12345
-        assert scalars['LongitudeError_m'] == pytest.approx(1.3)
-        assert scalars['LatitudeError_m'] == pytest.approx(-0.8)
-
-
-# ---------------------------------------------------------------------------
-# _encode_hv_navigation_error
-# ---------------------------------------------------------------------------
 
 class TestEncodeHvNavigationError:
     def test_round_trip(self):
-        payload = _encode_hv_navigation_error(
-            1700000000.0, record_id=54321, horizontal_error_m=0.35,
-            vertical_error_m=0.12, sep_uncertainty_m=0.5, position_type="GPS")
+        decoded = _decode_hv_navigation_error(_encode_hv_navigation_error({
+            'NavErrorTime': 1700000000.0, 'RecordID': 54321, 'HorizontalError_m': 0.35,
+            'VerticalError_m': 0.12, 'SEPUncertainty_m': 0.5, 'PositionType': "GPS"}))
 
-        scalars, _tables, _notes = _decode_hv_navigation_error(payload)
-
-        assert scalars['RecordID'] == 54321
-        assert scalars['HorizontalError_m'] == pytest.approx(0.35)
-        assert scalars['VerticalError_m'] == pytest.approx(0.12)
-        assert scalars['SEPUncertainty_m'] == pytest.approx(0.5)
-        assert scalars['PositionType'] == "GPS"
+        assert decoded['RecordID'] == 54321
+        assert decoded['HorizontalError_m'] == pytest.approx(0.35)
+        assert decoded['VerticalError_m'] == pytest.approx(0.12)
+        assert decoded['SEPUncertainty_m'] == pytest.approx(0.5)
+        assert decoded['PositionType'] == "GPS"
 
     def test_empty_position_type(self):
-        payload = _encode_hv_navigation_error(
-            1700000000.0, record_id=1, horizontal_error_m=0.0,
-            vertical_error_m=0.0, sep_uncertainty_m=0.0)
-        scalars, _tables, _notes = _decode_hv_navigation_error(payload)
-        assert scalars['PositionType'] == ""
+        payload = _encode_hv_navigation_error({
+            'NavErrorTime': 1700000000.0, 'RecordID': 1, 'HorizontalError_m': 0.0,
+            'VerticalError_m': 0.0, 'SEPUncertainty_m': 0.0})
+        assert _decode_hv_navigation_error(payload)['PositionType'] == ""
 
 
 # ---------------------------------------------------------------------------
@@ -2592,15 +2608,15 @@ class TestGsfWriteMethods:
         path = tmp_path / "out.gsf"
         G = gsf(str(path))
         G.write_header()
-        G.write_processing_parameters({"PLATFORM_TYPE": "SURFACE_SHIP"}, param_time=1700000000.0)
-        G.write_sound_velocity_profile(
-            observation_time=1700000000.0, application_time=1700000100.0,
-            latitude_deg=43.1, longitude_deg=-70.5,
-            depth_m=[0.0, 10.0], sound_speed_mPerSec=[1500.0, 1500.5])
-        G.write_attitude(
-            attitude_time=[1700000000.0, 1700000000.1],
-            pitch_deg=[-1.1, -1.0], roll_deg=[0.4, 0.5],
-            heave_m=[0.2, 0.1], heading_deg=[12.3, 12.4])
+        G.write_processing_parameters({'ParamTime': 1700000000.0, 'Parameters': {"PLATFORM_TYPE": "SURFACE_SHIP"}})
+        G.write_sound_velocity_profile({
+            'ObservationTime': 1700000000.0, 'ApplicationTime': 1700000100.0,
+            'Latitude_deg': 43.1, 'Longitude_deg': -70.5,
+            'Depth_m': [0.0, 10.0], 'SoundSpeed_mPerSec': [1500.0, 1500.5]})
+        G.write_attitude({
+            'Time': [1700000000.0, 1700000000.1],
+            'Pitch_deg': [-1.1, -1.0], 'Roll_deg': [0.4, 0.5],
+            'Heave_m': [0.2, 0.1], 'Heading_deg': [12.3, 12.4]})
         G.write_swath_bathymetry_ping({
             'PingTime': 1700000000.5, 'Longitude_deg': -70.5, 'Latitude_deg': 43.1, 'NumberBeams': 2,
             'Beams': {'Depth_m': [10.0, 10.5]}})
@@ -2622,12 +2638,72 @@ class TestGsfWriteMethods:
         assert "PLATFORM_TYPE" in captured.out
         assert "Depth_m" in captured.out
 
+    def test_every_record_type_written_back_from_iter_records_is_byte_identical(self, tmp_path):
+        # Each record type's write_*() method takes the same single dictionary
+        # iter_records() decodes it to, so copying a file record by record
+        # through the public API reproduces it exactly.
+        writers = {
+            RecordType.GSF_RECORD_HEADER: 'write_header',
+            RecordType.GSF_RECORD_PROCESSING_PARAMETERS: 'write_processing_parameters',
+            RecordType.GSF_RECORD_SENSOR_PARAMETERS: 'write_sensor_parameters',
+            RecordType.GSF_RECORD_SOUND_VELOCITY_PROFILE: 'write_sound_velocity_profile',
+            RecordType.GSF_RECORD_ATTITUDE: 'write_attitude',
+            RecordType.GSF_RECORD_SWATH_BATHYMETRY_PING: 'write_swath_bathymetry_ping',
+            RecordType.GSF_RECORD_SWATH_BATHY_SUMMARY: 'write_swath_bathy_summary',
+            RecordType.GSF_RECORD_COMMENT: 'write_comment',
+            RecordType.GSF_RECORD_HISTORY: 'write_history',
+            RecordType.GSF_RECORD_NAVIGATION_ERROR: 'write_navigation_error',
+            RecordType.GSF_RECORD_HV_NAVIGATION_ERROR: 'write_hv_navigation_error',
+            RecordType.GSF_RECORD_SINGLE_BEAM_PING: 'write_single_beam_ping',
+        }
+        original = tmp_path / "original.gsf"
+        G = gsf(str(original))
+        G.write_header()
+        G.write_processing_parameters({'ParamTime': 1700000000.0, 'Parameters': {"A": "1", "FLAG": None}})
+        G.write_sensor_parameters({'ParamTime': 1700000000.0, 'Parameters': {"GAIN": "12"}})
+        G.write_sound_velocity_profile({
+            'ObservationTime': 1700000000.0, 'ApplicationTime': 1700000100.0, 'Latitude_deg': 43.1,
+            'Longitude_deg': -70.5, 'Depth_m': [0.0, 10.0], 'SoundSpeed_mPerSec': [1500.0, 1500.5]})
+        G.write_attitude({'Time': [1700000000.0, 1700000000.01], 'Pitch_deg': [-1.1, -1.0],
+                          'Roll_deg': [0.4, 0.5], 'Heave_m': [0.2, 0.1], 'Heading_deg': [12.3, 12.4]})
+        G.write_swath_bathymetry_ping({
+            'PingTime': 1700000000.5, 'Longitude_deg': -70.5, 'Latitude_deg': 43.1, 'NumberBeams': 2,
+            'Beams': {'Depth_m': [10.0, 10.5]}})
+        G.write_swath_bathy_summary({
+            'StartTime': 1700000000.0, 'EndTime': 1700003600.0, 'MinLatitude_deg': 42.9,
+            'MinLongitude_deg': -70.6, 'MaxLatitude_deg': 43.3, 'MaxLongitude_deg': -70.4,
+            'MinDepth_m': 5.0, 'MaxDepth_m': 125.5})
+        G.write_comment({'CommentTime': 1700000000.0, 'Comment': "a comment"})
+        G.write_history({'HistoryTime': 1700000000.0, 'HostName': "h", 'OperatorName': "o",
+                         'CommandLine': "c", 'Comment': "x"})
+        G.write_navigation_error({'NavErrorTime': 1700000000.0, 'RecordID': 1,
+                                  'LongitudeError_m': 1.3, 'LatitudeError_m': -0.8})
+        G.write_hv_navigation_error({'NavErrorTime': 1700000000.0, 'RecordID': 2, 'HorizontalError_m': 0.35,
+                                     'VerticalError_m': 0.12, 'SEPUncertainty_m': 0.5, 'PositionType': "GPS"})
+        G.write_single_beam_ping({
+            'PingTime': 1700000000.5, 'Longitude_deg': -70.5, 'Latitude_deg': 43.1,
+            'TideCorrector_m': 0.1, 'DepthCorrector_m': -1.2, 'Heading_deg': 123.45,
+            'Pitch_deg': -1.1, 'Roll_deg': 0.4, 'Heave_m': 0.2, 'Depth_m': 25.75,
+            'SoundSpeedCorrection_m': 0.05, 'PositioningSystemType': 3})
+        G.closeFile()
+
+        copy = tmp_path / "copy.gsf"
+        C = gsf(str(copy))
+        written = set()
+        for record_type, _offset, record in gsf(str(original)).iter_records():
+            getattr(C, writers[record_type])(record)
+            written.add(record_type)
+        C.closeFile()
+
+        assert written == set(writers)
+        assert copy.read_bytes() == original.read_bytes()
+
     def test_ping_write_uses_gsfversion_for_major_version(self, tmp_path):
         # write_header() with an explicit v2-style version should make the
         # subsequent ping omit the major_version > 2 fields.
         path = tmp_path / "out.gsf"
         G = gsf(str(path))
-        G.write_header(version="GSF-v02.05")
+        G.write_header({'Version': "GSF-v02.05"})
         G.write_swath_bathymetry_ping({
             'PingTime': 1700000000.0, 'Longitude_deg': 0.0, 'Latitude_deg': 0.0, 'NumberBeams': 1,
             'Beams': {'Depth_m': [10.0]}})
@@ -2653,19 +2729,20 @@ class TestGsfWriteMethods:
         path = tmp_path / "out.gsf"
         G = gsf(str(path))
         G.write_header()
-        G.write_swath_bathy_summary(
-            start_time=1700000000.0, end_time=1700003600.0,
-            min_latitude_deg=42.9, min_longitude_deg=-70.6,
-            max_latitude_deg=43.3, max_longitude_deg=-70.4,
-            min_depth_m=5.0, max_depth_m=125.5)
-        G.write_comment(1700000000.0, "test comment")
-        G.write_history(
-            1700000000.0, host_name="host1", operator_name="vschmidt",
-            command_line="gsfu.py -f x.gsf -V", comment="test history")
-        G.write_navigation_error(1700000000.0, record_id=1, longitude_error_m=1.3, latitude_error_m=-0.8)
-        G.write_hv_navigation_error(
-            1700000000.0, record_id=2, horizontal_error_m=0.35,
-            vertical_error_m=0.12, sep_uncertainty_m=0.5, position_type="GPS")
+        G.write_swath_bathy_summary({
+            'StartTime': 1700000000.0, 'EndTime': 1700003600.0,
+            'MinLatitude_deg': 42.9, 'MinLongitude_deg': -70.6,
+            'MaxLatitude_deg': 43.3, 'MaxLongitude_deg': -70.4,
+            'MinDepth_m': 5.0, 'MaxDepth_m': 125.5})
+        G.write_comment({'CommentTime': 1700000000.0, 'Comment': "test comment"})
+        G.write_history({
+            'HistoryTime': 1700000000.0, 'HostName': "host1", 'OperatorName': "vschmidt",
+            'CommandLine': "gsfu.py -f x.gsf -V", 'Comment': "test history"})
+        G.write_navigation_error({
+            'NavErrorTime': 1700000000.0, 'RecordID': 1, 'LongitudeError_m': 1.3, 'LatitudeError_m': -0.8})
+        G.write_hv_navigation_error({
+            'NavErrorTime': 1700000000.0, 'RecordID': 2, 'HorizontalError_m': 0.35,
+            'VerticalError_m': 0.12, 'SEPUncertainty_m': 0.5, 'PositionType': "GPS"})
         G.write_single_beam_ping({
             'PingTime': 1700000000.5, 'Longitude_deg': -70.5, 'Latitude_deg': 43.1,
             'TideCorrector_m': 0.1, 'DepthCorrector_m': -1.2, 'Heading_deg': 123.45,

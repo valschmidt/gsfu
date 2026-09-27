@@ -231,8 +231,10 @@ then reads each record with a single seek, skipping records of other
 types without reading them. Swath bathymetry pings are decoded with the
 scale factors carried from one ping to the next, as the format requires.
 Pass `decode_intensity=True` to decode each ping's intensity time series
-too. Records other than pings, attitude, and sound velocity profiles
-come back as a `(scalars, tables, notes)` tuple. For casual inspection of
+too. Every record type comes back as a single dictionary, in the shape
+of that type's `new_*()` template (`new_comment()`,
+`new_sound_velocity_profile()`, and so on), and can be passed straight
+back to the matching `write_*()` method. For casual inspection of
 a whole file, `gsf.print_records()` (the `-p` option's underlying
 method) prints every record as text.
 

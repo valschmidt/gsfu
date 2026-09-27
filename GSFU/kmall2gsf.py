@@ -67,6 +67,9 @@ from GSFU.gsfu import (
     GSF_NULL_SPEED,
     GSF_NULL_TIDE_CORRECTOR,
     gsf as GsfWriter,
+    new_attitude,
+    new_name_value_parameters,
+    new_sound_velocity_profile,
 )
 
 
@@ -612,25 +615,31 @@ def convert(kmall_path, gsf_path, attitude_source=1, verbose=False, attitude_rec
     G.write_header()
 
     if iip_params or iop_params:
-        param_time = attitude_samples[0][0] if attitude_samples else 0.0
-        G.write_processing_parameters({**iip_params, **iop_params}, param_time=param_time)
+        params = new_name_value_parameters()
+        params['ParamTime'] = attitude_samples[0][0] if attitude_samples else 0.0
+        params['Parameters'] = {**iip_params, **iop_params}
+        G.write_processing_parameters(params)
 
     for svp in svp_datagrams:
-        obs_time = svp['datetime'] if svp['time_sec'] else svp['header']['dgtime']
-        G.write_sound_velocity_profile(
-            observation_time=obs_time, application_time=svp['header']['dgtime'],
-            latitude_deg=svp['latitude_deg'], longitude_deg=svp['longitude_deg'],
-            depth_m=svp['sensorData']['depth_m'],
-            sound_speed_mPerSec=svp['sensorData']['soundVelocity_mPerSec'])
+        profile = new_sound_velocity_profile()
+        profile.update(
+            ObservationTime=svp['datetime'] if svp['time_sec'] else svp['header']['dgtime'],
+            ApplicationTime=svp['header']['dgtime'],
+            Latitude_deg=svp['latitude_deg'], Longitude_deg=svp['longitude_deg'],
+            Depth_m=svp['sensorData']['depth_m'],
+            SoundSpeed_mPerSec=svp['sensorData']['soundVelocity_mPerSec'])
+        G.write_sound_velocity_profile(profile)
 
     # One ATTITUDE record per attitude_record_seconds window of the sorted
     # pass-1 samples, rather than one per #SKM datagram.
     if attitude_samples:
         columns = np.array(attitude_samples, dtype=np.float64)
         for rows in attitude_record_slices(columns[:, 0], attitude_record_seconds):
-            G.write_attitude(
-                attitude_time=columns[rows, 0], pitch_deg=columns[rows, 1], roll_deg=columns[rows, 2],
-                heave_m=columns[rows, 3], heading_deg=columns[rows, 4])
+            attitude = new_attitude()
+            attitude.update(
+                Time=columns[rows, 0], Pitch_deg=columns[rows, 1], Roll_deg=columns[rows, 2],
+                Heave_m=columns[rows, 3], Heading_deg=columns[rows, 4])
+            G.write_attitude(attitude)
 
     # Pass 2: pings, interpolating attitude from the pass-1 buffer.
     ping_count = 0

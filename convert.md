@@ -89,58 +89,63 @@ interleaving, only that the header comes first).
 
 ## 2. Build a record-equivalent dict, and 3. populate it
 
-Each `write_*` method other than `write_header()` takes plain Python
-values -- `dict`s of scalars, and array-likes (lists or numpy arrays) for
+Every `write_*` method takes a single `dict` -- the record -- holding plain
+Python values: scalars, and array-likes (lists or numpy arrays) for
 anything per-measurement/per-beam. There's no separate "record object" to
 instantiate: the dict *is* the record, using the same field names
-`gsfu.py -p` prints and the corresponding `_decode_*` function returns. That
-symmetry is deliberate -- if you've ever looked at `-p`'s output for a
-record type, you already know the field names its `write_*` counterpart
-expects.
+`gsfu.py -p` prints and the corresponding `_decode_*` function returns, so
+a record read with `gsf.iter_records()` can be passed straight back to its
+`write_*` method. Each record type has a `new_*()` function (for example
+`new_sound_velocity_profile()`) that returns that dict with every field
+name already present, so you only fill in what you know. That symmetry is
+deliberate -- if you've ever looked at `-p`'s output for a record type, you
+already know the field names its `write_*` counterpart expects.
 
 ### Processing parameters
 
 ```python
-params = {
-    "REFERENCE": "TRUE HEADING",
-    "SYSTEM_DRAFT": "0.500",
-    "PLATFORM_TYPE": "SURFACE_SHIP",
-}
-G.write_processing_parameters(params, param_time=1724650073.719285)
+G.write_processing_parameters({
+    "ParamTime": 1724650073.719285,
+    "Parameters": {
+        "REFERENCE": "TRUE HEADING",
+        "SYSTEM_DRAFT": "0.500",
+        "PLATFORM_TYPE": "SURFACE_SHIP",
+    },
+})
 ```
 
-`params` is just `{name: value}` -- both strings. `param_time` is a POSIX
+`Parameters` is just `{name: value}` -- both strings. `ParamTime` is a POSIX
 epoch timestamp (float), a `datetime`, or an ISO8601 string; all three are
-accepted everywhere a "time" parameter appears in this API (see
-`_gsf_epoch()` in `gsfu.py` if you want the details). `write_sensor_parameters()`
-has the identical signature, for `GSF_RECORD_SENSOR_PARAMETERS`.
+accepted everywhere a time field appears in this API (see `_gsf_epoch()` in
+`gsfu.py` if you want the details). `write_sensor_parameters()` takes the
+identical record, for `GSF_RECORD_SENSOR_PARAMETERS`.
 
 ### Sound velocity profile
 
 ```python
-G.write_sound_velocity_profile(
-    observation_time=1724650073.719285,
-    application_time=1724650073.719285,
-    latitude_deg=45.925417,
-    longitude_deg=-129.981855,
-    depth_m=[0.0, 5.0, 10.0, 50.0, 100.0],
-    sound_speed_mPerSec=[1500.1, 1499.8, 1498.2, 1495.0, 1490.3],
-)
+G.write_sound_velocity_profile({
+    "ObservationTime": 1724650073.719285,
+    "ApplicationTime": 1724650073.719285,
+    "Latitude_deg": 45.925417,
+    "Longitude_deg": -129.981855,
+    "Depth_m": [0.0, 5.0, 10.0, 50.0, 100.0],
+    "SoundSpeed_mPerSec": [1500.1, 1499.8, 1498.2, 1495.0, 1490.3],
+})
 ```
 
-`depth_m` and `sound_speed_mPerSec` are parallel arrays, one entry per cast
+`Depth_m` and `SoundSpeed_mPerSec` are parallel arrays, one entry per cast
 sample, and must be the same length.
 
 ### Attitude
 
 ```python
-G.write_attitude(
-    attitude_time=[1724650073.70, 1724650073.75, 1724650073.80],
-    pitch_deg=[0.12, 0.10, 0.09],
-    roll_deg=[-0.5, -0.4, -0.3],
-    heave_m=[0.02, 0.01, 0.00],
-    heading_deg=[210.5, 210.6, 210.6],
-)
+G.write_attitude({
+    "Time": [1724650073.70, 1724650073.75, 1724650073.80],
+    "Pitch_deg": [0.12, 0.10, 0.09],
+    "Roll_deg": [-0.5, -0.4, -0.3],
+    "Heave_m": [0.02, 0.01, 0.00],
+    "Heading_deg": [210.5, 210.6, 210.6],
+})
 ```
 
 One `GSF_RECORD_ATTITUDE` record can carry many time-tagged samples -- all
@@ -380,11 +385,11 @@ from GSFU.gsfu import gsf, new_swath_bathymetry_ping_scalars
 
 G = gsf("my_survey.gsf")
 G.write_header()
-G.write_processing_parameters({"REFERENCE": "TRUE HEADING"}, param_time=t0)
-G.write_sound_velocity_profile(
-    observation_time=t0, application_time=t0,
-    latitude_deg=lat, longitude_deg=lon,
-    depth_m=svp_depths, sound_speed_mPerSec=svp_speeds)
+G.write_processing_parameters({"ParamTime": t0, "Parameters": {"REFERENCE": "TRUE HEADING"}})
+G.write_sound_velocity_profile({
+    "ObservationTime": t0, "ApplicationTime": t0,
+    "Latitude_deg": lat, "Longitude_deg": lon,
+    "Depth_m": svp_depths, "SoundSpeed_mPerSec": svp_speeds})
 
 for ping_time, lat, lon, beams in my_pings:
     G.write_attitude(...)  # or batch these separately, see above

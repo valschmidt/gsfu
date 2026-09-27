@@ -394,7 +394,8 @@ class TestIterRecords:
         return _pack_record(RecordType.GSF_RECORD_COMMENT, struct.pack('>3I', 1700000000, 0, len(text)) + text)
 
     def _file(self, tmp_path):
-        attitude = _encode_attitude([1700000000.0, 1700000000.5], [1.0, 2.0], [0.0, 0.0], [0.0, 0.0], [10.0, 20.0])
+        attitude = _encode_attitude({'Time': [1700000000.0, 1700000000.5], 'Pitch_deg': [1.0, 2.0],
+                                     'Roll_deg': [0.0, 0.0], 'Heave_m': [0.0, 0.0], 'Heading_deg': [10.0, 20.0]})
         records = [
             _header_record(),
             self._decodable_comment(b"first comment"),
@@ -426,7 +427,7 @@ class TestIterRecords:
         items = list(gsf(str(path)).iter_records(record_type))
 
         assert [rt for rt, _o, _r in items] == [RecordType.GSF_RECORD_COMMENT] * 2
-        assert [r[0]['Comment'] for _rt, _o, r in items] == ["first comment", "second comment"]
+        assert [r['Comment'] for _rt, _o, r in items] == ["first comment", "second comment"]
 
     def test_unknown_record_type_name_raises(self, tmp_path):
         path, _records = self._file(tmp_path)
@@ -442,9 +443,9 @@ class TestReadAttitude:
     @staticmethod
     def _attitude_record(times, checksum_flag=False):
         n = len(times)
-        payload = _encode_attitude(
-            times, [0.1 * i for i in range(n)], [-0.2 * i for i in range(n)],
-            [0.01 * i for i in range(n)], [100.0 + i for i in range(n)])
+        payload = _encode_attitude({
+            'Time': times, 'Pitch_deg': [0.1 * i for i in range(n)], 'Roll_deg': [-0.2 * i for i in range(n)],
+            'Heave_m': [0.01 * i for i in range(n)], 'Heading_deg': [100.0 + i for i in range(n)]})
         return _pack_record(RecordType.GSF_RECORD_ATTITUDE, payload, checksum_flag=checksum_flag)
 
     def test_matches_per_record_decode_across_mixed_records(self, tmp_path):
@@ -977,28 +978,28 @@ class TestDecodeNameValueParametersSynthetic:
 
     def test_plain_name_value_pair(self):
         payload = self._payload([b"PLATFORM_TYPE=SURFACE_SHIP".decode()])
-        scalars, _tables, _notes = _decode_name_value_parameters(payload)
-        assert scalars['PLATFORM_TYPE'] == 'SURFACE_SHIP'
+        parameters = _decode_name_value_parameters(payload)['Parameters']
+        assert parameters['PLATFORM_TYPE'] == 'SURFACE_SHIP'
 
     def test_trailing_nul_byte_stripped_from_value(self):
         # Some encoders count a trailing C-string NUL terminator as part of
         # a parameter's size; it must not appear in the decoded value.
         payload = self._payload(["ROLL_COMPENSATED=NO \x00"])
-        scalars, _tables, _notes = _decode_name_value_parameters(payload)
-        assert scalars['ROLL_COMPENSATED'] == 'NO '
-        assert '\x00' not in scalars['ROLL_COMPENSATED']
+        parameters = _decode_name_value_parameters(payload)['Parameters']
+        assert parameters['ROLL_COMPENSATED'] == 'NO '
+        assert '\x00' not in parameters['ROLL_COMPENSATED']
 
     def test_trailing_space_before_nul_is_preserved(self):
         # Only the NUL is stripped -- padding the encoder itself wrote
         # (e.g. a trailing space) is left alone.
         payload = self._payload(["HEAVE_COMPENSATED=YES\x00"])
-        scalars, _tables, _notes = _decode_name_value_parameters(payload)
-        assert scalars['HEAVE_COMPENSATED'] == 'YES'
+        parameters = _decode_name_value_parameters(payload)['Parameters']
+        assert parameters['HEAVE_COMPENSATED'] == 'YES'
 
     def test_parameter_without_equals_sign_keyed_by_full_text(self):
         payload = self._payload(["FREEFORM_NOTE\x00"])
-        scalars, _tables, _notes = _decode_name_value_parameters(payload)
-        assert scalars['FREEFORM_NOTE'] == ''
+        parameters = _decode_name_value_parameters(payload)['Parameters']
+        assert parameters['FREEFORM_NOTE'] is None
 
 
 class TestSensorSpecificSubrecordNames:
