@@ -16,7 +16,15 @@ KMALL files can carry position (#SPO/#CPO) and attitude (#SKM) from more
 than one configured sensor system (K-Controller's "Position 1/2/3..." and
 "Attitude 1/2/3..."); -a/--attitude-source selects which #SKM stream (1
 by default) supplies the ping's interpolated pitch/roll/heave and the
-GSF_RECORD_ATTITUDE records written to the file. Ping position and
+GSF_RECORD_ATTITUDE records written to the file. Those attitude samples
+are written in batches, one GSF_RECORD_ATTITUDE record per
+--attitude-record-seconds window (1 s by default, so about 100
+measurements per record at a typical 100 Hz), rather than one record per
+#SKM datagram or per sample: a GSF reader's cost is mostly per record,
+not per measurement. Within a record, each sample after the first has its
+time stored as a whole-millisecond offset, so batched sample times are
+rounded to within 0.5 ms; ping attitude is interpolated from the
+original, unrounded samples. Ping position and
 heading always come directly from the #MRZ datagram's own pingInfo (the
 position/heading SIS itself used for that ping), matching how a native
 GSF writer would behave -- see convert.md for the reasoning.
@@ -154,6 +162,41 @@ def _circular_lerp(a, b, frac):
     """
     diff = ((b - a + 180.0) % 360.0) - 180.0
     return (a + diff * frac) % 360.0
+
+
+#: The longest time window one GSF_RECORD_ATTITUDE record can span: each
+#: measurement's time is stored as an unsigned 16-bit millisecond offset from
+#: the record's first measurement (gsf_enc.c's gsfEncodeAttitude()).
+MAX_ATTITUDE_RECORD_SECONDS = 65.535
+
+
+def attitude_record_slices(times, record_seconds):
+    """
+    Split a sorted sequence of attitude sample times into consecutive
+    runs, one per GSF_RECORD_ATTITUDE record, so that many measurements
+    share each record. Samples are grouped into fixed windows of
+    record_seconds, starting at the first sample's time; each window's
+    samples become one record, and empty windows produce no record.
+
+    :param times: a sorted sequence of sample times, in POSIX seconds.
+    :param record_seconds: each window's length, in seconds. Must be
+        greater than 0 and less than MAX_ATTITUDE_RECORD_SECONDS.
+
+    :return: a list of slice objects, one per record, in time order,
+        together covering every sample exactly once.
+
+    :raises ValueError: record_seconds is out of range.
+    """
+    if not 0.0 < record_seconds < MAX_ATTITUDE_RECORD_SECONDS:
+        raise ValueError("attitude record window must be greater than 0 and less than %g s, got %r"
+                         % (MAX_ATTITUDE_RECORD_SECONDS, record_seconds))
+    times = np.asarray(times, dtype=np.float64)
+    if len(times) == 0:
+        return []
+    window = np.floor((times - times[0]) / record_seconds).astype(np.int64)
+    starts = np.flatnonzero(np.diff(window)) + 1
+    bounds = [0, *starts.tolist(), len(times)]
+    return [slice(a, b) for a, b in zip(bounds[:-1], bounds[1:])]
 
 
 def interpolate_attitude(attitude_samples, t):
@@ -471,7 +514,7 @@ def _lenient_parse_kv_text(text):
 # Conversion driver
 ###########################################################
 
-def convert(kmall_path, gsf_path, attitude_source=1, verbose=False):
+def convert(kmall_path, gsf_path, attitude_source=1, verbose=False, attitude_record_seconds=1.0):
     """
     Convert one .kmall file to a .gsf file, writing PROCESSING_PARAMETERS,
     SOUND_VELOCITY_PROFILE, SWATH_BATHYMETRY_PING, and ATTITUDE records.
@@ -485,10 +528,15 @@ def convert(kmall_path, gsf_path, attitude_source=1, verbose=False):
         records. This is one-indexed, matching how K-Controller numbers
         its ATTI_1/ATTI_2/... installation parameters.
     :param verbose: if True, print progress messages while converting.
+    :param attitude_record_seconds: the time window, in seconds, that
+        each GSF_RECORD_ATTITUDE record covers; every attitude sample in
+        that window is written into the one record (see
+        attitude_record_slices()). Must be greater than 0 and less than
+        MAX_ATTITUDE_RECORD_SECONDS.
 
     :raises ImportError: the `kmall` package is not installed.
     :raises ValueError: no #SKM datagram in the source file matches
-        attitude_source.
+        attitude_source, or attitude_record_seconds is out of range.
     """
     KmallReader = _kmall_class()
     K = KmallReader(kmall_path)
@@ -575,17 +623,14 @@ def convert(kmall_path, gsf_path, attitude_source=1, verbose=False):
             depth_m=svp['sensorData']['depth_m'],
             sound_speed_mPerSec=svp['sensorData']['soundVelocity_mPerSec'])
 
-    for offset in offsets_by_type.get('#SKM', []):
-        K.FID.seek(offset)
-        K.decode_datagram()
-        K.read_datagram()
-        dg = K.datagram_data
-        if dg['infoPart']['sensorSystem'] != wanted_sensor_system:
-            continue
-        s = dg['sample']['KMdefault']
-        G.write_attitude(
-            attitude_time=s['dgtime'], pitch_deg=s['pitch_deg'], roll_deg=s['roll_deg'],
-            heave_m=s['heave_m'], heading_deg=s['heading_deg'])
+    # One ATTITUDE record per attitude_record_seconds window of the sorted
+    # pass-1 samples, rather than one per #SKM datagram.
+    if attitude_samples:
+        columns = np.array(attitude_samples, dtype=np.float64)
+        for rows in attitude_record_slices(columns[:, 0], attitude_record_seconds):
+            G.write_attitude(
+                attitude_time=columns[rows, 0], pitch_deg=columns[rows, 1], roll_deg=columns[rows, 2],
+                heave_m=columns[rows, 3], heading_deg=columns[rows, 4])
 
     # Pass 2: pings, interpolating attitude from the pass-1 buffer.
     ping_count = 0
@@ -649,13 +694,19 @@ def main(args=None):
                          help="Which #SKM attitude source to use (1-indexed, matching "
                               "K-Controller's ATTI_1/ATTI_2/... installation parameters). "
                               "Default: 1.")
+    parser.add_argument('-t', '--attitude-record-seconds', action='store', type=float, default=1.0,
+                         dest='attitude_record_seconds', metavar='SECONDS',
+                         help="Time window covered by each GSF attitude record; every attitude "
+                              "sample in the window is written into that one record. Must be "
+                              "less than %g. Default: 1.0." % MAX_ATTITUDE_RECORD_SECONDS)
     parser.add_argument('-v', '--verbose', action='store_true', dest='verbose', default=False,
                          help="Print progress while converting.")
     parsed = parser.parse_args(args)
 
     try:
         convert(parsed.kmall_filename, parsed.gsf_filename,
-                attitude_source=parsed.attitude_source, verbose=parsed.verbose)
+                attitude_source=parsed.attitude_source, verbose=parsed.verbose,
+                attitude_record_seconds=parsed.attitude_record_seconds)
     except (ImportError, ValueError) as exc:
         print("Error: %s" % exc)
         return 1

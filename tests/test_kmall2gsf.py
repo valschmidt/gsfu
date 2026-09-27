@@ -18,6 +18,7 @@ Two kinds of coverage:
 """
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from GSFU.gsfu import (
@@ -28,8 +29,10 @@ from GSFU.gsfu import (
     GSF_NULL_TIDE_CORRECTOR,
 )
 from GSFU.kmall2gsf import (
+    MAX_ATTITUDE_RECORD_SECONDS,
     _circular_lerp,
     _lenient_parse_kv_text,
+    attitude_record_slices,
     interpolate_attitude,
 )
 
@@ -137,6 +140,38 @@ class TestInterpolateAttitude:
 
 
 # ---------------------------------------------------------------------------
+# attitude_record_slices
+# ---------------------------------------------------------------------------
+
+class TestAttitudeRecordSlices:
+    def test_groups_100hz_samples_into_one_second_windows(self):
+        times = 1700000000.0 + np.arange(250) * 0.01
+        slices = attitude_record_slices(times, 1.0)
+        assert [(s.start, s.stop) for s in slices] == [(0, 100), (100, 200), (200, 250)]
+
+    def test_every_sample_covered_once_and_span_below_window(self):
+        rng = np.random.default_rng(1)
+        times = np.sort(1700000000.0 + rng.uniform(0, 30, 1000))
+        slices = attitude_record_slices(times, 2.5)
+        assert slices[0].start == 0 and slices[-1].stop == len(times)
+        assert all(a.stop == b.start for a, b in zip(slices, slices[1:]))
+        assert all(times[s.stop - 1] - times[s.start] < 2.5 for s in slices)
+
+    def test_gaps_produce_no_empty_records(self):
+        times = [0.0, 0.5, 10.0, 10.2]
+        slices = attitude_record_slices(times, 1.0)
+        assert [(s.start, s.stop) for s in slices] == [(0, 2), (2, 4)]
+
+    def test_empty(self):
+        assert attitude_record_slices([], 1.0) == []
+
+    @pytest.mark.parametrize("seconds", [0.0, -1.0, MAX_ATTITUDE_RECORD_SECONDS, 100.0])
+    def test_out_of_range_window_raises(self, seconds):
+        with pytest.raises(ValueError):
+            attitude_record_slices([0.0, 1.0], seconds)
+
+
+# ---------------------------------------------------------------------------
 # End-to-end conversion against real sample data
 # ---------------------------------------------------------------------------
 
@@ -161,6 +196,50 @@ class TestConvertRealFiles:
         assert g.Index.iloc[0]["RecordType"] == "GSF_RECORD_HEADER"
         counts = g.Index["RecordType"].value_counts()
         assert counts.get("GSF_RECORD_SWATH_BATHYMETRY_PING", 0) == ping_count
+
+    @staticmethod
+    def _attitude_records(gsf_path):
+        from GSFU.gsfu import gsf, _decode_attitude
+
+        g = gsf(str(gsf_path))
+        g.index_file()
+        records = []
+        for offset in g.Index.loc[g.Index["RecordType"] == "GSF_RECORD_ATTITUDE", "ByteOffset"]:
+            g.FID.seek(int(offset))
+            dataSize, _readSize, data_id = g.read_record_header()
+            if data_id.checksumFlag:
+                g.FID.seek(4, 1)
+            records.append(_decode_attitude(g.FID.read(dataSize)))
+        return records
+
+    def test_attitude_batched_into_one_record_per_window(self, tmp_path):
+        from GSFU.kmall2gsf import convert
+
+        path = KMALL_SAMPLE_FILES[-1]
+        batched = tmp_path / "batched.gsf"
+        per_sample = tmp_path / "per_sample.gsf"
+        convert(str(path), str(batched), attitude_source=1, attitude_record_seconds=1.0)
+        # A window shorter than the sample spacing gives one sample per record.
+        convert(str(path), str(per_sample), attitude_source=1, attitude_record_seconds=0.001)
+
+        batched_records = self._attitude_records(batched)
+        single_records = self._attitude_records(per_sample)
+        assert all(r["NumMeasurements"] == 1 for r in single_records)
+        assert len(batched_records) < len(single_records)
+        for r in batched_records:
+            # Stored offsets are whole milliseconds, so a sample just under
+            # the window's end can round to exactly 1.000 s.
+            span = (r["Time"][-1] - r["Time"][0]) / np.timedelta64(1, "s")
+            assert span <= 1.0
+        # Batching changes only how samples are grouped into records, except
+        # that a record stores each later sample's time as a whole-millisecond
+        # offset from its first, so times agree to within half a millisecond.
+        for key in ("Pitch_deg", "Roll_deg", "Heave_m", "Heading_deg"):
+            assert np.array_equal(np.concatenate([r[key] for r in batched_records]),
+                                  np.concatenate([r[key] for r in single_records])), key
+        time_error = (np.concatenate([r["Time"] for r in batched_records])
+                      - np.concatenate([r["Time"] for r in single_records]))
+        assert np.abs(time_error).max() <= np.timedelta64(500_000, "ns")
 
     def test_convert_first_ping_has_sane_kmall_specific(self, tmp_path):
         from GSFU.gsfu import gsf, _decode_swath_bathymetry_ping

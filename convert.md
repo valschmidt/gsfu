@@ -144,9 +144,18 @@ G.write_attitude(
 ```
 
 One `GSF_RECORD_ATTITUDE` record can carry many time-tagged samples -- all
-five arrays must be the same length. In practice you'd batch attitude
-samples (e.g. one record per second, or per some fixed sample count) rather
-than writing one record per sample.
+five arrays must be the same length, and one record can span at most
+65.535 s, since each sample's time is stored as a 16-bit millisecond offset
+from the record's first sample. Batch attitude samples (e.g. one record per
+second) rather than writing one record per sample: reading a GSF file costs
+mostly per record, not per measurement, so 100 Hz attitude written one
+sample per record reads roughly 100 times slower than the same data in
+one-second records. The one cost of batching is time resolution: a
+record stores its first sample's time to the nanosecond but each later
+sample's as a whole-millisecond offset from it, so those times are
+rounded to within 0.5 ms. `kmall2gsf.py` writes one record per second by
+default (`-t/--attitude-record-seconds` changes the window). Ping
+attitude is interpolated from the original, unrounded samples either way.
 
 ### Swath bathymetry ping
 
