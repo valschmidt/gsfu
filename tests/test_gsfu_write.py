@@ -152,6 +152,7 @@ from GSFU.gsfu import (
     new_intensity_time_series_beam,
     new_intensity_time_series_header,
     new_kmall_specific,
+    new_sound_velocity_profile,
     new_kmall_tx_sector,
     new_swath_bathymetry_ping_scalars,
 )
@@ -272,13 +273,26 @@ class TestEncodeSoundVelocityProfile:
             latitude_deg=43.1, longitude_deg=-70.5,
             depth_m=[0.0, 10.0, 10000.0], sound_speed_mPerSec=[1500.0, 1500.5, 1490.25])
 
-        scalars, tables, _notes = _decode_sound_velocity_profile(payload)
+        profile = _decode_sound_velocity_profile(payload)
 
-        assert scalars['Latitude_deg'] == pytest.approx(43.1)
-        assert scalars['Longitude_deg'] == pytest.approx(-70.5)
-        assert scalars['NumberPoints'] == 3
-        assert list(tables['Profile']['Depth_m']) == pytest.approx([0.0, 10.0, 10000.0])
-        assert list(tables['Profile']['SoundSpeed_mPerSec']) == pytest.approx([1500.0, 1500.5, 1490.25])
+        assert set(profile) == set(new_sound_velocity_profile())
+        assert profile['Latitude_deg'] == pytest.approx(43.1)
+        assert profile['Longitude_deg'] == pytest.approx(-70.5)
+        assert profile['NumberPoints'] == 3
+        assert list(profile['Depth_m']) == pytest.approx([0.0, 10.0, 10000.0])
+        assert list(profile['SoundSpeed_mPerSec']) == pytest.approx([1500.0, 1500.5, 1490.25])
+
+    def test_decoded_profile_re_encodes_to_same_bytes(self):
+        payload = _encode_sound_velocity_profile(
+            observation_time=1700000000.25, application_time=1700000100.5,
+            latitude_deg=43.1, longitude_deg=-70.5,
+            depth_m=[0.0, 1.06, 5000.5], sound_speed_mPerSec=[1540.87, 1540.85, 1480.0])
+
+        p = _decode_sound_velocity_profile(payload)
+
+        assert _encode_sound_velocity_profile(
+            p['ObservationTime'], p['ApplicationTime'], p['Latitude_deg'], p['Longitude_deg'],
+            p['Depth_m'], p['SoundSpeed_mPerSec']) == payload
 
     def test_mismatched_lengths_raises(self):
         with pytest.raises(ValueError):

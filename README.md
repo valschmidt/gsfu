@@ -162,31 +162,18 @@ row per beam, across every ping in the file:
 ## Using `gsfu` as a library
 
 The `gsf` class is the main entry point for using `gsfu` from Python
-code. The example below opens a file, indexes it, finds the first
-`GSF_RECORD_SWATH_BATHYMETRY_PING` record, reads and decodes it, and
-prints its keys and a few of its fields:
+code. `gsf.iter_records()` walks a file's records in order and yields each
+one decoded, optionally restricted to one record type. The example below
+opens a file, takes its first `GSF_RECORD_SWATH_BATHYMETRY_PING` record,
+and prints its keys and a few of its fields:
 
 ```python
-from GSFU.gsfu import gsf, _decode_swath_bathymetry_ping, _gsf_major_version
+from GSFU.gsfu import gsf
 
 G = gsf("data/GSF/0264_20240826_022211_EM712.gsf")
-G.index_file()  # builds G.Index, a pandas.DataFrame, one row per record
 
-# Find the first swath bathymetry ping in the file.
-pings = G.Index[G.Index["RecordType"] == "GSF_RECORD_SWATH_BATHYMETRY_PING"]
-offset = int(pings.iloc[0]["ByteOffset"])
-
-# Seek to it and read its raw payload.
-G.OpenFiletoRead()
-G.FID.seek(offset)
-data_size, _read_size, data_id = G.read_record_header()
-if data_id.checksumFlag:
-    G.FID.seek(4, 1)  # skip the optional four-byte checksum word
-payload = G.FID.read(data_size)
-
-# Decode the payload into a dictionary of the ping's fields.
-major_version = _gsf_major_version(G.gsfVersion)
-record = _decode_swath_bathymetry_ping(payload, major_version, scale_factors={})
+# Each item is (record type, byte offset in the file, decoded record).
+record_type, offset, record = next(G.iter_records("SWATH_BATHYMETRY_PING"))
 
 print(list(record.keys()))
 print(record["PingTime"], record["Latitude_deg"], record["Longitude_deg"])
@@ -238,12 +225,16 @@ attitude = G.read_attitude()
 print(attitude["NumMeasurements"], attitude["Time"][0], attitude["Roll_deg"].std())
 ```
 
-This example calls `_decode_swath_bathymetry_ping()` directly, since
-`gsfu.py` does not yet have a public convenience method for decoding a
-single record at a known file offset. For casual inspection of a whole
-file, `gsf.print_records()` (the `-p` option's underlying method) or
-`gsf.index_file()` will usually be more convenient than reading a single
-record by hand as shown above.
+`iter_records()` indexes the file on first use (`gsf.index_file()`,
+which builds `G.Index`, a `pandas.DataFrame` with one row per record) and
+then reads each record with a single seek, skipping records of other
+types without reading them. Swath bathymetry pings are decoded with the
+scale factors carried from one ping to the next, as the format requires.
+Pass `decode_intensity=True` to decode each ping's intensity time series
+too. Records other than pings, attitude, and sound velocity profiles
+come back as a `(scalars, tables, notes)` tuple. For casual inspection of
+a whole file, `gsf.print_records()` (the `-p` option's underlying
+method) prints every record as text.
 
 ## Converting other sonar formats to GSF
 

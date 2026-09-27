@@ -5646,42 +5646,68 @@ def _decode_swath_bathy_summary(payload):
     return scalars, {}, []
 
 
+#: One sound velocity profile point as stored on the wire (gsf_dec.c's
+#: gsfDecodeSoundVelocityProfile()): depth and sound speed, each in
+#: hundredths.
+_SVP_POINT_DTYPE = np.dtype([('depth', '>u4'), ('sound_speed', '>u4')])
+
+
+def new_sound_velocity_profile():
+    """
+    Return a new dictionary with every GSF_RECORD_SOUND_VELOCITY_PROFILE
+    field name present, in the same shape _decode_sound_velocity_profile()
+    returns: the times and position pre-set to None (they have no
+    "not available" value, and every one is required to write a profile),
+    'NumberPoints' pre-set to 0, and an empty numpy array for each
+    per-point field. _decode_sound_velocity_profile() builds its result
+    starting from this same template, so the two can never define a
+    different set of field names.
+
+    :return: a dictionary with 'ObservationTime', 'ApplicationTime',
+        'Longitude_deg', 'Latitude_deg' (each None), 'NumberPoints' (0),
+        and 'Depth_m' and 'SoundSpeed_mPerSec' (each an empty float64
+        array).
+    """
+    return {
+        'ObservationTime': None, 'ApplicationTime': None,
+        'Longitude_deg': None, 'Latitude_deg': None,
+        'NumberPoints': 0,
+        'Depth_m': np.empty(0), 'SoundSpeed_mPerSec': np.empty(0),
+    }
+
+
 def _decode_sound_velocity_profile(payload):
     """
     Decode a GSF_RECORD_SOUND_VELOCITY_PROFILE payload: the observation
     and application times, the position where the profile was collected,
     and the depth/sound-speed pairs that make up the profile itself. This
     is ported from the reference gsflib C library's
-    gsfDecodeSoundVelocityProfile() function in gsf_dec.c.
+    gsfDecodeSoundVelocityProfile() function in gsf_dec.c. Every point is
+    unpacked at once, as a zero-copy numpy view of the payload, and each
+    field scaled with one vectorized operation.
 
     :param payload: the raw bytes of the record.
 
-    :return: a tuple of (scalars, tables, notes). scalars is a dictionary
-        with 'ObservationTime', 'ApplicationTime', 'Longitude_deg',
-        'Latitude_deg', and 'NumberPoints'. tables is a dictionary with
-        one key, 'Profile', holding a pandas.DataFrame indexed by point
-        number with 'Depth_m' and 'SoundSpeed_mPerSec' columns. notes is
-        always an empty list.
+    :return: a dictionary, in the shape new_sound_velocity_profile()
+        creates, with 'ObservationTime' and 'ApplicationTime' (ISO 8601
+        strings, in UTC), 'Longitude_deg', 'Latitude_deg', 'NumberPoints',
+        and 'Depth_m' and 'SoundSpeed_mPerSec' (each a float64 numpy
+        array, one value per profile point).
     """
-    scalars = {}
+    record = new_sound_velocity_profile()
     (obs_sec, obs_nsec, app_sec, app_nsec) = struct.unpack_from('>4I', payload, 0)
-    scalars['ObservationTime'] = _gsf_timestamp(obs_sec, obs_nsec).isoformat()
-    scalars['ApplicationTime'] = _gsf_timestamp(app_sec, app_nsec).isoformat()
+    record['ObservationTime'] = _gsf_timestamp(obs_sec, obs_nsec).isoformat()
+    record['ApplicationTime'] = _gsf_timestamp(app_sec, app_nsec).isoformat()
 
-    (lon_raw, lat_raw) = struct.unpack_from('>2i', payload, 16)
-    scalars['Longitude_deg'] = lon_raw / 1.0e7
-    scalars['Latitude_deg'] = lat_raw / 1.0e7
+    (lon_raw, lat_raw, number_points) = struct.unpack_from('>2iI', payload, 16)
+    record['Longitude_deg'] = lon_raw / 1.0e7
+    record['Latitude_deg'] = lat_raw / 1.0e7
+    record['NumberPoints'] = number_points
 
-    (number_points,) = struct.unpack_from('>I', payload, 24)
-    scalars['NumberPoints'] = number_points
-
-    raw = np.frombuffer(payload, dtype='>u4', count=2 * number_points, offset=28)
-    depth = raw[0::2].astype(np.float64) / 100.0
-    sound_speed = raw[1::2].astype(np.float64) / 100.0
-    table = pd.DataFrame({'Depth_m': depth, 'SoundSpeed_mPerSec': sound_speed})
-    table.index.name = 'Point'
-
-    return scalars, {'Profile': table}, []
+    points = np.frombuffer(payload, dtype=_SVP_POINT_DTYPE, count=number_points, offset=28)
+    record['Depth_m'] = points['depth'] / 100.0
+    record['SoundSpeed_mPerSec'] = points['sound_speed'] / 100.0
+    return record
 
 
 def _decode_name_value_parameters(payload):
@@ -7614,6 +7640,59 @@ def resolve_record_type(value):
         raise ValueError("Unknown record type: %s\nValid types: %s" % (value, valid))
 
 
+def _decode_record(record_id, payload, major_version, scale_factors, decode_intensity=False):
+    """
+    Decode one record's payload with the decoder for its record type. The
+    type -> decoder mapping is spelled out explicitly here, rather than
+    looked up in a table, so it is visible in one place; this is the one
+    dispatch that gsf.iter_records(), gsf.print_records(), and
+    gsf.print_intensity_series() all share.
+
+    :param record_id: the record's recordID (a RecordType value).
+    :param payload: the raw bytes of the record's payload.
+    :param major_version: the file's GSF major version, as returned by
+        _gsf_major_version(); used only for swath bathymetry pings.
+    :param scale_factors: the scale-factor dictionary carried across a
+        file's swath bathymetry pings (see _decode_swath_bathymetry_ping(),
+        which updates it in place); used only for those pings.
+    :param decode_intensity: passed through to
+        _decode_swath_bathymetry_ping().
+
+    :return: whatever that record type's decoder returns: a single
+        dictionary for swath and single-beam pings, attitude, and sound
+        velocity profiles, and a (scalars, tables, notes) tuple for every
+        other record type; or None for a recordID with no decoder.
+
+    :raises struct.error, IndexError, ValueError: the payload is too short
+        or otherwise malformed for its record type.
+    """
+    if record_id == RecordType.GSF_RECORD_HEADER:
+        return _decode_header(payload)
+    if record_id == RecordType.GSF_RECORD_SWATH_BATHY_SUMMARY:
+        return _decode_swath_bathy_summary(payload)
+    if record_id == RecordType.GSF_RECORD_SWATH_BATHYMETRY_PING:
+        return _decode_swath_bathymetry_ping(payload, major_version, scale_factors, decode_intensity)
+    if record_id == RecordType.GSF_RECORD_SOUND_VELOCITY_PROFILE:
+        return _decode_sound_velocity_profile(payload)
+    if record_id in (RecordType.GSF_RECORD_PROCESSING_PARAMETERS, RecordType.GSF_RECORD_SENSOR_PARAMETERS):
+        # GSF_RECORD_SENSOR_PARAMETERS: untested against a verified GSF
+        # file -- no sample data containing that record type.
+        return _decode_name_value_parameters(payload)
+    if record_id == RecordType.GSF_RECORD_COMMENT:
+        return _decode_comment(payload)
+    if record_id == RecordType.GSF_RECORD_HISTORY:
+        return _decode_history(payload)
+    if record_id == RecordType.GSF_RECORD_NAVIGATION_ERROR:
+        return _decode_navigation_error(payload)
+    if record_id == RecordType.GSF_RECORD_HV_NAVIGATION_ERROR:
+        return _decode_hv_navigation_error(payload)
+    if record_id == RecordType.GSF_RECORD_SINGLE_BEAM_PING:
+        return _decode_single_beam_ping(payload)
+    if record_id == RecordType.GSF_RECORD_ATTITUDE:
+        return _decode_attitude(payload)
+    return None
+
+
 class gsf():
     """
     The main class of this library, representing one Generic Sensor Format
@@ -7964,6 +8043,62 @@ class gsf():
     # Whole-file readers
     ###########################################################
 
+    def iter_records(self, record_type=None, decode_intensity=False):
+        """
+        Iterate over the file's records in file order, decoding each one,
+        optionally restricted to a single record type. Records are located
+        through self.Index (the file is indexed first if it has not been
+        yet), so each record is read with a single seek and read, and
+        records of other types are skipped without being read at all. Swath
+        bathymetry pings are decoded with the file's own GSF major version
+        and with scale factors carried from one ping to the next, as
+        _decode_swath_bathymetry_ping() requires. Index the file again
+        (index_file()) after writing to it, so the index covers the new
+        records.
+
+        To read every attitude measurement in a file, read_attitude() is
+        far faster than iterating over its attitude records one by one.
+
+        :param record_type: an optional record type to restrict the
+            iteration to: a RecordType, its integer recordID, or a name
+            string, either short (e.g. "SWATH_BATHYMETRY_PING") or full
+            (e.g. "GSF_RECORD_SWATH_BATHYMETRY_PING"), matched
+            case-insensitively. Every record is returned if this is
+            omitted.
+        :param decode_intensity: if True, each swath bathymetry ping's
+            intensity time series is decoded too (see
+            _decode_swath_bathymetry_ping()).
+
+        :return: a generator of (record_type, byte_offset, record) tuples:
+            the record's RecordType, the byte offset of its framing within
+            the file, and the record as decoded by that type's decoder (a
+            single dictionary for swath and single-beam pings, attitude,
+            and sound velocity profiles, and a (scalars, tables, notes)
+            tuple for every other type).
+
+        :raises ValueError: record_type is a string that does not name any
+            known record type.
+        :raises struct.error, IndexError, ValueError: a record's payload is
+            too short or otherwise malformed for its record type.
+        """
+        record_type = resolve_record_type(record_type)
+        if self.Index is None:
+            self.index_file()
+        if self.FID is None or self.FID.closed:
+            self.OpenFiletoRead()
+        index = self.Index
+        if record_type is not None:
+            index = index[index['RecordID'] == record_type]
+        major_version = _gsf_major_version(self.gsfVersion)
+        scale_factors = {}
+        fid = self.FID
+        for record_id, offset, size, checksum in zip(
+                index['RecordID'].tolist(), index['ByteOffset'].tolist(),
+                index['RecordSize'].tolist(), index['ChecksumFlag'].tolist()):
+            fid.seek(offset + GSF_RECORD_FRAMING_SIZE + (4 if checksum else 0))
+            record = _decode_record(record_id, fid.read(size), major_version, scale_factors, decode_intensity)
+            yield RecordType(record_id), offset, record
+
     #: At most this many attitude measurements are gathered from the file
     #: per vectorized step in read_attitude(), bounding its temporary index
     #: arrays on very large files.
@@ -8114,23 +8249,28 @@ class gsf():
         return frame.to_string()
 
     @staticmethod
-    def _print_attitude_record(record):
+    def _print_array_record(record, table_label, index_name):
         """
-        A print_records() helper that prints one decoded
-        GSF_RECORD_ATTITUDE record to stdout as readable text: its
-        'NumMeasurements' count as a "key : value" line, then its
-        per-measurement arrays as a table, one row per measurement. The
-        table is built only here, for display; _decode_attitude() itself
-        returns plain numpy arrays.
+        A print_records() helper that prints one decoded record whose
+        dictionary holds scalar fields alongside equal-length numpy arrays
+        (an attitude record, or a sound velocity profile): each scalar
+        field as a "key : value" line, then the arrays together as one
+        table, one row per element. The table is built only here, for
+        display; the decoders themselves return plain numpy arrays.
 
-        :param record: a decoded attitude record, in the dictionary shape
-            returned by _decode_attitude().
+        :param record: the decoded record dictionary.
+        :param table_label: the heading printed above the table.
+        :param index_name: the label for the table's row-number column.
         """
-        print("  NumMeasurements : %s" % record['NumMeasurements'])
-        table = {k: v for k, v in record.items() if k != 'NumMeasurements'}
+        scalars = {k: v for k, v in record.items() if not isinstance(v, np.ndarray)}
+        table = {k: v for k, v in record.items() if isinstance(v, np.ndarray)}
+        if scalars:
+            width = max(len(k) for k in scalars)
+            for k, v in scalars.items():
+                print("  %-*s : %s" % (width, k, v))
         if _table_length(table):
-            print("-- Measurements --")
-            print(gsf._table_to_string(table, 'Measurement'))
+            print("-- %s --" % table_label)
+            print(gsf._table_to_string(table, index_name))
 
     @staticmethod
     def _print_ping_record(record):
@@ -8283,39 +8423,12 @@ class gsf():
                     print("=== %s  offset=%d  size=%d ===" %
                           (name, offset, GSF_RECORD_FRAMING_SIZE + readSize))
 
-                    # Dispatch to the specific decoder for this record type,
-                    # explicitly here rather than via a generic lookup, so the
-                    # type -> decoder mapping is visible at the call site.
                     decoded = None
+                    rid = data_id.recordID
                     try:
-                        rid = data_id.recordID
-                        if rid == RecordType.GSF_RECORD_HEADER:
-                            decoded = _decode_header(payload)
-                        elif rid == RecordType.GSF_RECORD_SWATH_BATHY_SUMMARY:
-                            decoded = _decode_swath_bathy_summary(payload)
-                        elif rid == RecordType.GSF_RECORD_SWATH_BATHYMETRY_PING:
-                            decoded = _decode_swath_bathymetry_ping(payload, major_version, scale_factors)
-                        elif rid == RecordType.GSF_RECORD_SOUND_VELOCITY_PROFILE:
-                            decoded = _decode_sound_velocity_profile(payload)
-                        elif rid in (RecordType.GSF_RECORD_PROCESSING_PARAMETERS, RecordType.GSF_RECORD_SENSOR_PARAMETERS):
-                            # GSF_RECORD_SENSOR_PARAMETERS: untested against a verified
-                            # GSF file -- no sample data containing that record type.
-                            decoded = _decode_name_value_parameters(payload)
-                        elif rid == RecordType.GSF_RECORD_COMMENT:
-                            decoded = _decode_comment(payload)
-                        elif rid == RecordType.GSF_RECORD_HISTORY:
-                            decoded = _decode_history(payload)
-                        elif rid == RecordType.GSF_RECORD_NAVIGATION_ERROR:
-                            decoded = _decode_navigation_error(payload)
-                        elif rid == RecordType.GSF_RECORD_HV_NAVIGATION_ERROR:
-                            decoded = _decode_hv_navigation_error(payload)
-                        elif rid == RecordType.GSF_RECORD_SINGLE_BEAM_PING:
-                            decoded = _decode_single_beam_ping(payload)
-                        elif rid == RecordType.GSF_RECORD_ATTITUDE:
-                            decoded = _decode_attitude(payload)
-                    except (struct.error, IndexError) as exc:
+                        decoded = _decode_record(rid, payload, major_version, scale_factors)
+                    except (struct.error, IndexError, ValueError) as exc:
                         print("  # decode failed (%s); showing raw text" % exc)
-
                     if decoded is None:
                         text = ''.join(chr(b) if 32 <= b < 127 else '.' for b in payload)
                         print(text)
@@ -8323,7 +8436,9 @@ class gsf():
                                  RecordType.GSF_RECORD_SINGLE_BEAM_PING):
                         self._print_ping_record(decoded)
                     elif rid == RecordType.GSF_RECORD_ATTITUDE:
-                        self._print_attitude_record(decoded)
+                        self._print_array_record(decoded, 'Measurements', 'Measurement')
+                    elif rid == RecordType.GSF_RECORD_SOUND_VELOCITY_PROFILE:
+                        self._print_array_record(decoded, 'Profile', 'Point')
                     else:
                         scalars, tables, notes = decoded
                         if scalars:
@@ -8400,9 +8515,9 @@ class gsf():
 
                 if is_ping:
                     try:
-                        record = _decode_swath_bathymetry_ping(
-                            payload, major_version, scale_factors, decode_intensity=True)
-                    except (struct.error, IndexError) as exc:
+                        record = _decode_record(
+                            data_id.recordID, payload, major_version, scale_factors, decode_intensity=True)
+                    except (struct.error, IndexError, ValueError) as exc:
                         print("# ping offset=%d: decode failed (%s)" % (offset, exc))
                     else:
                         intensity_record = record.get('IntensityTimeSeries')

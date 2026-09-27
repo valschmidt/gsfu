@@ -385,6 +385,56 @@ class TestErrorConditions:
 
 
 # ---------------------------------------------------------------------------
+# Synthetic-record tests: gsf.iter_records()
+# ---------------------------------------------------------------------------
+
+class TestIterRecords:
+    @staticmethod
+    def _decodable_comment(text):
+        return _pack_record(RecordType.GSF_RECORD_COMMENT, struct.pack('>3I', 1700000000, 0, len(text)) + text)
+
+    def _file(self, tmp_path):
+        attitude = _encode_attitude([1700000000.0, 1700000000.5], [1.0, 2.0], [0.0, 0.0], [0.0, 0.0], [10.0, 20.0])
+        records = [
+            _header_record(),
+            self._decodable_comment(b"first comment"),
+            _pack_record(RecordType.GSF_RECORD_ATTITUDE, attitude, checksum_flag=True),
+            self._decodable_comment(b"second comment"),
+        ]
+        path = tmp_path / "records.gsf"
+        _write_records(path, records)
+        return path, records
+
+    def test_yields_every_record_in_order_with_offsets(self, tmp_path):
+        path, records = self._file(tmp_path)
+
+        items = list(gsf(str(path)).iter_records())
+
+        assert [rt for rt, _offset, _record in items] == [
+            RecordType.GSF_RECORD_HEADER, RecordType.GSF_RECORD_COMMENT,
+            RecordType.GSF_RECORD_ATTITUDE, RecordType.GSF_RECORD_COMMENT]
+        expected_offsets = [sum(len(r) for r in records[:i]) for i in range(len(records))]
+        assert [offset for _rt, offset, _record in items] == expected_offsets
+        attitude = items[2][2]
+        assert list(attitude['Pitch_deg']) == pytest.approx([1.0, 2.0])
+
+    @pytest.mark.parametrize("record_type", [
+        RecordType.GSF_RECORD_COMMENT, int(RecordType.GSF_RECORD_COMMENT), "COMMENT", "gsf_record_comment"])
+    def test_filters_to_one_record_type(self, tmp_path, record_type):
+        path, _records = self._file(tmp_path)
+
+        items = list(gsf(str(path)).iter_records(record_type))
+
+        assert [rt for rt, _o, _r in items] == [RecordType.GSF_RECORD_COMMENT] * 2
+        assert [r[0]['Comment'] for _rt, _o, r in items] == ["first comment", "second comment"]
+
+    def test_unknown_record_type_name_raises(self, tmp_path):
+        path, _records = self._file(tmp_path)
+        with pytest.raises(ValueError):
+            next(gsf(str(path)).iter_records("NOT_A_TYPE"))
+
+
+# ---------------------------------------------------------------------------
 # Synthetic-record tests: gsf.read_attitude()
 # ---------------------------------------------------------------------------
 
@@ -2252,6 +2302,30 @@ class TestPrintIntensitySeriesRealData:
                 continue
             _beam, sample_count, _detect, _start, *samples = line.split(",")
             assert int(sample_count) == len(samples)
+
+    def test_iter_records_pings_match_sequential_decode(self):
+        # iter_records() carries scale factors and the file's major version
+        # across pings exactly as a sequential walk does.
+        G = gsf(str(SMALL_SAMPLE))
+        G.index_file()
+        sequential = []
+        scale_factors = {}
+        for offset in G.Index.loc[G.Index['RecordType'] == 'GSF_RECORD_SWATH_BATHYMETRY_PING', 'ByteOffset']:
+            G.FID.seek(int(offset))
+            data_size, _read_size, data_id = G.read_record_header()
+            if data_id.checksumFlag:
+                G.FID.seek(4, 1)
+            sequential.append(_decode_swath_bathymetry_ping(
+                G.FID.read(data_size), major_version=3, scale_factors=scale_factors, decode_intensity=True))
+
+        iterated = [r for _rt, _o, r in G.iter_records("SWATH_BATHYMETRY_PING", decode_intensity=True)]
+
+        assert len(iterated) == len(sequential)
+        for a, b in zip(iterated, sequential):
+            assert a['PingTime'] == b['PingTime']
+            for column in b['Beams']:
+                assert np.array_equal(a['Beams'][column], b['Beams'][column]), column
+            assert np.array_equal(a['IntensityTimeSeries']['Samples'], b['IntensityTimeSeries']['Samples'])
 
     def test_read_attitude_matches_per_record_decode(self):
         G = gsf(str(SMALL_SAMPLE))
