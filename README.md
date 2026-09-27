@@ -39,8 +39,18 @@ the reference library.
 
 ## Installation
 
+    pip install gsfu
+
+The `kmall2gsf.py` converter also needs the Kongsberg `.kmall` reader,
+published on PyPI as `pykmall`. To install it along with `gsfu`:
+
+    pip install "gsfu[kmall]"
+
+To work on `gsfu` itself, install it from a clone of this repository in
+editable mode instead:
+
     pip install -r requirements.txt
-    pip install -e .
+    pip install -e ".[kmall]"
 
 ## Using `gsfu` as a command line utility
 

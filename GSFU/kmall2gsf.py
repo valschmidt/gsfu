@@ -5,8 +5,9 @@
 Convert a Kongsberg .kmall file to a Generic Sensor Format (.gsf) file.
 
 Reads the source .kmall file with the sibling `kmall` package
-(https://github.com/valschmidt/kmall) -- imported lazily below, and *not*
-a hard dependency of GSFU.gsfu -- and writes PROCESSING_PARAMETERS,
+(https://github.com/valschmidt/kmall, published on PyPI as pykmall and
+installed with `pip install "gsfu[kmall]"`) -- imported lazily below, and
+*not* a hard dependency of GSFU.gsfu -- and writes PROCESSING_PARAMETERS,
 SOUND_VELOCITY_PROFILE, SWATH_BATHYMETRY_PING (with the KMALL_SPECIFIC
 sensor-specific subrecord and its TX sector array), and ATTITUDE records
 via gsfu.py's write_* methods.
@@ -81,8 +82,8 @@ def _kmall_class():
         raise ImportError(
             "kmall2gsf.py requires the 'kmall' package "
             "(https://github.com/valschmidt/kmall, importable as `KMALL`) "
-            "to read .kmall files. Install it (e.g. `pip install -e /path/to/kmall`) "
-            "and try again. See convert.md for details.") from exc
+            "to read .kmall files. Install it with `pip install \"gsfu[kmall]\"` "
+            "(or `pip install pykmall`) and try again.") from exc
     return KmallReader
 
 

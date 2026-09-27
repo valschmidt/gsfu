@@ -15,6 +15,11 @@ setup(
         "pandas",
         "numpy",
     ],
+    # kmall2gsf.py reads .kmall files with the KMALL package, published on
+    # PyPI as pykmall; gsfu.py itself never needs it.
+    extras_require={
+        "kmall": ["pykmall"],
+    },
     description=("Library and command line utility for indexing, reading, and writing "
                   "Generic Sensor Format (GSF) sonar data files."),
     long_description=_LONG_DESCRIPTION,
