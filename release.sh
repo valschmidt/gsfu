@@ -31,8 +31,9 @@ Options:
   -h, --help     Show this help and exit.
 
 The version released is whatever setup.py declares. The script must be
-run on the main branch, refuses to run with uncommitted changes, and
-asks for confirmation before uploading anything.
+run on the main branch, refuses to run with uncommitted changes or when
+that version is already on the index it would upload to, and asks for
+confirmation before uploading anything.
 
 After a TestPyPI upload, --test installs gsfu[kmall] (gsfu plus the
 optional pykmall dependency kmall2gsf.py needs) and checks the installed
@@ -167,6 +168,20 @@ branch="$(git branch --show-current)"
 # version in setup.py has not been bumped since the last release.
 if [[ "$repository" == pypi ]] && git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
     fail "tag $TAG already exists; bump the version in setup.py first"
+fi
+
+# Neither index ever accepts the same version twice. A repeated upload is
+# rejected only after the tests and build, and the index's error doesn't
+# always say why, so ask the index first. If it can't be reached, carry on
+# and let the upload report the problem.
+if [[ "$skip_upload" -eq 0 ]]; then
+    if [[ "$repository" == testpypi ]]; then index_host=test.pypi.org; else index_host=pypi.org; fi
+    status="$(curl -s -o /dev/null -w '%{http_code}' "https://$index_host/pypi/$NAME/$VERSION/json")"
+    if [[ "$status" == 200 && "$repository" == testpypi ]]; then
+        fail "$NAME $VERSION is already on TestPyPI. Bump the version in setup.py, or rerun with --test --skip-upload to test the existing upload"
+    elif [[ "$status" == 200 ]]; then
+        fail "$NAME $VERSION is already on PyPI. Bump the version in setup.py first"
+    fi
 fi
 
 # The upload must be confirmed at a prompt, which needs a terminal to read
