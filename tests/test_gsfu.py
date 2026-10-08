@@ -930,6 +930,17 @@ class TestDecodeSwathBathymetryPingSynthetic:
         assert len(record['Notes']) == 1
         assert "subrecord id 154 (4 bytes) not decoded" in record['Notes'][0]
 
+    def test_zero_length_subrecord_at_end_of_ping_is_not_skipped(self):
+        # A zero-length subrecord is only its four-byte identifier word, so
+        # when it is the last subrecord in the ping exactly four bytes
+        # remain when the decoder reaches it. It must still be read, just as
+        # it would be anywhere else in the subrecord stream.
+        payload = self._fixed_header(1) + self._array_subrecord(154, [], '>B')
+
+        record = _decode_swath_bathymetry_ping(payload, major_version=2, scale_factors={})
+
+        assert record['Notes'] == ["subrecord id 154 (0 bytes) not decoded"]
+
     def test_known_vendor_specific_subrecord_reported_by_name(self):
         # A vendor "_SPECIFIC" subrecord with no field-level decoder here
         # (id 133 = EM710_SPECIFIC) is still reported by its proper name,

@@ -6221,7 +6221,10 @@ def _decode_swath_bathymetry_ping(payload, major_version, scale_factors, decode_
     sensor_specific_id = None
     sensor_specific_record = None
 
-    while len(payload) - pos > 4:
+    # A subrecord is at least its four-byte identifier word, so one more can
+    # follow whenever at least four bytes remain. Testing for more than four
+    # would silently skip a zero-length subrecord at the end of the ping.
+    while len(payload) - pos >= 4:
         word, = struct.unpack_from('>I', payload, pos)
         subrecord_id = (word >> 24) & 0xFF
         subrecord_size = word & 0x00FFFFFF
