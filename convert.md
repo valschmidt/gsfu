@@ -216,11 +216,14 @@ the template is a convenience, not a required calling convention.)
 
 Every array in `record["Beams"]` must have exactly `NumberBeams` entries. The
 dict *key* is what selects which subrecord gets written and, in turn, its
-scale factor -- `_beam_array_subrecord_id()` resolves each label (e.g.
-`"Depth_m"`, `"BeamAngle_deg"`) to its `GSF_SWATH_BATHY_SUBRECORD_*` id.
-Any key `write_swath_bathymetry_ping()` doesn't recognize raises
-`KeyError` -- see `_PING_ARRAY_SUBRECORDS` in `gsfu.py` for the full list of
-recognized labels.
+scale factor -- `BEAM_ARRAY_SUBRECORD_IDS` maps each label (e.g.
+`"Depth_m"`, `"BeamAngle_deg"`) to its `GSF_SWATH_BATHY_SUBRECORD_*` id,
+and is the full list of recognized labels. Any key
+`write_swath_bathymetry_ping()` doesn't recognize raises `KeyError`. The
+template's `Beams` table starts with every label set to `None`, and a
+column left `None` is simply not written, so you can either fill in the
+template's columns or replace `record["Beams"]` with your own dict, as the
+example above does.
 
 To add the KMALL (Kongsberg SIS 5) vendor-specific subrecord, the same
 template pattern applies -- `new_kmall_specific()` for the scalar block,

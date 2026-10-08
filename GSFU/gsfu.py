@@ -3424,21 +3424,40 @@ def _rows_to_table(rows):
     return {key: np.array([row[key] for row in rows]) for key in rows[0]}
 
 
+def _present_columns(table):
+    """
+    Return the columns of a table that hold data, leaving out any column
+    whose value is None. A decoded swath bathymetry ping's 'Beams' table
+    has a column for every beam array, set to None for each subrecord the
+    ping did not carry, so code that reads, writes, or prints that table
+    uses this to skip the absent arrays.
+
+    :param table: the table (a dictionary of column name -> array-like,
+        or anything with the same column access, such as a
+        pandas.DataFrame), or None.
+
+    :return: a new dictionary of column name -> array-like, holding only
+        the columns that are not None; empty if table is None.
+    """
+    if table is None:
+        return {}
+    return {key: table[key] for key in table.keys() if table[key] is not None}
+
+
 def _table_length(table):
     """
     Return the number of rows in a table: a dictionary of column name ->
     equal-length array-like, as the decoders in this file return, or
     anything else with the same column access, such as a
-    pandas.DataFrame.
+    pandas.DataFrame. Columns that are None, meaning absent, are ignored.
 
     :param table: the table, or None.
 
-    :return: the number of rows; 0 if table is None or has no columns.
+    :return: the number of rows; 0 if table is None or has no columns
+        other than None ones.
     """
-    if table is None:
-        return 0
-    for key in table.keys():
-        return len(table[key])
+    for column in _present_columns(table).values():
+        return len(column)
     return 0
 
 
@@ -6170,8 +6189,18 @@ def _decode_swath_bathymetry_ping(payload, major_version, scale_factors, decode_
         GSF major version 3 and later store, keep the template's "not
         available" values for an older file. 'Beams' is a table (a
         dictionary of column name -> numpy array, one element per beam, in
-        beam order) of every per-beam array subrecord decoded for this
-        ping, empty if there were none. 'IntensityTimeSeries' is
+        beam order) with one column for every label in
+        BEAM_ARRAY_SUBRECORD_IDS. When the ping carries a beam array
+        subrecord, its column holds the decoded array; otherwise the
+        column is None, so `record['Beams'][label] is None` tests whether
+        the ping carried that subrecord. A zero-length subrecord decodes
+        to an empty array. A beam flags subrecord whose size is not one
+        byte per beam decodes to an array of the bytes it holds, and a
+        note records the mismatch. The one case in which a subrecord is
+        present but its column stays None is a scaled array that cannot
+        be decoded, because no scale factors are available for it or its
+        encoding is unsupported; a note then says why.
+        'IntensityTimeSeries' is
         present, as a dictionary in the shape _decode_brb_intensity()
         returns (with its own 'Beams' and 'Samples' tables),
         only when decode_intensity is True and the ping carried that
@@ -6249,21 +6278,34 @@ def _decode_swath_bathymetry_ping(payload, major_version, scale_factors, decode_
             scale_factors.update(table)
 
         elif subrecord_id == _SUBRECORD_BEAM_FLAGS_ARRAY:
-            if subrecord_size == number_beams:
-                # Copied out of the payload so the array is writable.
-                beam_columns['BeamFlags'] = np.frombuffer(
-                    payload, dtype=np.uint8, count=number_beams, offset=pos).copy()
-            else:
-                notes.append("BeamFlags (%d bytes) not decoded: unexpected size" % subrecord_size)
+            # Beam flags are one byte per beam. Every byte the subrecord
+            # actually holds is kept, even when that is not one per beam,
+            # so the column records that the subrecord was present. The
+            # array is copied out of the payload so that it is writable.
+            count = min(subrecord_size, len(payload) - pos)
+            beam_columns['BeamFlags'] = np.frombuffer(
+                payload, dtype=np.uint8, count=count, offset=pos).copy()
+            if subrecord_size and subrecord_size != number_beams:
+                notes.append("BeamFlags (%d bytes) does not match NumberBeams (%d)"
+                             % (subrecord_size, number_beams))
 
         elif subrecord_id == _SUBRECORD_QUALITY_FLAGS_ARRAY:
-            beam_columns['QualityFlags'] = _decode_quality_flags_array(
-                payload, pos, number_beams, subrecord_size)
+            if subrecord_size == 0:
+                beam_columns['QualityFlags'] = np.empty(0, dtype=np.uint8)
+            else:
+                beam_columns['QualityFlags'] = _decode_quality_flags_array(
+                    payload, pos, number_beams, subrecord_size)
 
         elif subrecord_id in _PING_ARRAY_SUBRECORDS:
             _attr, label, signed = _PING_ARRAY_SUBRECORDS[subrecord_id]
             sf = scale_factors.get(subrecord_id)
-            if sf is None:
+            if subrecord_size == 0:
+                # A zero-length array subrecord is present but holds no
+                # values, so it decodes to an empty column, whether or not
+                # scale factors are available for it.
+                dtype = np.int64 if subrecord_id in _PING_ARRAY_INTEGER_SUBRECORDS else np.float64
+                beam_columns[label] = np.empty(0, dtype=dtype)
+            elif sf is None:
                 notes.append("%s (%d bytes) not decoded: no scale factors available" % (label, subrecord_size))
             else:
                 multiplier, offset, _flags = sf
@@ -8307,17 +8349,22 @@ def new_swath_bathymetry_ping():
     caller must overwrite; every optional scalar field pre-set to its
     GSF_NULL_* "not available" sentinel (or, for CenterBeam, PingFlags, and
     GPSTideCorrector_m, to 0 or 0.0, since gsf.h defines no sentinel for
-    those three fields); 'Beams', an empty table (a dictionary of column
-    name -> array); and 'Notes', an empty list.
-    _decode_swath_bathymetry_ping() builds its result starting from this
-    same template, adding 'IntensityTimeSeries', 'SensorSpecificID', and
-    'SensorSpecific' only when the ping carries them.
+    those three fields); 'Beams', a table (a dictionary of column name ->
+    array) with every label in BEAM_ARRAY_SUBRECORD_IDS as a column, each
+    set to None to mean that the ping carries no such subrecord; and
+    'Notes', an empty list. _decode_swath_bathymetry_ping() builds its
+    result starting from this same template, replacing a 'Beams' column
+    with an array whenever the ping carries that subrecord, and adding
+    'IntensityTimeSeries', 'SensorSpecificID', and 'SensorSpecific' only
+    when the ping carries them.
 
     This function exists so a caller building a ping to write doesn't
     have to remember every field name or look up its correct "not
     available" sentinel by hand: it can populate the returned dictionary
-    with whatever it actually knows, fill in 'Beams' (a dictionary of
-    {column label: array-like} or a pandas.DataFrame) and, optionally, add
+    with whatever it actually knows, set the 'Beams' columns it has data
+    for (or replace 'Beams' entirely with a dictionary of
+    {column label: array-like} or a pandas.DataFrame; columns left None or
+    left out are not written) and, optionally, add
     'SensorSpecificID' and 'SensorSpecific' keys for a vendor
     sensor-specific subrecord (see that family's new_*_specific()
     template), and pass the result straight to
@@ -8353,7 +8400,7 @@ def new_swath_bathymetry_ping():
         'Height_m': GSF_NULL_HEIGHT,
         'SEP_m': GSF_NULL_SEP,
         'GPSTideCorrector_m': 0.0,
-        'Beams': {},
+        'Beams': dict.fromkeys(BEAM_ARRAY_SUBRECORD_IDS),
         'Notes': [],
     }
 
@@ -8394,11 +8441,15 @@ def _encode_swath_bathymetry_ping(record, scale_factors=None, major_version=3):
         record['Beams'], if present, is a dictionary of {column label:
         array-like} or a pandas.DataFrame, for example {'Depth_m': [...],
         'AcrossTrack_m': [...]}. Every array in it must have length
-        NumberBeams. Only labels resolvable by _beam_array_subrecord_id()
-        -- that is, labels present in DEFAULT_PING_SCALE_FACTORS or in
-        `scale_factors`, plus the two special labels 'BeamFlags' and
-        'QualityFlags' -- can be encoded. Omit record['Beams'], or pass
-        an empty dictionary, for a ping with no beam arrays.
+        NumberBeams, except that an empty array is written as a
+        zero-length subrecord, with no scale factor. A column whose value
+        is None is not written, so the 'Beams' table from
+        new_swath_bathymetry_ping() or from a decoded ping can be passed
+        in as is. Only labels in BEAM_ARRAY_SUBRECORD_IDS can be encoded,
+        and a non-empty scaled array also needs an entry in
+        DEFAULT_PING_SCALE_FACTORS or in `scale_factors`. Omit
+        record['Beams'], or pass an empty dictionary, for a ping with no
+        beam arrays.
 
         record['SensorSpecificID'] and record['SensorSpecific'], if
         present, together describe one vendor sensor-specific subrecord,
@@ -8466,9 +8517,7 @@ def _encode_swath_bathymetry_ping(record, scale_factors=None, major_version=3):
 
     g = record.get
     number_beams = int(record['NumberBeams'])
-    beams = record.get('Beams')
-    if beams is None:
-        beams = {}
+    beams = _present_columns(record.get('Beams'))
 
     out = struct.pack('>2I', *_gsf_epoch(record['PingTime']))
     out += struct.pack('>i', _gsf_round(record['Longitude_deg'] * 1.0e7))
@@ -8514,6 +8563,11 @@ def _encode_swath_bathymetry_ping(record, scale_factors=None, major_version=3):
             continue
 
         subrecord_id = BEAM_ARRAY_SUBRECORD_IDS[label]
+        if len(values) == 0:
+            # An empty array is written as a zero-length subrecord. It holds
+            # no values to scale, so no scale factor is written for it.
+            array_subrecords += struct.pack('>I', subrecord_id << 24)
+            continue
         multiplier, offset, width, signed = sf_table[subrecord_id]
         used_scale_factors[subrecord_id] = (float(multiplier), float(offset), width << 4)
         array_subrecords += _encode_ping_array(subrecord_id, values, multiplier, offset, signed, width)
@@ -9262,10 +9316,19 @@ class gsf():
                 print("  %-*s : %s" % (width, k, v))
         for note in record.get('Notes', []):
             print("  # %s" % note)
-        beams = record.get('Beams')
-        if _table_length(beams):
+        # Columns with one value per beam print as one table. A column that
+        # is present but has some other length (an empty array from a
+        # zero-length subrecord, or beam flags of an unexpected size)
+        # cannot share that table, so each one is noted on its own line.
+        beams = _present_columns(record.get('Beams'))
+        number_beams = record.get('NumberBeams')
+        per_beam = {k: v for k, v in beams.items() if len(v) == number_beams}
+        for label, values in beams.items():
+            if label not in per_beam:
+                print("  # %s: %d values for %s beams" % (label, len(values), number_beams))
+        if _table_length(per_beam):
             print("-- Beams --")
-            print(gsf._table_to_string(beams, 'Beam'))
+            print(gsf._table_to_string(per_beam, 'Beam'))
         intensity_record = record.get('IntensityTimeSeries')
         if intensity_record:
             scalar_items = {k: v for k, v in intensity_record.items() if k not in ('Beams', 'Samples')}
@@ -9678,9 +9741,7 @@ class gsf():
             raise ValueError(
                 "auto_scale=True and an explicit scale_factors= override are mutually exclusive")
 
-        beams = record.get('Beams')
-        if beams is None:
-            beams = {}
+        beams = _present_columns(record.get('Beams'))
 
         if auto_scale:
             # Resolve one (multiplier, offset, width, signed) scale
@@ -9688,10 +9749,12 @@ class gsf():
             # building the same shape of dict write_swath_bathymetry_ping()
             # would otherwise accept as an explicit scale_factors=
             # override -- BeamFlags/QualityFlags are excluded since they
-            # aren't scaled at all (see _beam_array_subrecord_id()).
+            # aren't scaled at all (see _beam_array_subrecord_id()), and
+            # so are empty arrays, which are written without a scale
+            # factor.
             scale_factors = {}
             for label in beams:
-                if label in ('BeamFlags', 'QualityFlags'):
+                if label in ('BeamFlags', 'QualityFlags') or len(beams[label]) == 0:
                     continue
                 subrecord_id = _beam_array_subrecord_id(label)
                 target_multiplier, _default_offset, width, signed = DEFAULT_PING_SCALE_FACTORS[subrecord_id]

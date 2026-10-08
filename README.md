@@ -211,9 +211,17 @@ A decoded record is one dictionary. Its fixed fields sit at the top level,
 and its per-beam data sits in tables: dictionaries mapping each column
 name to a `numpy` array with one element per beam.
 
+A ping's `Beams` table always has a column for every beam array GSF
+defines, one for each label in `BEAM_ARRAY_SUBRECORD_IDS`. A column is
+`None` when the ping did not carry that subrecord, so
+`d["Beams"][label] is None` tells you whether it was present.
+`BEAM_ARRAY_SUBRECORD_IDS[label]` gives the GSF subrecord id each column
+comes from. This ping carries 12 of them:
+
 ```python
 for k, v in d["Beams"].items():
-    print(f"d['Beams'][{k!r}]".ljust(40), type(v).__name__, getattr(v, "shape", ""))
+    if v is not None:
+        print(f"d['Beams'][{k!r}]".ljust(40), type(v).__name__, getattr(v, "shape", ""))
 ```
 
 ```
@@ -274,7 +282,18 @@ applies as `gain[its["Samples"]["Beam"]]`, and a range-dependent
 correction can be computed directly from `its["Samples"]["RangeSample"]`.
 
 Any table converts to a `pandas.DataFrame` in a single call when that is
-more convenient for analysis, for example `pd.DataFrame(d["Beams"])`.
+more convenient for analysis, for example
+`pd.DataFrame(d["IntensityTimeSeries"]["Samples"])`. For a ping's
+`Beams` table, leave out the absent columns first:
+`pd.DataFrame({k: v for k, v in d["Beams"].items() if v is not None})`.
+
+A few unusual subrecords decode to something other than one value per
+beam. A zero-length beam array subrecord, which is present but holds no
+values, decodes to an empty array. A beam flags subrecord whose size is
+not one byte per beam decodes to the bytes it holds, and the ping's
+`Notes` list records the mismatch. A beam array that cannot be decoded at
+all, because no scale factors are available for it or it uses gsflib's
+run-length compression, stays `None`, and `Notes` says why.
 
 `iter_records()` indexes the file on first use (`gsf.index_file()`,
 which builds `G.Index`, a `pandas.DataFrame` with one row per record) and

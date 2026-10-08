@@ -914,7 +914,7 @@ class TestDecodeSwathBathymetryPingSynthetic:
 
         record = _decode_swath_bathymetry_ping(payload, major_version=2, scale_factors={})
 
-        assert record['Beams'] == {}
+        assert all(column is None for column in record['Beams'].values())
         assert len(record['Notes']) == 1
         assert "no scale factors available" in record['Notes'][0]
 
@@ -928,7 +928,7 @@ class TestDecodeSwathBathymetryPingSynthetic:
 
         record = _decode_swath_bathymetry_ping(payload, major_version=2, scale_factors={})
 
-        assert record['Beams'] == {}
+        assert all(column is None for column in record['Beams'].values())
         assert len(record['Notes']) == 1
         assert "subrecord id 154 (4 bytes) not decoded" in record['Notes'][0]
 
@@ -943,6 +943,65 @@ class TestDecodeSwathBathymetryPingSynthetic:
 
         assert record['Notes'] == ["subrecord id 154 (0 bytes) not decoded"]
 
+    def test_beams_has_every_column_and_none_marks_absent_subrecords(self):
+        # 'Beams' always has a column for every beam array. Only the
+        # subrecords the ping carries are filled in; the rest stay None.
+        payload = self._fixed_header(2) + self._scale_factors_subrecord({1: (100.0, 0)}) \
+            + self._array_subrecord(1, [1000, 1050], '>H')
+
+        record = _decode_swath_bathymetry_ping(payload, major_version=2, scale_factors={})
+        beams = record['Beams']
+
+        assert list(beams) == list(BEAM_ARRAY_SUBRECORD_IDS)
+        assert list(beams['Depth_m']) == pytest.approx([10.0, 10.5])
+        assert all(beams[label] is None for label in beams if label != 'Depth_m')
+
+    def test_zero_length_scaled_array_decodes_to_empty_array(self):
+        # A zero-length depth array is present but holds no values. It
+        # decodes to an empty array, with or without scale factors for it,
+        # rather than leaving the column None as if the subrecord were absent.
+        with_scale_factors = self._fixed_header(2) \
+            + self._scale_factors_subrecord({1: (100.0, 0)}) + self._array_subrecord(1, [], '>H')
+        without_scale_factors = self._fixed_header(2) + self._array_subrecord(1, [], '>H')
+
+        for payload in (with_scale_factors, without_scale_factors):
+            record = _decode_swath_bathymetry_ping(payload, major_version=2, scale_factors={})
+            assert record['Beams']['Depth_m'] is not None
+            assert len(record['Beams']['Depth_m']) == 0
+            assert record['Notes'] == []
+
+    def test_zero_length_flag_arrays_decode_to_empty_arrays(self):
+        payload = self._fixed_header(3) + self._array_subrecord(15, [], '>B') \
+            + self._array_subrecord(16, [], '>B')
+
+        record = _decode_swath_bathymetry_ping(payload, major_version=2, scale_factors={})
+
+        assert len(record['Beams']['QualityFlags']) == 0
+        assert len(record['Beams']['BeamFlags']) == 0
+        assert record['Notes'] == []
+
+    def test_beam_flags_of_unexpected_size_are_kept_with_a_note(self):
+        # Two bytes of beam flags for a three-beam ping: the bytes are
+        # kept, so the column shows the subrecord was present, and a note
+        # records that the size does not match the number of beams.
+        payload = self._fixed_header(3) + self._array_subrecord(16, [7, 9], '>B')
+
+        record = _decode_swath_bathymetry_ping(payload, major_version=2, scale_factors={})
+
+        assert list(record['Beams']['BeamFlags']) == [7, 9]
+        assert record['Notes'] == ["BeamFlags (2 bytes) does not match NumberBeams (3)"]
+
+    def test_undecodable_scaled_array_stays_none(self):
+        # With no scale factors, a non-empty depth array cannot be
+        # decoded. That is the one case in which a present subrecord leaves
+        # its column None, and its note says why.
+        payload = self._fixed_header(2) + self._array_subrecord(1, [100, 200], '>H')
+
+        record = _decode_swath_bathymetry_ping(payload, major_version=2, scale_factors={})
+
+        assert record['Beams']['Depth_m'] is None
+        assert "no scale factors available" in record['Notes'][0]
+
     def test_known_vendor_specific_subrecord_reported_by_name(self):
         # A vendor "_SPECIFIC" subrecord with no field-level decoder here
         # (id 133 = EM710_SPECIFIC) is still reported by its proper name,
@@ -951,7 +1010,7 @@ class TestDecodeSwathBathymetryPingSynthetic:
 
         record = _decode_swath_bathymetry_ping(payload, major_version=2, scale_factors={})
 
-        assert record['Beams'] == {}
+        assert all(column is None for column in record['Beams'].values())
         assert len(record['Notes']) == 1
         assert "EM710_SPECIFIC (133, 4 bytes) not decoded" in record['Notes'][0]
 
@@ -1078,7 +1137,79 @@ class TestBeamArraySubrecordIds:
         decoded = _decode_swath_bathymetry_ping(
             _encode_swath_bathymetry_ping(record), major_version=3, scale_factors={})
 
-        assert set(decoded['Beams']) == set(writable)
+        present = {label for label, column in decoded['Beams'].items() if column is not None}
+        assert present == set(writable)
+
+
+class TestBeamsTemplateWriting:
+    @staticmethod
+    def _ping(**beams):
+        record = new_swath_bathymetry_ping()
+        record.update(PingTime=1724650073.72, Longitude_deg=-169.0, Latitude_deg=-14.2,
+                      NumberBeams=3)
+        record['Beams'].update(beams)
+        return record
+
+    def test_template_has_every_beam_column_set_to_none(self):
+        beams = new_swath_bathymetry_ping()['Beams']
+        assert list(beams) == list(BEAM_ARRAY_SUBRECORD_IDS)
+        assert all(column is None for column in beams.values())
+
+    def test_none_columns_are_not_written(self):
+        # The full template, with only depth filled in, must encode exactly
+        # as a hand-built 'Beams' dictionary holding only depth does.
+        from_template = self._ping(Depth_m=[10.0, 10.5, 9.95])
+        hand_built = dict(from_template, Beams={'Depth_m': [10.0, 10.5, 9.95]})
+
+        assert _encode_swath_bathymetry_ping(from_template) \
+            == _encode_swath_bathymetry_ping(hand_built)
+
+    def test_empty_array_written_as_zero_length_subrecord_and_read_back(self):
+        # An empty array, such as one inserted to satisfy a validation
+        # profile, is written as a zero-length subrecord with no scale
+        # factor, decodes back to an empty array, and re-encodes to the
+        # same bytes.
+        record = self._ping(Depth_m=[10.0, 10.5, 9.95], AlongTrack_m=[], BeamFlags=[])
+        payload = _encode_swath_bathymetry_ping(record)
+
+        decoded = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
+
+        assert len(decoded['Beams']['AlongTrack_m']) == 0
+        assert len(decoded['Beams']['BeamFlags']) == 0
+        assert decoded['Beams']['AcrossTrack_m'] is None
+        assert _encode_swath_bathymetry_ping(decoded) == payload
+
+    def test_empty_obsolete_array_can_be_written(self):
+        # The obsolete error arrays have no encoder for values, but an
+        # empty one needs no scale factor, so it can still be written.
+        record = self._ping(Depth_m=[10.0, 10.5, 9.95], DepthError_m=[])
+        decoded = _decode_swath_bathymetry_ping(
+            _encode_swath_bathymetry_ping(record), major_version=3, scale_factors={})
+
+        assert len(decoded['Beams']['DepthError_m']) == 0
+
+    def test_auto_scale_skips_none_and_empty_columns(self, tmp_path):
+        path = tmp_path / "auto_scale.gsf"
+        G = gsf(str(path), auto_scale=True)
+        G.write_header()
+        G.write_swath_bathymetry_ping(self._ping(Depth_m=[10.0, 10.5, 9.95], AlongTrack_m=[]))
+        G.closeFile()
+
+        _record_type, _offset, decoded = next(gsf(str(path)).iter_records('SWATH_BATHYMETRY_PING'))
+
+        assert list(decoded['Beams']['Depth_m']) == pytest.approx([10.0, 10.5, 9.95], abs=0.001)
+        assert len(decoded['Beams']['AlongTrack_m']) == 0
+
+    def test_print_shows_per_beam_table_and_notes_other_columns(self, capsys):
+        record = self._ping(Depth_m=np.array([10.0, 10.5, 9.95]), AlongTrack_m=np.empty(0))
+
+        gsf._print_ping_record(record)
+
+        out = capsys.readouterr().out
+        assert "-- Beams --" in out
+        assert "Depth_m" in out
+        assert "# AlongTrack_m: 0 values for 3 beams" in out
+        assert "AcrossTrack_m" not in out
 
 
 class TestDecodeElacMkIISpecific:
