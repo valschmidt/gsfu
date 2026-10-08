@@ -337,6 +337,19 @@ _PING_ARRAY_SUBRECORDS = {
     31: ("TVG_dB", "TVG_dB", False),
 }
 
+#: Maps each column label used in a decoded swath bathymetry ping's 'Beams'
+#: table (for example 'Depth_m' or 'BeamFlags') to the GSF subrecord id of
+#: the beam array it holds (gsf.h: GSF_SWATH_BATHY_SUBRECORD_*_ARRAY), in
+#: subrecord id order. It covers every scaled beam array in
+#: _PING_ARRAY_SUBRECORDS, plus the beam flags and quality flags arrays,
+#: which are stored without scale factors. Use it to find which subrecord a
+#: column came from, or which column a subrecord id is decoded into.
+BEAM_ARRAY_SUBRECORD_IDS = dict(sorted(
+    [(label, sid) for sid, (_attr, label, _signed) in _PING_ARRAY_SUBRECORDS.items()]
+    + [('QualityFlags', _SUBRECORD_QUALITY_FLAGS_ARRAY),
+       ('BeamFlags', _SUBRECORD_BEAM_FLAGS_ARRAY)],
+    key=lambda item: item[1]))
+
 #: Subrecord ids decoded into an integer rather than a double (gsflib decodes
 #: these into an unsigned short field via DecodeFromByteToUnsignedShortArray).
 _PING_ARRAY_INTEGER_SUBRECORDS = {22, 23, 25}
@@ -8266,34 +8279,22 @@ _PING_SENSOR_SPECIFIC_CODECS[_SUBRECORD_KMALL_SPECIFIC] = (
     "KMALL", _decode_kmall_specific, _encode_kmall_specific)
 
 
-#: label (as used in tables['Beams']/_PING_ARRAY_SUBRECORDS) -> subrecordID.
-_LABEL_TO_SUBRECORD_ID = {label: sid for sid, (_attr, label, _signed) in _PING_ARRAY_SUBRECORDS.items()}
-
-
 def _beam_array_subrecord_id(label):
     """
     Resolve a beam-array column label (for example 'Depth_m' or
-    'AcrossTrack_m', as used as a key in record['Beams'] and in
-    _PING_ARRAY_SUBRECORDS) to the GSF beam-array subrecord id it
-    corresponds to. The two special-cased labels 'BeamFlags' and
-    'QualityFlags' are resolved directly, since those two arrays are
-    encoded and decoded separately from the rest of the scaled beam
-    arrays and so are not present in _LABEL_TO_SUBRECORD_ID; every other
-    label is looked up in _LABEL_TO_SUBRECORD_ID.
+    'AcrossTrack_m', as used as a key in record['Beams']) to the GSF
+    beam-array subrecord id it corresponds to, by looking it up in
+    BEAM_ARRAY_SUBRECORD_IDS. Unlike a plain dictionary lookup, an unknown
+    label raises a KeyError whose message says what went wrong.
 
     :param label: the beam-array column label to resolve.
 
     :return: the matching GSF beam-array subrecord id, as an int.
 
-    :raises KeyError: `label` does not match 'BeamFlags', 'QualityFlags',
-        or any entry in _LABEL_TO_SUBRECORD_ID.
+    :raises KeyError: `label` is not a key of BEAM_ARRAY_SUBRECORD_IDS.
     """
-    if label == 'BeamFlags':
-        return _SUBRECORD_BEAM_FLAGS_ARRAY
-    if label == 'QualityFlags':
-        return _SUBRECORD_QUALITY_FLAGS_ARRAY
-    if label in _LABEL_TO_SUBRECORD_ID:
-        return _LABEL_TO_SUBRECORD_ID[label]
+    if label in BEAM_ARRAY_SUBRECORD_IDS:
+        return BEAM_ARRAY_SUBRECORD_IDS[label]
     raise KeyError("no known ping array subrecord for beams column %r" % label)
 
 
@@ -8512,7 +8513,7 @@ def _encode_swath_bathymetry_ping(record, scale_factors=None, major_version=3):
             array_subrecords += _encode_quality_flags_array(values)
             continue
 
-        subrecord_id = _LABEL_TO_SUBRECORD_ID[label]
+        subrecord_id = BEAM_ARRAY_SUBRECORD_IDS[label]
         multiplier, offset, width, signed = sf_table[subrecord_id]
         used_scale_factors[subrecord_id] = (float(multiplier), float(offset), width << 4)
         array_subrecords += _encode_ping_array(subrecord_id, values, multiplier, offset, signed, width)

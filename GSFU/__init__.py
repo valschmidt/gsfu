@@ -1,4 +1,5 @@
 from .gsfu import (
+    BEAM_ARRAY_SUBRECORD_IDS,
     FileMode,
     GSF_MAX_RECORD_SIZE,
     GSF_NEXT_RECORD,
@@ -21,6 +22,7 @@ from .gsfu import (
 )
 
 __all__ = [
+    "BEAM_ARRAY_SUBRECORD_IDS",
     "FileMode",
     "GSF_MAX_RECORD_SIZE",
     "GSF_NEXT_RECORD",

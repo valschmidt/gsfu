@@ -25,6 +25,7 @@ import numpy as np
 import pytest
 
 from GSFU.gsfu import (
+    BEAM_ARRAY_SUBRECORD_IDS,
     GSF_RECORD_FRAMING_SIZE,
     GSF_VERSION_SIZE,
     GSFPartialRecordAtEndOfFileError,
@@ -84,6 +85,7 @@ from GSFU.gsfu import (
     gsf,
     gsf_checksum,
     main,
+    new_swath_bathymetry_ping,
     resolve_record_type,
 )
 
@@ -1027,6 +1029,56 @@ class TestSensorSpecificSubrecordNames:
     def test_covers_ids_102_through_157_except_154(self):
         expected = set(range(102, 158)) - {154}
         assert set(_SENSOR_SPECIFIC_SUBRECORD_NAMES) == expected
+
+
+class TestBeamArraySubrecordIds:
+    def test_covers_every_beam_array_except_the_intensity_series(self):
+        # gsf.h defines beam array subrecord ids 1 through 31. Id 21, the
+        # intensity series, is decoded into record['IntensityTimeSeries']
+        # rather than a 'Beams' column, so it is the only one left out.
+        assert set(BEAM_ARRAY_SUBRECORD_IDS.values()) == set(range(1, 32)) - {21}
+
+    def test_ids_are_unique(self):
+        assert len(set(BEAM_ARRAY_SUBRECORD_IDS.values())) == len(BEAM_ARRAY_SUBRECORD_IDS)
+
+    def test_ordered_by_subrecord_id(self):
+        ids = list(BEAM_ARRAY_SUBRECORD_IDS.values())
+        assert ids == sorted(ids)
+
+    def test_ids_match_gsf_h(self):
+        # A spot check of ids that are easy to confuse, against the
+        # GSF_SWATH_BATHY_SUBRECORD_* defines in gsf.h.
+        assert BEAM_ARRAY_SUBRECORD_IDS['Depth_m'] == 1
+        assert BEAM_ARRAY_SUBRECORD_IDS['AcrossTrack_m'] == 2
+        assert BEAM_ARRAY_SUBRECORD_IDS['AlongTrack_m'] == 3
+        assert BEAM_ARRAY_SUBRECORD_IDS['TravelTime_s'] == 4
+        assert BEAM_ARRAY_SUBRECORD_IDS['NominalDepth_m'] == 14
+        assert BEAM_ARRAY_SUBRECORD_IDS['QualityFlags'] == 15
+        assert BEAM_ARRAY_SUBRECORD_IDS['BeamFlags'] == 16
+        assert BEAM_ARRAY_SUBRECORD_IDS['TVG_dB'] == 31
+
+    def test_exported_from_package(self):
+        import GSFU
+        assert GSFU.BEAM_ARRAY_SUBRECORD_IDS is BEAM_ARRAY_SUBRECORD_IDS
+
+    def test_every_writable_label_round_trips_through_the_codec(self):
+        # Writing a ping with every column in the map, then decoding it,
+        # must bring back every one of those columns under the same label.
+        # The three error arrays that gsf.h marks obsolete (ids 11 through
+        # 13) are left out: gsf_dec.c decodes them, but gsf_enc.c has no
+        # encoder for them, so this library does not write them either.
+        obsolete = {'DepthError_m', 'AcrossTrackError_m', 'AlongTrackError_m'}
+        writable = [label for label in BEAM_ARRAY_SUBRECORD_IDS if label not in obsolete]
+        number_beams = 4
+        record = new_swath_bathymetry_ping()
+        record.update(PingTime=1724650073.72, Longitude_deg=-169.0, Latitude_deg=-14.2,
+                      NumberBeams=number_beams)
+        record['Beams'] = {label: np.ones(number_beams) for label in writable}
+
+        decoded = _decode_swath_bathymetry_ping(
+            _encode_swath_bathymetry_ping(record), major_version=3, scale_factors={})
+
+        assert set(decoded['Beams']) == set(writable)
 
 
 class TestDecodeElacMkIISpecific:
