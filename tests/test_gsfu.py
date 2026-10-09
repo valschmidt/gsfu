@@ -1171,25 +1171,41 @@ class TestBeamArraySubrecordIds:
         import GSFU
         assert GSFU.BEAM_ARRAY_SUBRECORD_IDS is BEAM_ARRAY_SUBRECORD_IDS
 
-    def test_every_writable_label_round_trips_through_the_codec(self):
+    def test_every_label_round_trips_through_the_codec(self):
         # Writing a ping with every column in the map, then decoding it,
-        # must bring back every one of those columns under the same label.
-        # The three error arrays that gsf.h marks obsolete (ids 11 through
-        # 13) are left out: gsf_dec.c decodes them, but gsf_enc.c has no
-        # encoder for them, so this library does not write them either.
-        obsolete = {'DepthError_m', 'AcrossTrackError_m', 'AlongTrackError_m'}
-        writable = [label for label in BEAM_ARRAY_SUBRECORD_IDS if label not in obsolete]
+        # must bring back every one of those columns under the same label,
+        # including the three error arrays that gsf.h marks obsolete (ids
+        # 11 through 13), which gsf_enc.c still encodes.
         number_beams = 4
         record = new_swath_bathymetry_ping()
         record.update(PingTime=1724650073.72, Longitude_deg=-169.0, Latitude_deg=-14.2,
                       NumberBeams=number_beams)
-        record['Beams'] = {label: np.ones(number_beams) for label in writable}
+        record['Beams'] = {label: np.ones(number_beams) for label in BEAM_ARRAY_SUBRECORD_IDS}
 
         decoded = _decode_swath_bathymetry_ping(
             _encode_swath_bathymetry_ping(record), major_version=3, scale_factors={})
 
         present = {label for label, column in decoded['Beams'].items() if column is not None}
-        assert present == set(writable)
+        assert present == set(BEAM_ARRAY_SUBRECORD_IDS)
+        assert list(decoded['Beams']['DepthError_m']) == pytest.approx([1.0] * number_beams)
+
+    def test_obsolete_error_arrays_are_written_as_two_byte_values(self):
+        # gsf_enc.c writes ids 11 through 13 only with EncodeTwoByteArray(),
+        # and gsf_dec.c reads them only with DecodeTwoByteArray().
+        record = new_swath_bathymetry_ping()
+        record.update(PingTime=1724650073.72, Longitude_deg=-169.0, Latitude_deg=-14.2,
+                      NumberBeams=3)
+        record['Beams'].update(DepthError_m=[0.25, 1.5, 3.0])
+        payload = _encode_swath_bathymetry_ping(record)
+
+        pos = 56   # the fixed GSF 3.x ping header
+        sizes = {}
+        while len(payload) - pos > 4:
+            word, = struct.unpack_from('>I', payload, pos)
+            sizes[word >> 24] = word & 0x00FFFFFF
+            pos += 4 + (word & 0x00FFFFFF)
+
+        assert sizes[11] == 2 * 3
 
 
 class TestBeamsTemplateWriting:

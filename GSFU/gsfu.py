@@ -7115,6 +7115,12 @@ DEFAULT_PING_SCALE_FACTORS = {
     8: (100.0, 0.0, 2, False),       # EchoWidth_s
     9: (1.0, 0.0, 1, False),         # QualityFactor
     10: (100.0, 0.0, 1, True),       # ReceiveHeave_m
+    # gsf.h marks these three obsolete (VerticalError_m and
+    # HorizontalError_m replace them), but gsf_enc.c still encodes them,
+    # always as two-byte unsigned arrays.
+    11: (100.0, 0.0, 2, False),      # DepthError_m
+    12: (100.0, 0.0, 2, False),      # AcrossTrackError_m
+    13: (100.0, 0.0, 2, False),      # AlongTrackError_m
     17: (1.0, 0.0, 1, True),         # SignalToNoise_dB
     18: (100.0, 90.0, 2, False),     # BeamAngleForward_deg
     19: (100.0, 0.0, 2, False),      # VerticalError_m
