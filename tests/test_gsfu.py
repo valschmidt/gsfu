@@ -1006,6 +1006,33 @@ class TestDecodeSwathBathymetryPingSynthetic:
         assert list(record['Beams']['BeamFlags']) == [7, 9]
         assert record['Notes'] == ["BeamFlags (2 bytes) does not match NumberBeams (3)"]
 
+    def test_zero_length_scale_factors_keep_the_carried_ones(self):
+        # A zero-length scale factors subrecord has no table to read. It is
+        # noted and skipped, and the depth array after it still decodes with
+        # the scale factors carried forward from the previous ping.
+        carried = {}
+        first_ping = self._fixed_header(2) + self._scale_factors_subrecord({1: (100.0, 0)}) \
+            + self._array_subrecord(1, [1000, 1050], '>H')
+        _decode_swath_bathymetry_ping(first_ping, major_version=2, scale_factors=carried)
+        second_ping = self._fixed_header(2) + self._array_subrecord(100, [], '>B') \
+            + self._array_subrecord(1, [2000, 500], '>H')
+
+        record = _decode_swath_bathymetry_ping(second_ping, major_version=2, scale_factors=carried)
+
+        assert record['Notes'] == ["ScaleFactors (0 bytes) not decoded: too short for its table"]
+        assert list(record['Beams']['Depth_m']) == pytest.approx([20.0, 5.0])
+
+    def test_scale_factors_shorter_than_their_declared_table_are_noted(self):
+        # The table declares two entries but the subrecord holds only one.
+        # The decoder must not read the following subrecord as the second.
+        body = struct.pack('>I', 2) + struct.pack('>IIi', 1 << 24, 100, 0)
+        payload = self._fixed_header(2) + struct.pack('>I', (100 << 24) | len(body)) + body \
+            + self._array_subrecord(1, [1000, 1050], '>H')
+
+        record = _decode_swath_bathymetry_ping(payload, major_version=2, scale_factors={})
+
+        assert record['Notes'][0] == "ScaleFactors (16 bytes) not decoded: too short for its table"
+
     def test_undecodable_scaled_array_stays_none(self):
         # With no scale factors, a non-empty depth array cannot be
         # decoded. That is the one case in which a present subrecord leaves

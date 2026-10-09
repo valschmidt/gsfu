@@ -6273,9 +6273,18 @@ def _decode_swath_bathymetry_ping(payload, major_version, scale_factors, decode_
         pos += 4
 
         if subrecord_id == _SUBRECORD_SCALE_FACTORS:
-            table, _consumed = _decode_scale_factors(payload, pos)
-            scale_factors.clear()
-            scale_factors.update(table)
+            # A scale factors subrecord too short for the table it declares
+            # (gsflib never writes one, but other tools can) is noted and
+            # skipped, leaving the scale factors carried from earlier pings
+            # in effect.
+            try:
+                table, _consumed = _decode_scale_factors(payload[:pos + subrecord_size], pos)
+            except struct.error:
+                notes.append("ScaleFactors (%d bytes) not decoded: too short for its table"
+                             % subrecord_size)
+            else:
+                scale_factors.clear()
+                scale_factors.update(table)
 
         elif subrecord_id == _SUBRECORD_BEAM_FLAGS_ARRAY:
             # Beam flags are one byte per beam. Every byte the subrecord
