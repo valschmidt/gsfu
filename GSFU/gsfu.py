@@ -8452,9 +8452,9 @@ def _encode_swath_bathymetry_ping(record, scale_factors=None, major_version=3):
         record['Beams'], if present, is a dictionary of {column label:
         array-like} or a pandas.DataFrame, for example {'Depth_m': [...],
         'AcrossTrack_m': [...]}. Every array in it must have length
-        NumberBeams, except that an empty array is written as a
-        zero-length subrecord, with no scale factor. A column whose value
-        is None is not written, so the 'Beams' table from
+        NumberBeams. A column whose value is None, or an empty array, is
+        not written, since gsflib never writes a zero-length subrecord. So
+        the 'Beams' table from
         new_swath_bathymetry_ping() or from a decoded ping can be passed
         in as is. Only labels in BEAM_ARRAY_SUBRECORD_IDS can be encoded,
         and a non-empty scaled array also needs an entry in
@@ -8528,7 +8528,11 @@ def _encode_swath_bathymetry_ping(record, scale_factors=None, major_version=3):
 
     g = record.get
     number_beams = int(record['NumberBeams'])
-    beams = _present_columns(record.get('Beams'))
+    # Empty columns are left out along with absent ones: gsflib never writes
+    # a zero-length subrecord, and gsf_dec.c misreads one that is followed by
+    # another subrecord.
+    beams = {label: values for label, values in _present_columns(record.get('Beams')).items()
+             if len(values)}
 
     out = struct.pack('>2I', *_gsf_epoch(record['PingTime']))
     out += struct.pack('>i', _gsf_round(record['Longitude_deg'] * 1.0e7))
@@ -8574,16 +8578,14 @@ def _encode_swath_bathymetry_ping(record, scale_factors=None, major_version=3):
             continue
 
         subrecord_id = BEAM_ARRAY_SUBRECORD_IDS[label]
-        if len(values) == 0:
-            # An empty array is written as a zero-length subrecord. It holds
-            # no values to scale, so no scale factor is written for it.
-            array_subrecords += struct.pack('>I', subrecord_id << 24)
-            continue
         multiplier, offset, width, signed = sf_table[subrecord_id]
         used_scale_factors[subrecord_id] = (float(multiplier), float(offset), width << 4)
         array_subrecords += _encode_ping_array(subrecord_id, values, multiplier, offset, signed, width)
 
-    out += _encode_scale_factors(used_scale_factors)
+    # gsf_dec.c rejects a scale factors table with no entries, so a ping
+    # without scaled arrays gets no scale factors subrecord at all.
+    if used_scale_factors:
+        out += _encode_scale_factors(used_scale_factors)
     out += array_subrecords
 
     subrecord_id = record.get('SensorSpecificID')

@@ -1206,29 +1206,36 @@ class TestBeamsTemplateWriting:
         assert _encode_swath_bathymetry_ping(from_template) \
             == _encode_swath_bathymetry_ping(hand_built)
 
-    def test_empty_array_written_as_zero_length_subrecord_and_read_back(self):
-        # An empty array, such as one inserted to satisfy a validation
-        # profile, is written as a zero-length subrecord with no scale
-        # factor, decodes back to an empty array, and re-encodes to the
-        # same bytes.
-        record = self._ping(Depth_m=[10.0, 10.5, 9.95], AlongTrack_m=[], BeamFlags=[])
-        payload = _encode_swath_bathymetry_ping(record)
+    def test_empty_arrays_are_not_written(self):
+        # gsflib never writes a zero-length subrecord, and gsf_dec.c misreads
+        # one that another subrecord follows, so an empty array is left out
+        # exactly as an absent one is.
+        with_empty = self._ping(Depth_m=[10.0, 10.5, 9.95], AlongTrack_m=[], BeamFlags=[])
+        depth_only = self._ping(Depth_m=[10.0, 10.5, 9.95])
 
+        payload = _encode_swath_bathymetry_ping(with_empty)
         decoded = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
 
-        assert len(decoded['Beams']['AlongTrack_m']) == 0
-        assert len(decoded['Beams']['BeamFlags']) == 0
-        assert decoded['Beams']['AcrossTrack_m'] is None
-        assert _encode_swath_bathymetry_ping(decoded) == payload
+        assert payload == _encode_swath_bathymetry_ping(depth_only)
+        assert decoded['Beams']['AlongTrack_m'] is None
+        assert decoded['Beams']['BeamFlags'] is None
 
-    def test_empty_obsolete_array_can_be_written(self):
-        # The obsolete error arrays have no encoder for values, but an
-        # empty one needs no scale factor, so it can still be written.
-        record = self._ping(Depth_m=[10.0, 10.5, 9.95], DepthError_m=[])
-        decoded = _decode_swath_bathymetry_ping(
-            _encode_swath_bathymetry_ping(record), major_version=3, scale_factors={})
+    def test_ping_without_scaled_arrays_has_no_scale_factors_subrecord(self):
+        # gsf_dec.c rejects a scale factors table with no entries, so a ping
+        # carrying no scaled arrays is written with no scale factors at all.
+        # A beam flags array, which is not scaled, does not need them.
+        for beams in ({}, {'BeamFlags': [0, 1, 0]}):
+            payload = _encode_swath_bathymetry_ping(self._ping(**beams))
+            decoded = _decode_swath_bathymetry_ping(payload, major_version=3, scale_factors={})
 
-        assert len(decoded['Beams']['DepthError_m']) == 0
+            ids = []
+            pos = 56   # the fixed GSF 3.x ping header
+            while len(payload) - pos > 4:
+                word, = struct.unpack_from('>I', payload, pos)
+                ids.append(word >> 24)
+                pos += 4 + (word & 0x00FFFFFF)
+            assert 100 not in ids
+            assert decoded['Notes'] == []
 
     def test_auto_scale_skips_none_and_empty_columns(self, tmp_path):
         path = tmp_path / "auto_scale.gsf"
@@ -1240,7 +1247,7 @@ class TestBeamsTemplateWriting:
         _record_type, _offset, decoded = next(gsf(str(path)).iter_records('SWATH_BATHYMETRY_PING'))
 
         assert list(decoded['Beams']['Depth_m']) == pytest.approx([10.0, 10.5, 9.95], abs=0.001)
-        assert len(decoded['Beams']['AlongTrack_m']) == 0
+        assert decoded['Beams']['AlongTrack_m'] is None
 
     def test_print_shows_per_beam_table_and_notes_other_columns(self, capsys):
         record = self._ping(Depth_m=np.array([10.0, 10.5, 9.95]), AlongTrack_m=np.empty(0))
