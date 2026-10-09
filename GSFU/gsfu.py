@@ -6193,8 +6193,9 @@ def _decode_swath_bathymetry_ping(payload, major_version, scale_factors, decode_
         BEAM_ARRAY_SUBRECORD_IDS. When the ping carries a beam array
         subrecord, its column holds the decoded array; otherwise the
         column is None, so `record['Beams'][label] is None` tests whether
-        the ping carried that subrecord. A zero-length subrecord decodes
-        to an empty array. A beam flags subrecord whose size is not one
+        the ping carried that subrecord. A zero-length subrecord that
+        another subrecord follows decodes to an empty array; one that ends
+        the ping is skipped, as gsf_dec.c skips it. A beam flags subrecord whose size is not one
         byte per beam decodes to an array of the bytes it holds, and a
         note records the mismatch. The one case in which a subrecord is
         present but its column stays None is a scaled array that cannot
@@ -6263,10 +6264,11 @@ def _decode_swath_bathymetry_ping(payload, major_version, scale_factors, decode_
     sensor_specific_id = None
     sensor_specific_record = None
 
-    # A subrecord is at least its four-byte identifier word, so one more can
-    # follow whenever at least four bytes remain. Testing for more than four
-    # would silently skip a zero-length subrecord at the end of the ping.
-    while len(payload) - pos >= 4:
+    # Like gsf_dec.c's gsfDecodeSwathBathymetryPing(), stop once four or
+    # fewer bytes remain. A subrecord in those last four bytes could only be
+    # a zero-length one, which gsflib never writes and skips when reading,
+    # so this decoder sees the same subrecords gsflib does.
+    while len(payload) - pos > 4:
         word, = struct.unpack_from('>I', payload, pos)
         subrecord_id = (word >> 24) & 0xFF
         subrecord_size = word & 0x00FFFFFF

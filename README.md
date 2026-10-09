@@ -289,7 +289,11 @@ more convenient for analysis, for example
 
 A few unusual subrecords decode to something other than one value per
 beam. A zero-length beam array subrecord, which is present but holds no
-values, decodes to an empty array. A beam flags subrecord whose size is
+values, decodes to an empty array, unless it is the last subrecord in the
+ping: the reference gsflib library stops reading before such a trailing
+subrecord, and so does `gsfu`, so that both see the same subrecords.
+(gsflib itself never writes a zero-length subrecord, and neither does
+`gsfu`: an empty column is not written.) A beam flags subrecord whose size is
 not one byte per beam decodes to the bytes it holds, and the ping's
 `Notes` list records the mismatch. A beam array that cannot be decoded at
 all, because no scale factors are available for it or it uses gsflib's

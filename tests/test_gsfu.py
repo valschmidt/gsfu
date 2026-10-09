@@ -932,16 +932,18 @@ class TestDecodeSwathBathymetryPingSynthetic:
         assert len(record['Notes']) == 1
         assert "subrecord id 154 (4 bytes) not decoded" in record['Notes'][0]
 
-    def test_zero_length_subrecord_at_end_of_ping_is_not_skipped(self):
-        # A zero-length subrecord is only its four-byte identifier word, so
-        # when it is the last subrecord in the ping exactly four bytes
-        # remain when the decoder reaches it. It must still be read, just as
-        # it would be anywhere else in the subrecord stream.
-        payload = self._fixed_header(1) + self._array_subrecord(154, [], '>B')
+    def test_zero_length_subrecord_at_end_of_ping_is_skipped_as_by_gsflib(self):
+        # gsf_dec.c stops reading subrecords once four or fewer bytes remain,
+        # so it never reads a zero-length subrecord that ends a ping. This
+        # decoder does the same, so it sees the same subrecords gsflib does:
+        # the empty depth array here is absent, not empty.
+        payload = self._fixed_header(1) + self._scale_factors_subrecord({1: (100.0, 0)}) \
+            + self._array_subrecord(1, [], '>H')
 
         record = _decode_swath_bathymetry_ping(payload, major_version=2, scale_factors={})
 
-        assert record['Notes'] == ["subrecord id 154 (0 bytes) not decoded"]
+        assert record['Beams']['Depth_m'] is None
+        assert record['Notes'] == []
 
     @pytest.mark.parametrize("size_field", [0, 1, 3])
     def test_intensity_series_with_size_below_its_own_word_moves_on(self, size_field):
@@ -972,12 +974,17 @@ class TestDecodeSwathBathymetryPingSynthetic:
         assert all(beams[label] is None for label in beams if label != 'Depth_m')
 
     def test_zero_length_scaled_array_decodes_to_empty_array(self):
-        # A zero-length depth array is present but holds no values. It
-        # decodes to an empty array, with or without scale factors for it,
-        # rather than leaving the column None as if the subrecord were absent.
+        # A zero-length depth array that another subrecord follows is
+        # present but holds no values. It decodes to an empty array, with or
+        # without scale factors for it, rather than leaving the column None
+        # as if the subrecord were absent. (The beam flags after it are only
+        # there so that it does not end the ping.)
+        beam_flags = self._array_subrecord(16, [0, 1], '>B')
         with_scale_factors = self._fixed_header(2) \
-            + self._scale_factors_subrecord({1: (100.0, 0)}) + self._array_subrecord(1, [], '>H')
-        without_scale_factors = self._fixed_header(2) + self._array_subrecord(1, [], '>H')
+            + self._scale_factors_subrecord({1: (100.0, 0)}) + self._array_subrecord(1, [], '>H') \
+            + beam_flags
+        without_scale_factors = self._fixed_header(2) + self._array_subrecord(1, [], '>H') \
+            + beam_flags
 
         for payload in (with_scale_factors, without_scale_factors):
             record = _decode_swath_bathymetry_ping(payload, major_version=2, scale_factors={})
@@ -986,14 +993,16 @@ class TestDecodeSwathBathymetryPingSynthetic:
             assert record['Notes'] == []
 
     def test_zero_length_flag_arrays_decode_to_empty_arrays(self):
+        # The unrecognized subrecord at the end keeps the two empty flag
+        # arrays from ending the ping.
         payload = self._fixed_header(3) + self._array_subrecord(15, [], '>B') \
-            + self._array_subrecord(16, [], '>B')
+            + self._array_subrecord(16, [], '>B') + self._array_subrecord(154, [7], '>B')
 
         record = _decode_swath_bathymetry_ping(payload, major_version=2, scale_factors={})
 
         assert len(record['Beams']['QualityFlags']) == 0
         assert len(record['Beams']['BeamFlags']) == 0
-        assert record['Notes'] == []
+        assert record['Notes'] == ["subrecord id 154 (1 bytes) not decoded"]
 
     def test_beam_flags_of_unexpected_size_are_kept_with_a_note(self):
         # Two bytes of beam flags for a three-beam ping: the bytes are
