@@ -943,6 +943,21 @@ class TestDecodeSwathBathymetryPingSynthetic:
 
         assert record['Notes'] == ["subrecord id 154 (0 bytes) not decoded"]
 
+    @pytest.mark.parametrize("size_field", [0, 1, 3])
+    def test_intensity_series_with_size_below_its_own_word_moves_on(self, size_field):
+        # The intensity series' size field counts its own four-byte
+        # identifier word, so any value below four is malformed. Decoding
+        # must still move forward to the next subrecord rather than step
+        # backward and read the same word forever.
+        # Since the size counts the identifier word, a value below four
+        # leaves no room for a body, so none follows.
+        payload = self._fixed_header(1) + struct.pack('>I', (21 << 24) | size_field) \
+            + self._array_subrecord(154, [7], '>B')
+
+        record = _decode_swath_bathymetry_ping(payload, major_version=2, scale_factors={})
+
+        assert record['Notes'][-1] == "subrecord id 154 (1 bytes) not decoded"
+
     def test_beams_has_every_column_and_none_marks_absent_subrecords(self):
         # 'Beams' always has a column for every beam array. Only the
         # subrecords the ping carries are filled in; the rest stay None.

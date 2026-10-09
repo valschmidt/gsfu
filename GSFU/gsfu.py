@@ -6322,7 +6322,9 @@ def _decode_swath_bathymetry_ping(payload, major_version, scale_factors, decode_
             # EncodeBRBIntensity() counts its own 4-byte identifier word in
             # this subrecord's size field (gsf_dec.c never reads that size,
             # advancing by the bytes DecodeBRBIntensity() consumed instead).
-            subrecord_size -= 4
+            # A malformed size smaller than that word is treated as an empty
+            # subrecord, so the decoder always moves forward.
+            subrecord_size = max(subrecord_size - 4, 0)
             if not decode_intensity:
                 notes.append(
                     "IntensityTimeSeries (21, %d bytes) not decoded here: "
